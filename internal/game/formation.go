@@ -85,7 +85,7 @@ const repathThreshold = 20.0
 
 // FormationSlot is assigned to one non-leader squad member.
 type FormationSlot struct {
-	Index     int        // slot index in the formation
-	TargetX   float64    // current world-space slot position
-	TargetY   float64
+	Index   int     // slot index in the formation
+	TargetX float64 // current world-space slot position
+	TargetY float64
 }

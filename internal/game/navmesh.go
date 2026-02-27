@@ -77,10 +77,16 @@ type pathNode struct {
 type openList []*pathNode
 
 func (ol openList) Len() int            { return len(ol) }
-func (ol openList) Less(i, j int) bool   { return (ol[i].g + ol[i].h) < (ol[j].g + ol[j].h) }
-func (ol openList) Swap(i, j int)        { ol[i], ol[j] = ol[j], ol[i]; ol[i].index = i; ol[j].index = j }
-func (ol *openList) Push(x interface{})  { n := x.(*pathNode); n.index = len(*ol); *ol = append(*ol, n) }
-func (ol *openList) Pop() interface{}    { old := *ol; n := old[len(old)-1]; old[len(old)-1] = nil; *ol = old[:len(old)-1]; return n }
+func (ol openList) Less(i, j int) bool  { return (ol[i].g + ol[i].h) < (ol[j].g + ol[j].h) }
+func (ol openList) Swap(i, j int)       { ol[i], ol[j] = ol[j], ol[i]; ol[i].index = i; ol[j].index = j }
+func (ol *openList) Push(x interface{}) { n := x.(*pathNode); n.index = len(*ol); *ol = append(*ol, n) }
+func (ol *openList) Pop() interface{} {
+	old := *ol
+	n := old[len(old)-1]
+	old[len(old)-1] = nil
+	*ol = old[:len(old)-1]
+	return n
+}
 
 var dirs = [8][2]int{
 	{1, 0}, {-1, 0}, {0, 1}, {0, -1},

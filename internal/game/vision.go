@@ -4,8 +4,8 @@ import "math"
 
 const (
 	// Default vision parameters.
-	defaultFOVDeg   = 120.0  // field of view in degrees
-	defaultViewDist = 300.0  // max sight range in pixels
+	defaultFOVDeg   = 120.0 // field of view in degrees
+	defaultViewDist = 300.0 // max sight range in pixels
 )
 
 // VisionState tracks a soldier's current look direction and what they see.

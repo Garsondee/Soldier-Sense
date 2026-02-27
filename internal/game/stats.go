@@ -15,10 +15,10 @@ const (
 
 // StanceProfile holds the gameplay modifiers for a stance.
 type StanceProfile struct {
-	SpeedMul    float64 // multiplier on base move speed
-	AccuracyMul float64 // multiplier on base accuracy (higher = better)
-	ProfileMul  float64 // visual/hit profile size multiplier (lower = harder to hit/see)
-	TransitionMs int    // milliseconds to switch INTO this stance
+	SpeedMul     float64 // multiplier on base move speed
+	AccuracyMul  float64 // multiplier on base accuracy (higher = better)
+	ProfileMul   float64 // visual/hit profile size multiplier (lower = harder to hit/see)
+	TransitionMs int     // milliseconds to switch INTO this stance
 }
 
 var stanceProfiles = map[Stance]StanceProfile{
@@ -139,7 +139,7 @@ type SoldierProfile struct {
 func (sp *SoldierProfile) EffectiveSpeed(baseSpeed float64) float64 {
 	stanceMul := sp.Stance.Profile().SpeedMul
 	fitnessMul := 0.6 + 0.4*sp.Physical.EffectiveFitness() // floor at 60% speed
-	fearPenalty := 1.0 - sp.Psych.EffectiveFear()*0.3       // fear slows deliberate movement
+	fearPenalty := 1.0 - sp.Psych.EffectiveFear()*0.3      // fear slows deliberate movement
 	return baseSpeed * stanceMul * fitnessMul * fearPenalty
 }
 
