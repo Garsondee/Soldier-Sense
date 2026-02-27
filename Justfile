@@ -43,11 +43,19 @@ install-golangci-lint:
     @echo "Note that ~/tools/ext/bin is not assumed to be in your PATH"
 
 fmt:
-    go fmt ./cmd/... ./pkg/...
+    go fmt ./cmd/... ./internal/...
 
 # Check formatting without modifying files
 fmt-check:
-    ./tools/bin/go-fmt-check
+    @unformatted_files=$($(go env GOROOT)/bin/gofmt -l ./cmd ./internal); \
+    if [ -n "$unformatted_files" ]; then \
+        echo "Files need formatting:"; \
+        echo "$unformatted_files"; \
+        echo "Run 'go fmt ./...' or 'just fmt' to fix formatting"; \
+        exit 1; \
+    else \
+        echo "All files are properly formatted"; \
+    fi
 
 tidy:
     go mod tidy
