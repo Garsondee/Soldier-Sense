@@ -1,3 +1,9 @@
+# just is a handy way to save and run project-specific commands.
+# The book is at https://just.systems/man/en/
+# Install it from https://github.com/casey/just/releases 
+
+
+[private]
 default:
     @just --list
 
