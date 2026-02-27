@@ -64,7 +64,7 @@ func (sq *Squad) UpdateFormation() {
 	offsets := formationOffsets(sq.Formation, len(sq.Members))
 
 	for i, m := range sq.Members {
-		if i == 0 || !m.formationMember || m.state == SoldierStateDead {
+		if i == 0 || !m.formationMember || m.state == SoldierStateDead || i >= len(offsets) {
 			continue
 		}
 		off := offsets[i]

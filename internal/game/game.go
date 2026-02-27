@@ -39,7 +39,7 @@ func New() *Game {
 }
 
 func (g *Game) initBuildings() {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404 -- game only, crypto/rand not needed
 
 	unit := 64
 	count := 5
@@ -95,7 +95,7 @@ func (g *Game) overlapsAny(r rect) bool {
 }
 
 func (g *Game) initSoldiers() {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404 -- game only, crypto/rand not needed
 	count := 6
 	margin := 32.0
 
@@ -116,7 +116,7 @@ func (g *Game) initSoldiers() {
 }
 
 func (g *Game) initOpFor() {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 999))
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 999)) // #nosec G404 -- game only, crypto/rand not needed
 	count := 6
 	margin := 32.0
 
@@ -148,7 +148,7 @@ func (g *Game) initSquads() {
 
 // randomiseProfiles gives each soldier slightly different stats so behaviour varies.
 func (g *Game) randomiseProfiles() {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 42))
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 42)) // #nosec G404 -- game only, crypto/rand not needed
 	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
 	for _, s := range all {
 		p := &s.profile
