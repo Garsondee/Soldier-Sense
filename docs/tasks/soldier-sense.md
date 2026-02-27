@@ -225,6 +225,7 @@ internal/
   ballistics/     — Projectile simulation, hit detection, suppression
   command/        — Chain of command, order types, radio transmission
   medical/        — Wound model, CASEVAC, mission abort logic
+  intel/           — Intelligence heatmap store, per-team layers, decay, leader queries
   heatmap/        — Player overlay system, painting input, propagation
   terrain/        — Map loading, terrain types, cover values
   physics/        — Sound propagation, signal attenuation
@@ -247,11 +248,11 @@ Given that every soldier is a rich autonomous agent (not a swarm of identical pa
 - [x] Line of sight (ray-vs-AABB)
 
 ### Phase 1 — Soldier Agent Core
-- [ ] Soldier stat model (fitness, skill, experience, fear, morale)
-- [ ] Stance system (standing, crouching, prone)
-- [ ] Vision cone (directional FOV, not omniscient LOS)
-- [ ] Basic decision loop (idle → move → take cover)
-- [ ] Squad grouping (soldiers belong to a squad with a leader)
+- [x] Soldier stat model (fitness, skill, experience, fear, morale)
+- [x] Stance system (standing, crouching, prone)
+- [x] Vision cone (directional FOV, not omniscient LOS)
+- [x] Basic decision loop (idle → move → take cover)
+- [x] Squad grouping (soldiers belong to a squad with a leader)
 
 ### Phase 2 — Ballistics & Combat
 - [ ] Discrete bullet simulation
@@ -275,9 +276,22 @@ Given that every soldier is a rich autonomous agent (not a swarm of identical pa
 - [ ] Order compliance check per soldier
 - [ ] Radio system (signal, garbling, loss of comms)
 
+### Phase 4.5 — Intelligence Heatmaps
+- [ ] `HeatLayer` / `IntelMap` / `IntelStore` data structures (see `design/systems/intelligence-heatmaps.md`)
+- [ ] Write `ContactHeat` from vision contacts each tick
+- [ ] Write `RecentContactHeat` from blackboard threat facts
+- [ ] Write `FriendlyPresenceHeat` and `DangerZoneHeat` from soldier state
+- [ ] Initialise and clear `UnexploredHeat` as cells are seen
+- [ ] Per-tick decay pass on all layers
+- [ ] Leader query functions: `SumInRadius`, `Centroid`, `SampleAt`
+- [ ] Replace crude threat-count logic in Squad Think with map queries
+- [ ] `DangerZoneHeat` feeds A* path cost modifier
+- [ ] Debug rendering: toggleable per-layer colour wash overlays
+
 ### Phase 5 — Player Heatmap Interface
 - [ ] Mouse-paint heatmap overlays on grid
 - [ ] Multiple overlay layers (objective, danger, route, suppress, rally)
+- [ ] Player layers write into dedicated `IntelMap` layers (same infrastructure as Phase 4.5)
 - [ ] Heatmap → platoon leader AI interpretation
 - [ ] Propagation delay through command chain
 - [ ] Visual feedback (translucent colour washes on grid)
