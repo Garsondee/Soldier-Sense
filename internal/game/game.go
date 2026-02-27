@@ -13,6 +13,9 @@ type Game struct {
 	width     int
 	height    int
 	buildings []rect
+	navGrid   *NavGrid
+	soldiers  []*Soldier // red friendlies
+	opfor     []*Soldier // blue OpFor
 }
 
 type rect struct {
@@ -25,6 +28,9 @@ type rect struct {
 func New() *Game {
 	g := &Game{width: 1280, height: 720}
 	g.initBuildings()
+	g.navGrid = NewNavGrid(g.width, g.height, g.buildings, soldierRadius)
+	g.initSoldiers()
+	g.initOpFor()
 	return g
 }
 
@@ -84,7 +90,55 @@ func (g *Game) overlapsAny(r rect) bool {
 	return false
 }
 
+func (g *Game) initSoldiers() {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	count := 6
+	margin := 32.0
+
+	for i := 0; i < count; i++ {
+		y := margin + rng.Float64()*float64(g.height-int(margin)*2)
+
+		startX := margin
+		endX := float64(g.width) - margin
+
+		start := [2]float64{startX, y}
+		end := [2]float64{endX, y}
+
+		s := NewSoldier(startX, y, TeamRed, start, end, g.navGrid)
+		if s.path != nil {
+			g.soldiers = append(g.soldiers, s)
+		}
+	}
+}
+
+func (g *Game) initOpFor() {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 999))
+	count := 6
+	margin := 32.0
+
+	for i := 0; i < count; i++ {
+		y := margin + rng.Float64()*float64(g.height-int(margin)*2)
+
+		startX := float64(g.width) - margin
+		endX := margin
+
+		start := [2]float64{startX, y}
+		end := [2]float64{endX, y}
+
+		s := NewSoldier(startX, y, TeamBlue, start, end, g.navGrid)
+		if s.path != nil {
+			g.opfor = append(g.opfor, s)
+		}
+	}
+}
+
 func (g *Game) Update() error {
+	for _, s := range g.soldiers {
+		s.Update()
+	}
+	for _, s := range g.opfor {
+		s.Update()
+	}
 	return nil
 }
 
@@ -109,6 +163,23 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		ebitenutil.DrawLine(screen, float64(b.x), float64(b.y), float64(b.x), float64(b.y+b.h), stroke)
 		ebitenutil.DrawLine(screen, float64(b.x+b.w), float64(b.y), float64(b.x+b.w), float64(b.y+b.h), stroke)
 		ebitenutil.DrawLine(screen, float64(b.x), float64(b.y+b.h), float64(b.x+b.w), float64(b.y+b.h), stroke)
+	}
+
+	for _, s := range g.soldiers {
+		s.Draw(screen)
+	}
+	for _, s := range g.opfor {
+		s.Draw(screen)
+	}
+
+	// Debug LOS lines: yellow line between each red-blue pair with clear sight.
+	losColor := color.RGBA{R: 255, G: 255, B: 0, A: 100}
+	for _, r := range g.soldiers {
+		for _, b := range g.opfor {
+			if HasLineOfSight(r.x, r.y, b.x, b.y, g.buildings) {
+				ebitenutil.DrawLine(screen, r.x, r.y, b.x, b.y, losColor)
+			}
+		}
 	}
 }
 
