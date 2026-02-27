@@ -55,7 +55,12 @@ jobs:
     - name: Vet
       run: go vet ./...
     
+    - name: Run tests (Linux)
+      if: runner.os == 'Linux'
+      run: xvfb-run go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
     - name: Run tests
+      if: runner.os != 'Linux'
       run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
     
     - name: Build
