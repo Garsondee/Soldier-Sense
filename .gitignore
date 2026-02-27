@@ -56,3 +56,6 @@ temp/
 vendor/
 /bin/
 /obj/
+
+# Local tools
+/tools/ext/
