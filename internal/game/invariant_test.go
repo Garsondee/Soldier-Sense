@@ -11,6 +11,8 @@ import (
 // checkNoStuck verifies that every non-idle, non-dead soldier moves at least
 // minDist pixels over any window of windowTicks consecutive ticks.
 // It works by sampling positions from verbose-mode logs.
+//
+//nolint:unused // reserved for future invariant tests
 func checkNoStuck(t *testing.T, ts *TestSim, windowTicks int, minDist float64) {
 	t.Helper()
 	posEntries := ts.SimLog.Filter("move", "position")
@@ -46,8 +48,14 @@ func checkNoStuck(t *testing.T, ts *TestSim, windowTicks int, minDist float64) {
 			}
 
 			var sx, sy, ex, ey float64
-			fmt.Sscanf(start.Value, "(%f,%f)", &sx, &sy)
-			fmt.Sscanf(end.Value, "(%f,%f)", &ex, &ey)
+			if _, err := fmt.Sscanf(start.Value, "(%f,%f)", &sx, &sy); err != nil {
+				t.Logf("checkNoStuck: could not parse start position %q: %v", start.Value, err)
+				continue
+			}
+			if _, err := fmt.Sscanf(end.Value, "(%f,%f)", &ex, &ey); err != nil {
+				t.Logf("checkNoStuck: could not parse end position %q: %v", end.Value, err)
+				continue
+			}
 			dx := ex - sx
 			dy := ey - sy
 			dist := math.Sqrt(dx*dx + dy*dy)

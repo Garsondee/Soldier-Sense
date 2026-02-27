@@ -18,7 +18,6 @@ type Squad struct {
 	// used to prevent formation thrash on minor direction changes.
 	smoothedHeading float64
 	headingInit     bool
-	prevIntent      SquadIntentKind
 }
 
 // NewSquad creates a squad. The first member is designated leader.

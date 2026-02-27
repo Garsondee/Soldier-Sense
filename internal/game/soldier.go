@@ -512,9 +512,9 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 		c = color.RGBA{R: base.R / 2, G: base.G / 2, B: base.B / 2, A: 255}
 	case SoldierStateIdle:
 		// engaging / holding — keep base but slightly desaturate toward white
-		r := uint8(min8(255, int(base.R)+30))
-		g2 := uint8(min8(255, int(base.G)+30))
-		b2 := uint8(min8(255, int(base.B)+30))
+		r := min8(255, int(base.R)+30)
+		g2 := min8(255, int(base.G)+30)
+		b2 := min8(255, int(base.B)+30)
 		c = color.RGBA{R: r, G: g2, B: b2, A: 255}
 	}
 
@@ -556,9 +556,9 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 	}
 }
 
-func min8(a, b int) int {
+func min8(a, b int) uint8 {
 	if a < b {
-		return a
+		return uint8(a) // #nosec G115 -- a is always in [0,255] at all call sites
 	}
-	return b
+	return uint8(b) // #nosec G115 -- b is always in [0,255] at all call sites
 }
