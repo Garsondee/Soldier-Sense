@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 type Game struct {
@@ -189,7 +189,8 @@ func (g *Game) Update() error {
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.RGBA{R: 0, G: 0, B: 0, A: 255})
 
-	w, h := screen.Size()
+	b := screen.Bounds()
+	w, h := b.Dx(), b.Dy()
 
 	gridFine := 16
 	gridMid := gridFine * 4
@@ -202,11 +203,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	fill := color.RGBA{R: 120, G: 120, B: 120, A: 255}
 	stroke := color.RGBA{R: 160, G: 160, B: 160, A: 255}
 	for _, b := range g.buildings {
-		ebitenutil.DrawRect(screen, float64(b.x), float64(b.y), float64(b.w), float64(b.h), fill)
-		ebitenutil.DrawLine(screen, float64(b.x), float64(b.y), float64(b.x+b.w), float64(b.y), stroke)
-		ebitenutil.DrawLine(screen, float64(b.x), float64(b.y), float64(b.x), float64(b.y+b.h), stroke)
-		ebitenutil.DrawLine(screen, float64(b.x+b.w), float64(b.y), float64(b.x+b.w), float64(b.y+b.h), stroke)
-		ebitenutil.DrawLine(screen, float64(b.x), float64(b.y+b.h), float64(b.x+b.w), float64(b.y+b.h), stroke)
+		x0 := float32(b.x)
+		y0 := float32(b.y)
+		x1 := float32(b.x + b.w)
+		y1 := float32(b.y + b.h)
+		vector.FillRect(screen, x0, y0, float32(b.w), float32(b.h), fill, false)
+		vector.StrokeLine(screen, x0, y0, x1, y0, 1.0, stroke, false)
+		vector.StrokeLine(screen, x0, y0, x0, y1, 1.0, stroke, false)
+		vector.StrokeLine(screen, x1, y0, x1, y1, 1.0, stroke, false)
+		vector.StrokeLine(screen, x0, y1, x1, y1, 1.0, stroke, false)
 	}
 
 	for _, s := range g.soldiers {
@@ -228,7 +233,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
 	for _, s := range all {
 		for _, c := range s.vision.KnownContacts {
-			ebitenutil.DrawLine(screen, s.x, s.y, c.x, c.y, contactColor)
+			vector.StrokeLine(screen, float32(s.x), float32(s.y), float32(c.x), float32(c.y), 1.0, contactColor, false)
 		}
 	}
 }
@@ -254,12 +259,12 @@ func (g *Game) drawFormationSlots(screen *ebiten.Image) {
 			} else {
 				c = color.RGBA{R: 60, G: 100, B: 220, A: 60}
 			}
-			ebitenutil.DrawLine(screen, wx-d, wy, wx, wy-d, c)
-			ebitenutil.DrawLine(screen, wx, wy-d, wx+d, wy, c)
-			ebitenutil.DrawLine(screen, wx+d, wy, wx, wy+d, c)
-			ebitenutil.DrawLine(screen, wx, wy+d, wx-d, wy, c)
+			vector.StrokeLine(screen, float32(wx-d), float32(wy), float32(wx), float32(wy-d), 1.0, c, false)
+			vector.StrokeLine(screen, float32(wx), float32(wy-d), float32(wx+d), float32(wy), 1.0, c, false)
+			vector.StrokeLine(screen, float32(wx+d), float32(wy), float32(wx), float32(wy+d), 1.0, c, false)
+			vector.StrokeLine(screen, float32(wx), float32(wy+d), float32(wx-d), float32(wy), 1.0, c, false)
 			// Line from member to their slot.
-			ebitenutil.DrawLine(screen, m.x, m.y, wx, wy, color.RGBA{R: 255, G: 255, B: 255, A: 18})
+			vector.StrokeLine(screen, float32(m.x), float32(m.y), float32(wx), float32(wy), 1.0, color.RGBA{R: 255, G: 255, B: 255, A: 18}, false)
 		}
 	}
 }
@@ -278,7 +283,7 @@ func (g *Game) drawVisionCones(screen *ebiten.Image, soldiers []*Soldier, c colo
 			a := s.vision.Heading - halfFOV + (v.FOV/float64(steps))*float64(i)
 			ex := s.x + math.Cos(a)*coneLen
 			ey := s.y + math.Sin(a)*coneLen
-			ebitenutil.DrawLine(screen, s.x, s.y, ex, ey, c)
+			vector.StrokeLine(screen, float32(s.x), float32(s.y), float32(ex), float32(ey), 1.0, c, false)
 		}
 	}
 }
@@ -289,13 +294,13 @@ func drawGrid(screen *ebiten.Image, w, h, spacing int, c color.Color) {
 	}
 
 	for x := 0; x <= w; x += spacing {
-		xf := float64(x)
-		ebitenutil.DrawLine(screen, xf, 0, xf, float64(h), c)
+		xf := float32(x)
+		vector.StrokeLine(screen, xf, 0, xf, float32(h), 1.0, c, false)
 	}
 
 	for y := 0; y <= h; y += spacing {
-		yf := float64(y)
-		ebitenutil.DrawLine(screen, 0, yf, float64(w), yf, c)
+		yf := float32(y)
+		vector.StrokeLine(screen, 0, yf, float32(w), yf, 1.0, c, false)
 	}
 }
 

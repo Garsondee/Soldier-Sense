@@ -5,7 +5,6 @@ import (
 	"math"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
@@ -249,8 +248,8 @@ func (s *Soldier) Draw(screen *ebiten.Image) {
 	if s.state == SoldierStateDead {
 		// Grey cross for dead soldiers.
 		grey := color.RGBA{R: 100, G: 100, B: 100, A: 180}
-		ebitenutil.DrawLine(screen, s.x-4, s.y-4, s.x+4, s.y+4, grey)
-		ebitenutil.DrawLine(screen, s.x+4, s.y-4, s.x-4, s.y+4, grey)
+		vector.StrokeLine(screen, float32(s.x-4), float32(s.y-4), float32(s.x+4), float32(s.y+4), 1.0, grey, false)
+		vector.StrokeLine(screen, float32(s.x+4), float32(s.y-4), float32(s.x-4), float32(s.y+4), 1.0, grey, false)
 		return
 	}
 
@@ -267,7 +266,7 @@ func (s *Soldier) Draw(screen *ebiten.Image) {
 	if radius < 3 {
 		radius = 3
 	}
-	vector.DrawFilledCircle(screen, float32(s.x), float32(s.y), radius, c, true)
+	vector.FillCircle(screen, float32(s.x), float32(s.y), radius, c, false)
 
 	// Leader marker: white outline.
 	if s.isLeader {
@@ -279,5 +278,5 @@ func (s *Soldier) Draw(screen *ebiten.Image) {
 	hLen := float64(soldierRadius) * 2.0
 	hx := s.x + math.Cos(s.vision.Heading)*hLen
 	hy := s.y + math.Sin(s.vision.Heading)*hLen
-	ebitenutil.DrawLine(screen, s.x, s.y, hx, hy, color.RGBA{R: 255, G: 255, B: 255, A: 160})
+	vector.StrokeLine(screen, float32(s.x), float32(s.y), float32(hx), float32(hy), 1.0, color.RGBA{R: 255, G: 255, B: 255, A: 160}, false)
 }
