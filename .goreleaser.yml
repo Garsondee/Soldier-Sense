@@ -1,0 +1,62 @@
+project_name: soldier-sense
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: soldier-sense
+    binary: soldier-sense
+    main: ./cmd/game
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: soldier-sense-archive
+    format: tar.gz
+    name_template: "soldier-sense_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+      - docs/**/*
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: 'New Features'
+      regexp: '^feat.*:.*'
+      order: 0
+    - title: 'Bug fixes'
+      regexp: '^fix.*:.*'
+      order: 1
+    - title: 'Other Changes'
+      order: 999
+
+release:
+  github:
+    owner: Garsondee
+    name: Soldier-Sense
+  draft: false
+  prerelease: auto
+  name_template: "{{.ProjectName}} {{.Version}}"
