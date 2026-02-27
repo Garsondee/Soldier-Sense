@@ -2,6 +2,7 @@ package game
 
 import (
 	"image/color"
+	"math"
 	"math/rand"
 	"time"
 
@@ -16,6 +17,7 @@ type Game struct {
 	navGrid   *NavGrid
 	soldiers  []*Soldier // red friendlies
 	opfor     []*Soldier // blue OpFor
+	squads    []*Squad
 }
 
 type rect struct {
@@ -31,6 +33,8 @@ func New() *Game {
 	g.navGrid = NewNavGrid(g.width, g.height, g.buildings, soldierRadius)
 	g.initSoldiers()
 	g.initOpFor()
+	g.initSquads()
+	g.randomiseProfiles()
 	return g
 }
 
@@ -132,7 +136,47 @@ func (g *Game) initOpFor() {
 	}
 }
 
+func (g *Game) initSquads() {
+	// One squad per team for now.
+	if len(g.soldiers) > 0 {
+		g.squads = append(g.squads, NewSquad(0, TeamRed, g.soldiers))
+	}
+	if len(g.opfor) > 0 {
+		g.squads = append(g.squads, NewSquad(1, TeamBlue, g.opfor))
+	}
+}
+
+// randomiseProfiles gives each soldier slightly different stats so behaviour varies.
+func (g *Game) randomiseProfiles() {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 42))
+	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	for _, s := range all {
+		p := &s.profile
+		p.Physical.FitnessBase = 0.4 + rng.Float64()*0.5 // 0.4 - 0.9
+		p.Skills.Marksmanship = 0.2 + rng.Float64()*0.6  // 0.2 - 0.8
+		p.Skills.Fieldcraft = 0.2 + rng.Float64()*0.6
+		p.Skills.Discipline = 0.3 + rng.Float64()*0.6 // 0.3 - 0.9
+		p.Psych.Experience = rng.Float64() * 0.5      // 0.0 - 0.5
+		p.Psych.Morale = 0.5 + rng.Float64()*0.4      // 0.5 - 0.9
+		p.Psych.Composure = 0.3 + rng.Float64()*0.5   // 0.3 - 0.8
+	}
+}
+
 func (g *Game) Update() error {
+	// Vision pass: each soldier scans for enemies.
+	for _, s := range g.soldiers {
+		s.UpdateVision(g.opfor, g.buildings)
+	}
+	for _, s := range g.opfor {
+		s.UpdateVision(g.soldiers, g.buildings)
+	}
+
+	// Formation pass: update slot targets before soldiers decide to move.
+	for _, sq := range g.squads {
+		sq.UpdateFormation()
+	}
+
+	// Decision + movement pass.
 	for _, s := range g.soldiers {
 		s.Update()
 	}
@@ -172,13 +216,69 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		s.Draw(screen)
 	}
 
-	// Debug LOS lines: yellow line between each red-blue pair with clear sight.
-	losColor := color.RGBA{R: 255, G: 255, B: 0, A: 100}
-	for _, r := range g.soldiers {
-		for _, b := range g.opfor {
-			if HasLineOfSight(r.x, r.y, b.x, b.y, g.buildings) {
-				ebitenutil.DrawLine(screen, r.x, r.y, b.x, b.y, losColor)
+	// Debug: formation slot ghosts.
+	g.drawFormationSlots(screen)
+
+	// Debug: draw vision cone arc for each soldier.
+	g.drawVisionCones(screen, g.soldiers, color.RGBA{R: 220, G: 30, B: 30, A: 30})
+	g.drawVisionCones(screen, g.opfor, color.RGBA{R: 30, G: 80, B: 220, A: 30})
+
+	// Debug: lines to spotted contacts (replaces old omniscient LOS).
+	contactColor := color.RGBA{R: 255, G: 255, B: 0, A: 100}
+	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	for _, s := range all {
+		for _, c := range s.vision.KnownContacts {
+			ebitenutil.DrawLine(screen, s.x, s.y, c.x, c.y, contactColor)
+		}
+	}
+}
+
+// drawFormationSlots renders a small ghost circle at each member's current slot target.
+func (g *Game) drawFormationSlots(screen *ebiten.Image) {
+	for _, sq := range g.squads {
+		if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
+			continue
+		}
+		offsets := formationOffsets(sq.Formation, len(sq.Members))
+		for i, m := range sq.Members {
+			if i == 0 || !m.formationMember {
+				continue
 			}
+			off := offsets[i]
+			wx, wy := SlotWorld(sq.Leader.x, sq.Leader.y, sq.smoothedHeading, off[0], off[1])
+			// Faint diamond: four short lines.
+			d := 4.0
+			var c color.RGBA
+			if m.team == TeamRed {
+				c = color.RGBA{R: 220, G: 60, B: 60, A: 60}
+			} else {
+				c = color.RGBA{R: 60, G: 100, B: 220, A: 60}
+			}
+			ebitenutil.DrawLine(screen, wx-d, wy, wx, wy-d, c)
+			ebitenutil.DrawLine(screen, wx, wy-d, wx+d, wy, c)
+			ebitenutil.DrawLine(screen, wx+d, wy, wx, wy+d, c)
+			ebitenutil.DrawLine(screen, wx, wy+d, wx-d, wy, c)
+			// Line from member to their slot.
+			ebitenutil.DrawLine(screen, m.x, m.y, wx, wy, color.RGBA{R: 255, G: 255, B: 255, A: 18})
+		}
+	}
+}
+
+// drawVisionCones renders a translucent arc showing each soldier's FOV.
+func (g *Game) drawVisionCones(screen *ebiten.Image, soldiers []*Soldier, c color.Color) {
+	for _, s := range soldiers {
+		if s.state == SoldierStateDead {
+			continue
+		}
+		v := &s.vision
+		halfFOV := v.FOV / 2.0
+		coneLen := 40.0 // short debug arc length
+		steps := 8
+		for i := 0; i <= steps; i++ {
+			a := s.vision.Heading - halfFOV + (v.FOV/float64(steps))*float64(i)
+			ex := s.x + math.Cos(a)*coneLen
+			ey := s.y + math.Sin(a)*coneLen
+			ebitenutil.DrawLine(screen, s.x, s.y, ex, ey, c)
 		}
 	}
 }
