@@ -35,6 +35,9 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.24'
+
+    - name: Install Ebiten system dependencies
+      run: sh .github/scripts/install-ebiten-deps.sh
     
     - name: Download dependencies
       run: go mod download

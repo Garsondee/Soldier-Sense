@@ -23,6 +23,10 @@ jobs:
         go-version: ${{ matrix.go-version }}
         cache: true
 
+    - name: Install Ebiten system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: sh .github/scripts/install-ebiten-deps.sh
+
     - name: Download dependencies
       run: go mod download
     
@@ -76,6 +80,10 @@ jobs:
         go-version: '1.24'
         cache: true
     
+    - name: Install Ebiten system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: sh .github/scripts/install-ebiten-deps.sh
+
     - name: Build soldier-sense
       run: go build -v -o soldier-sense ./cmd/game
 
@@ -89,6 +97,9 @@ jobs:
       with:
         go-version: '1.24'
         cache: true
+
+    - name: Install Ebiten system dependencies
+      run: sh .github/scripts/install-ebiten-deps.sh
     
     - name: golangci-lint
       uses: golangci/golangci-lint-action@v6
@@ -111,6 +122,9 @@ jobs:
       with:
         go-version: '1.24'
         cache: true
+
+    - name: Install Ebiten system dependencies
+      run: sh .github/scripts/install-ebiten-deps.sh
     
     - name: Run Gosec Security Scanner
       run: |
