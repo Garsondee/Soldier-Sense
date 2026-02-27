@@ -28,6 +28,9 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -82,6 +85,9 @@ jobs:
 
   integration:
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
