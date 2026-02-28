@@ -191,6 +191,7 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
 
 	// Overlap prevention: track occupied Y bands per soldier to push bubbles up.
+	//nolint:unused
 	type bubblePos struct{ x, y float32 }
 	occupied := make(map[int]float32) // soldier ID → lowest Y used
 

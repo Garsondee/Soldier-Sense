@@ -404,10 +404,7 @@ func (tm *TacticalMap) CornerPeekDirections(wx, wy float64) []float64 {
 	// Determine which walls form the corner and compute peek directions.
 	// Peek direction = angle from the cell into the open area around the corner.
 	var dirs []float64
-	wallN := cy > 0 && tm.traits[(cy-1)*tm.cols+cx] == 0 // not walkable = wall above
-	wallS := cy < tm.rows-1 && tm.traits[(cy+1)*tm.cols+cx] == 0
-	wallW := cx > 0 && tm.traits[cy*tm.cols+(cx-1)] == 0
-	wallE := cx < tm.cols-1 && tm.traits[cy*tm.cols+(cx+1)] == 0
+	var wallN, wallS, wallW, wallE bool
 
 	// Actually we need to check if the neighbouring cell IS a wall (blocked),
 	// not if its trait is zero. Use the navgrid-style check against the building set.

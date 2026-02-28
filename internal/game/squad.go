@@ -24,7 +24,7 @@ type Squad struct {
 	// used to prevent formation thrash on minor direction changes.
 	smoothedHeading float64
 	headingInit     bool
-	prevIntent      SquadIntentKind
+	prevIntent      SquadIntentKind //nolint:unused
 
 	// EnemyBearing is the squad-level bearing from centroid toward the enemy.
 	// Updated each SquadThink when contact exists. Used to assign flank sides.
@@ -570,7 +570,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	// Decide squad intent (phase-aware, still soft; individual soldiers retain
 	// local autonomy and self-preservation via their own utility functions).
 	oldIntent := sq.Intent
-	candidateIntent := sq.Intent
+	var candidateIntent SquadIntentKind
 	switch {
 	// Cohesion emergency: regroup even under contact if spread is extreme.
 	case spread > 250:
