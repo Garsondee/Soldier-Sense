@@ -35,6 +35,20 @@ type Squad struct {
 	ClaimedBuildingIdx int    // index into buildingFootprints, -1 = none
 	claimEvalTick      int    // tick of last building evaluation
 	buildingFootprints []rect // shared reference to game footprints
+
+	// Intent hysteresis: avoid order thrash at range boundaries.
+	intentLockUntil int // tick until which non-critical intent changes are deferred
+
+	// --- Buddy bounding (fire and movement) ---
+	// BoundMovingGroup: which group (0 or 1) is currently the mover.
+	// Toggled each bound cycle so groups alternate.
+	BoundMovingGroup int
+	// boundCycleTick: tick when the current bound cycle started.
+	// A cycle lasts until the moving group's members finish their dash
+	// (all have dashOverwatchTimer > 0 or are idle), then groups swap.
+	boundCycleTick int
+	// boundCycleActive: true when buddy bounding is in effect (contact + MoveToContact).
+	boundCycleActive bool
 }
 
 // NewSquad creates a squad. The first member is designated leader.
@@ -67,6 +81,11 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 // Scaled by the new leader's effective fear (panicked = much longer).
 const successionDelayTicks = 180 // 3 seconds at 60TPS base
 
+const (
+	engageEnterDist = 300.0 // must be this close to enter engage
+	engageExitDist  = 360.0 // can stay engaged until this distance
+)
+
 // SquadThink runs the leader's squad-level decision loop.
 // It evaluates the leader's blackboard and sets Intent + orders for members.
 // intel is the world IntelStore; may be nil (degrades gracefully to blackboard-only).
@@ -93,6 +112,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		// During the succession window, squad operates without clear leadership.
 		// Members hold/survive on their own until command is re-established.
 		if candidate.currentTick != nil && *candidate.currentTick < sq.leaderSuccessionTick {
+			sq.Intent = IntentHold
 			// Propagate a holding intent but don't update the leader pointer yet.
 			for _, m := range sq.Members {
 				if m.state == SoldierStateDead {
@@ -209,28 +229,47 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 
 	// Decide squad intent.
 	oldIntent := sq.Intent
+	candidateIntent := sq.Intent
 	switch {
 	// Cohesion emergency: regroup even under contact if spread is extreme.
 	case spread > 250:
-		sq.Intent = IntentRegroup
+		candidateIntent = IntentRegroup
 	// Active firefight: any member has LOS on a threat close enough to engage.
-	case anyVisibleThreats > 0 && closestDist < 320:
-		sq.Intent = IntentEngage
+	case anyVisibleThreats > 0 && closestDist < engageEnterDist:
+		candidateIntent = IntentEngage
+	case sq.Intent == IntentEngage && anyVisibleThreats > 0 && closestDist < engageExitDist:
+		candidateIntent = IntentEngage
 	// Heatmap: heavy danger pressure even without current LOS → hold/fallback.
 	case dangerAtPos > 1.5 && anyVisibleThreats == 0:
-		sq.Intent = IntentHold
+		candidateIntent = IntentHold
 	// Distant contact: keep advancing while watching.
-	case anyVisibleThreats > 0 && closestDist >= 320:
-		sq.Intent = IntentAdvance
+	case anyVisibleThreats > 0 && closestDist >= engageExitDist:
+		candidateIntent = IntentAdvance
 	// Heatmap: contact heat ahead but no LOS yet → cautious advance.
 	case contactAhead > 0.5 && anyVisibleThreats == 0:
-		sq.Intent = IntentAdvance
+		candidateIntent = IntentAdvance
 	// Moderate spread: light regroup nudge but don't abandon a fight.
 	case spread > 120 && anyVisibleThreats == 0:
-		sq.Intent = IntentRegroup
+		candidateIntent = IntentRegroup
 	default:
-		sq.Intent = IntentAdvance
+		candidateIntent = IntentAdvance
 	}
+
+	tick := 0
+	if sq.Leader != nil && sq.Leader.currentTick != nil {
+		tick = *sq.Leader.currentTick
+	}
+	criticalIntent := spread > 250 || (anyVisibleThreats > 0 && closestDist < engageEnterDist)
+	if candidateIntent != sq.Intent {
+		if !criticalIntent && tick < sq.intentLockUntil {
+			candidateIntent = sq.Intent
+		} else {
+			leaderFear := sq.Leader.profile.Psych.EffectiveFear()
+			fuzzy := int(math.Abs(math.Sin(float64(tick+sq.ID*17))) * 18)
+			sq.intentLockUntil = tick + 30 + int(leaderFear*70) + fuzzy
+		}
+	}
+	sq.Intent = candidateIntent
 
 	// Log intent changes.
 	if sq.Intent != oldIntent {
@@ -335,6 +374,81 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		} else {
 			m.blackboard.HasMoveOrder = false
 		}
+
+		// --- Social awareness propagation ---
+		m.blackboard.VisibleAllyCount = sq.visibleAlliesFor(m)
+		prevAvgFear := m.blackboard.SquadAvgFear
+		m.blackboard.SquadAvgFear = sq.avgVisibleAllyFearFor(m)
+		m.blackboard.SquadFearDelta = m.blackboard.SquadAvgFear - prevAvgFear
+		m.blackboard.CloseAllyPressure = sq.closeAllyPressureFor(m)
+		if m.blackboard.VisibleThreatCount() == 0 && m.blackboard.VisibleAllyCount == 0 {
+			m.blackboard.IsolatedTicks++
+		} else {
+			m.blackboard.IsolatedTicks = 0
+		}
+	}
+
+	// --- Buddy bounding (fire and movement) ---
+	// Active when squad has contact and at least 2 alive members.
+	// Groups alternate: one moves while the other overwatches.
+	if hasContact && len(alive) >= 2 {
+		if !sq.boundCycleActive {
+			// Start bounding: assign groups and kick off first cycle.
+			sq.boundCycleActive = true
+			sq.BoundMovingGroup = 0
+			sq.boundCycleTick = tick
+			grpIdx := 0
+			for _, m := range sq.Members {
+				if m.state == SoldierStateDead {
+					continue
+				}
+				m.blackboard.BoundGroup = grpIdx % 2
+				grpIdx++
+			}
+			sq.Leader.think("squad: initiating buddy bounding")
+		}
+
+		// Check if all movers have finished their dash (idle or in overwatch).
+		// If so, swap groups so the overwatchers become movers.
+		allMoversSettled := true
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			if m.blackboard.BoundGroup != sq.BoundMovingGroup {
+				continue
+			}
+			// A mover is "settled" if they're in overwatch pause or idle (not actively sprinting).
+			if m.blackboard.CurrentGoal == GoalMoveToContact && m.state == SoldierStateMoving {
+				allMoversSettled = false
+				break
+			}
+		}
+		// Minimum cycle time: don't swap faster than 2 seconds.
+		cycleMinTicks := 120
+		if allMoversSettled && tick-sq.boundCycleTick >= cycleMinTicks {
+			sq.BoundMovingGroup = 1 - sq.BoundMovingGroup
+			sq.boundCycleTick = tick
+		}
+
+		// Write bound role to each member's blackboard.
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			m.blackboard.BoundMover = m.blackboard.BoundGroup == sq.BoundMovingGroup
+		}
+	} else {
+		if sq.boundCycleActive {
+			sq.boundCycleActive = false
+			// Clear bound roles — everyone can move freely.
+			for _, m := range sq.Members {
+				if m.state == SoldierStateDead {
+					continue
+				}
+				m.blackboard.BoundMover = true
+			}
+		}
 	}
 
 	// --- Building takeover ---
@@ -382,8 +496,13 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 				mm := m.profile.Psych.Morale
 				// A soldier needs high morale + low fear to be a reinforcer.
 				if mf < 0.25 && mm > 0.55 {
-					m.blackboard.ReinforceMemberX = distressedMember.x
-					m.blackboard.ReinforceMemberY = distressedMember.y
+					// Offset target so reinforcers don't stack on the exact same tile.
+					// Deterministic pseudo-random per soldier id to keep runs replayable.
+					idx := float64((m.id + sq.ID*17) % 8)
+					ang := idx * (math.Pi / 4.0)
+					r := float64(cellSize) * (1.6 + 0.3*math.Abs(math.Sin(float64(*m.currentTick+1)*0.11+idx)))
+					m.blackboard.ReinforceMemberX = distressedMember.x + math.Cos(ang)*r
+					m.blackboard.ReinforceMemberY = distressedMember.y + math.Sin(ang)*r
 					m.blackboard.ShouldReinforce = true
 				} else {
 					m.blackboard.ShouldReinforce = false
@@ -391,6 +510,70 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			}
 		}
 	}
+}
+
+func (sq *Squad) visibleAlliesFor(self *Soldier) int {
+	count := 0
+	for _, m := range sq.Members {
+		if m == self || m.state == SoldierStateDead {
+			continue
+		}
+		if !self.vision.InCone(self.x, self.y, m.x, m.y) {
+			continue
+		}
+		if HasLineOfSightWithCover(self.x, self.y, m.x, m.y, self.buildings, self.covers) {
+			count++
+		}
+	}
+	return count
+}
+
+func (sq *Squad) avgVisibleAllyFearFor(self *Soldier) float64 {
+	var sum float64
+	count := 0
+	for _, m := range sq.Members {
+		if m == self || m.state == SoldierStateDead {
+			continue
+		}
+		if !self.vision.InCone(self.x, self.y, m.x, m.y) {
+			continue
+		}
+		if !HasLineOfSightWithCover(self.x, self.y, m.x, m.y, self.buildings, self.covers) {
+			continue
+		}
+		sum += m.profile.Psych.EffectiveFear()
+		count++
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / float64(count)
+}
+
+func (sq *Squad) closeAllyPressureFor(self *Soldier) float64 {
+	const idealSpacing = float64(cellSize) * 2.2
+	const nearSpacing = float64(cellSize) * 1.2
+
+	pressure := 0.0
+	samples := 0.0
+	for _, m := range sq.Members {
+		if m == self || m.state == SoldierStateDead {
+			continue
+		}
+		dx := m.x - self.x
+		dy := m.y - self.y
+		d := math.Sqrt(dx*dx + dy*dy)
+		if d > idealSpacing {
+			continue
+		}
+		t := clamp01((idealSpacing - d) / (idealSpacing - nearSpacing))
+		pressure += t
+		samples++
+	}
+	if samples == 0 {
+		return 0
+	}
+	return clamp01(pressure / samples)
 }
 
 // buildingClaimInterval is how often (ticks) the leader re-evaluates buildings.

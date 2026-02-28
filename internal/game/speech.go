@@ -210,10 +210,19 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 
 		const charW = 6
 		const lineH = 14
-		const padX = 5
-		const padY = 3
+		const padX = 6
+		const padY = 4
 
-		// Measure text dimensions.
+		// Inverse zoom scale: make bubbles larger when zoomed out so they stay readable.
+		invZoom := float32(1.0 / g.camZoom)
+		if invZoom < 1.0 {
+			invZoom = 1.0
+		}
+		if invZoom > 3.0 {
+			invZoom = 3.0
+		}
+
+		// Measure text dimensions (in unscaled space, then multiply by invZoom).
 		lines := 1
 		maxLen := len(b.text)
 		if b.detail != "" {
@@ -222,55 +231,58 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 				maxLen = len(b.detail)
 			}
 		}
-		textW := float32(maxLen * charW)
-		bgW := textW + float32(padX*2)
-		bgH := float32(lines*lineH + padY*2)
+		textW := float32(maxLen*charW) * invZoom
+		bgW := textW + float32(padX*2)*invZoom
+		bgH := float32(lines*lineH+padY*2) * invZoom
 
 		// Base position above soldier.
 		sx := ox + float32(s.x)
-		baseY := oy + float32(s.y) - float32(soldierRadius) - bgH - 4
+		baseY := oy + float32(s.y) - float32(soldierRadius)*invZoom - bgH - 6*invZoom
 
 		// Push up if there's already a bubble on this soldier.
 		if prevY, ok := occupied[s.id]; ok {
 			if baseY+bgH > prevY {
-				baseY = prevY - bgH - 2
+				baseY = prevY - bgH - 3*invZoom
 			}
 		}
-		baseY += b.yOff
+		baseY += b.yOff * invZoom
 		occupied[s.id] = baseY
 
 		bgX := sx - bgW/2
 		bgY := baseY
 
 		// Background: darker, more readable, with mood accent.
-		baseBG := color.RGBA{R: 20, G: 22, B: 20, A: uint8(210 * alpha)}
+		baseBG := color.RGBA{R: 16, G: 18, B: 16, A: uint8(220 * alpha)}
 		vector.FillRect(screen, bgX, bgY, bgW, bgH, baseBG, false)
 
 		// Accent stripe on the left edge — team coloured.
+		stripeW := 4 * invZoom
 		var accent color.RGBA
 		if s.team == TeamRed {
-			accent = color.RGBA{R: 220, G: 55, B: 40, A: uint8(220 * alpha)}
+			accent = color.RGBA{R: 230, G: 55, B: 40, A: uint8(230 * alpha)}
 		} else {
-			accent = color.RGBA{R: 40, G: 80, B: 220, A: uint8(220 * alpha)}
+			accent = color.RGBA{R: 40, G: 80, B: 230, A: uint8(230 * alpha)}
 		}
-		vector.FillRect(screen, bgX, bgY, 3, bgH, accent, false)
+		vector.FillRect(screen, bgX, bgY, stripeW, bgH, accent, false)
 
-		// Subtle border.
-		vector.StrokeRect(screen, bgX, bgY, bgW, bgH, 0.5,
-			color.RGBA{R: 100, G: 100, B: 100, A: uint8(80 * alpha)}, false)
+		// Border.
+		vector.StrokeRect(screen, bgX, bgY, bgW, bgH, 1.0*invZoom,
+			color.RGBA{R: 80, G: 100, B: 80, A: uint8(100 * alpha)}, false)
 
-		// Main text.
-		textX := int(bgX + float32(padX) + 3)
-		textY := int(bgY + float32(padY))
+		// Main text — rendered at 1x into a temporary sub-image, then scaled.
+		// Since DebugPrint can't scale, we approximate by drawing at fixed size
+		// and accepting the zoom handles it via the camera transform.
+		textX := int(bgX + float32(padX)*invZoom + stripeW)
+		textY := int(bgY + float32(padY)*invZoom)
 		ebitenutil.DebugPrintAt(screen, b.text, textX, textY)
 
-		// Detail line (smaller, dimmer).
+		// Detail line.
 		if b.detail != "" {
-			ebitenutil.DebugPrintAt(screen, b.detail, textX, textY+lineH)
+			ebitenutil.DebugPrintAt(screen, b.detail, textX, textY+int(float32(lineH)*invZoom))
 		}
 
 		// Connector line from bubble to soldier.
 		vector.StrokeLine(screen, sx, bgY+bgH, sx, oy+float32(s.y)-float32(soldierRadius),
-			0.5, color.RGBA{R: 100, G: 100, B: 100, A: uint8(60 * alpha)}, false)
+			1.0*invZoom, color.RGBA{R: 80, G: 100, B: 80, A: uint8(50 * alpha)}, false)
 	}
 }

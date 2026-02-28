@@ -31,14 +31,15 @@ var overlayColors = [intelMapCount]color.RGBA{
 type Game struct {
 	width              int
 	height             int
-	gameWidth          int           // playfield width (log panel takes the rest)
-	gameHeight         int           // playfield height (inside border)
-	offX               int           // pixel offset from window left to battlefield left
-	offY               int           // pixel offset from window top to battlefield top
-	buildings          []rect        // individual wall segments (1-cell wide), used for LOS/nav
-	windows            []rect        // window segments: block movement, transparent to LOS
-	buildingFootprints []rect        // overall floor area of each structure, used for rendering
-	roads              []roadSegment // road layout (generated before buildings)
+	gameWidth          int            // playfield width (log panel takes the rest)
+	gameHeight         int            // playfield height (inside border)
+	offX               int            // pixel offset from window left to battlefield left
+	offY               int            // pixel offset from window top to battlefield top
+	buildings          []rect         // individual wall segments (1-cell wide), used for LOS/nav
+	windows            []rect         // window segments: block movement, transparent to LOS
+	buildingFootprints []rect         // overall floor area of each structure, used for rendering
+	roads              []roadSegment  // road layout (decomposed segments for collision)
+	roadPolylines      []roadPolyline // smooth centrelines for rendering
 	covers             []*CoverObject
 	navGrid            *NavGrid
 	soldiers           []*Soldier // red friendlies
@@ -64,6 +65,10 @@ type Game struct {
 	worldBuf *ebiten.Image
 	// Offscreen buffer for HUD text — rendered at 1x then blitted at hudScale.
 	hudBuf *ebiten.Image
+	// Offscreen buffer for the thought log panel — rendered at 1x then blitted at logScale.
+	logBuf *ebiten.Image
+	// Offscreen buffer for the inspector panel — rendered at 1x then blitted at inspScale.
+	inspBuf *ebiten.Image
 
 	// Deterministic terrain noise patches, generated once.
 	terrainPatches []terrainPatch
@@ -87,6 +92,9 @@ type Game struct {
 
 	// Analytics reporter — collects behaviour stats periodically.
 	reporter *SimReporter
+
+	// Master map seed — printed at startup so layouts can be reproduced.
+	mapSeed int64
 }
 
 type rect struct {
@@ -107,6 +115,11 @@ func New() *Game {
 	// Battlefield is 3072x1728 — double the original size.
 	battleW := 3072
 	battleH := 1728
+
+	// Master map seed — random each game, printed to console for reproducibility.
+	mapSeed := time.Now().UnixNano()
+	fmt.Printf("MAP SEED: %d\n", mapSeed)
+
 	g := &Game{
 		width:      borderWidth + battleW + borderWidth + logPanelWidth,
 		height:     borderWidth + battleH + borderWidth,
@@ -117,9 +130,11 @@ func New() *Game {
 		thoughtLog: NewThoughtLog(),
 		showHUD:    true,
 		prevKeys:   make(map[ebiten.Key]bool),
+		mapSeed:    mapSeed,
 	}
-	g.initRoads()
-	g.initBuildings()
+	mapRng := rand.New(rand.NewSource(mapSeed)) // #nosec G404 -- game only
+	g.initRoads(mapRng)
+	g.initBuildings(mapRng)
 	g.initCover()
 	g.navGrid = NewNavGrid(g.gameWidth, g.gameHeight, g.buildings, soldierRadius, g.covers, g.windows)
 	g.tacticalMap = NewTacticalMap(g.gameWidth, g.gameHeight, g.buildings, g.windows, g.buildingFootprints)
@@ -133,6 +148,10 @@ func New() *Game {
 	g.worldBuf = ebiten.NewImage(battleW, battleH)
 	// HUD buffer: 1/hudScale of screen so it renders crisply when scaled up.
 	g.hudBuf = ebiten.NewImage(g.width/hudScale, g.height/hudScale)
+	// Log buffer: 1/logScale of the log panel area.
+	g.logBuf = ebiten.NewImage(logPanelWidth/logScale, g.height/logScale)
+	// Inspector buffer: 1/inspScale of the inspector panel area.
+	g.inspBuf = ebiten.NewImage(inspBufW, inspBufH)
 	g.initTerrainPatches()
 	// Default camera: centred on battlefield, zoom 0.5 so the full map is visible.
 	g.camX = float64(battleW) / 2
@@ -192,35 +211,48 @@ func (g *Game) applyBuildingDamage(rubble []*CoverObject) {
 	g.covers = append(g.covers, rubble...)
 }
 
-func (g *Game) initBuildings() {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404
-
+func (g *Game) initBuildings(rng *rand.Rand) {
 	wall := cellSize // 16px
 	unit := 64
-	targetCount := 28 // more buildings on the larger map
+	targetCount := 32 // more buildings
 
 	g.buildings = g.buildings[:0]
 	g.buildingFootprints = g.buildingFootprints[:0]
 
-	// Build a pool of candidates positioned along road edges.
-	// Use varied sizes so the streetscape looks organic.
-	sizeSets := [][2]int{
-		{3, 3}, {3, 4}, {4, 3}, {4, 4}, {4, 5}, {5, 4}, {5, 5}, {5, 6}, {6, 5},
+	// Weighted size pool — larger buildings are more common.
+	// Each entry: {wUnits, hUnits, weight} where weight controls how many
+	// candidates are generated (higher = more likely to appear).
+	type sizeEntry struct {
+		w, h   int
+		weight int
 	}
+	sizes := []sizeEntry{
+		// Small buildings (uncommon).
+		{3, 3, 1}, {3, 4, 1}, {4, 3, 1},
+		// Medium buildings.
+		{4, 4, 2}, {4, 5, 2}, {5, 4, 2}, {5, 5, 3},
+		// Large buildings (common).
+		{5, 6, 3}, {6, 5, 3}, {6, 6, 4}, {6, 7, 3}, {7, 6, 3},
+		// Very large buildings.
+		{7, 7, 3}, {7, 8, 2}, {8, 7, 2}, {8, 8, 2},
+	}
+
 	var candidates []rect
-	for _, sz := range sizeSets {
-		wUnits, hUnits := sz[0], sz[1]
-		c := g.buildingCandidatesAlongRoads(rng, wUnits*unit, hUnits*unit, unit/2, unit*2)
-		candidates = append(candidates, c...)
+	for _, sz := range sizes {
+		for rep := 0; rep < sz.weight; rep++ {
+			c := g.buildingCandidatesAlongRoads(rng, sz.w*unit, sz.h*unit, unit/2, unit*3)
+			candidates = append(candidates, c...)
+		}
 	}
 	// Shuffle the combined pool.
 	rng.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
 
+	// Variable separation between buildings.
 	for _, candidate := range candidates {
 		if len(g.buildingFootprints) >= targetCount {
 			break
 		}
-		if g.overlapsAny(candidate) {
+		if g.overlapsAnyBuilding(candidate, rng) {
 			continue
 		}
 		if g.rectOverlapsRoad(candidate) {
@@ -232,8 +264,9 @@ func (g *Game) initBuildings() {
 }
 
 // addBuildingWalls generates wall segments for a building footprint.
-// It places perimeter walls with doorways and windows, plus optional internal partitions.
-// Windows are wall-like segments that block movement but are transparent to LOS.
+// It places perimeter walls with doorways and windows, plus recursive
+// internal room subdivision. Windows are evenly spaced along each face,
+// proportional to the face length. Only 1-2 faces get exterior doorways.
 func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 	x, y, w, h := fp.x, fp.y, fp.w, fp.h
 	wUnits := w / unit
@@ -246,43 +279,75 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 		hUnits = 3
 	}
 
-	// Pick a doorway position per wall face (skip corners by using inner cells only).
-	doorN := x + (rng.Intn(wUnits-2)+1)*unit
-	doorS := x + (rng.Intn(wUnits-2)+1)*unit
-	doorW := y + (rng.Intn(hUnits-2)+1)*unit
-	doorE := y + (rng.Intn(hUnits-2)+1)*unit
+	// --- Choose which faces get exterior doorways (1-2 doors, not all 4). ---
+	type face int
+	const (
+		faceN face = iota
+		faceS
+		faceE
+		faceW
+	)
+	faces := []face{faceN, faceS, faceE, faceW}
+	rng.Shuffle(len(faces), func(i, j int) { faces[i], faces[j] = faces[j], faces[i] })
+	numDoors := 1
+	if wUnits >= 5 || hUnits >= 5 {
+		numDoors = 2
+	}
+	if rng.Float64() < 0.3 {
+		numDoors++ // occasional 3-door building
+	}
+	if numDoors > 4 {
+		numDoors = 4
+	}
+	doorFaces := make(map[face]bool)
+	for i := 0; i < numDoors && i < len(faces); i++ {
+		doorFaces[faces[i]] = true
+	}
 
-	// Pick window positions: 1–2 per face, different from doorway.
-	// Windows are unit-wide gaps in the wall that block movement but not LOS.
-	pickWindow := func(faceStart, faceLen, doorPos int, count int) map[int]bool {
+	// --- Compute door positions for selected faces. ---
+	doorPositions := make(map[face]int) // unit-aligned position of doorway
+	if doorFaces[faceN] || doorFaces[faceS] {
+		for _, f := range []face{faceN, faceS} {
+			if doorFaces[f] {
+				doorPositions[f] = x + (rng.Intn(wUnits-2)+1)*unit
+			}
+		}
+	}
+	if doorFaces[faceE] || doorFaces[faceW] {
+		for _, f := range []face{faceE, faceW} {
+			if doorFaces[f] {
+				doorPositions[f] = y + (rng.Intn(hUnits-2)+1)*unit
+			}
+		}
+	}
+
+	// --- Window placement: evenly spaced, ~1 window per 2 units of wall. ---
+	// Returns the set of unit-positions that are windows on a given face.
+	windowPositions := func(faceStart, faceLen int, doorPos int, hasDoor bool) map[int]bool {
+		faceUnits := faceLen / unit
+		if faceUnits < 3 {
+			return nil
+		}
+		// Place windows every 2 units, starting from unit 1, skipping corners.
 		wins := make(map[int]bool)
-		for i := 0; i < count; i++ {
-			for tries := 0; tries < 10; tries++ {
-				innerUnits := faceLen/unit - 2
-				if innerUnits < 1 {
-					break
-				}
-				pos := faceStart + (rng.Intn(innerUnits)+1)*unit
-				if pos == doorPos || wins[pos] {
-					continue
-				}
+		for u := 1; u < faceUnits-1; u++ {
+			pos := faceStart + u*unit
+			if hasDoor && pos == doorPos {
+				continue
+			}
+			// Place a window roughly every 2 units (skip some for realism).
+			if u%2 == 1 {
 				wins[pos] = true
-				break
 			}
 		}
 		return wins
 	}
 
-	winCount := 1
-	if wUnits >= 5 || hUnits >= 5 {
-		winCount = 2
-	}
-	winN := pickWindow(x, w, doorN, winCount)
-	winS := pickWindow(x, w, doorS, winCount)
-	winW := pickWindow(y, h, doorW, winCount)
-	winE := pickWindow(y, h, doorE, winCount)
+	winN := windowPositions(x, w, doorPositions[faceN], doorFaces[faceN])
+	winS := windowPositions(x, w, doorPositions[faceS], doorFaces[faceS])
+	winW := windowPositions(y, h, doorPositions[faceW], doorFaces[faceW])
+	winE := windowPositions(y, h, doorPositions[faceE], doorFaces[faceE])
 
-	// isCornerCell returns true if the wall cell is in the first or last unit of the face.
 	isCornerH := func(wx, faceX, faceW int) bool {
 		return wx < faceX+unit || wx >= faceX+faceW-unit
 	}
@@ -290,9 +355,10 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 		return wy < faceY+unit || wy >= faceY+faceH-unit
 	}
 
+	// --- Place perimeter walls. ---
 	// North wall (top).
 	for wx := x; wx < x+w; wx += wall {
-		if wx >= doorN && wx < doorN+unit {
+		if doorFaces[faceN] && wx >= doorPositions[faceN] && wx < doorPositions[faceN]+unit {
 			continue
 		}
 		r := rect{x: wx, y: y, w: wall, h: wall}
@@ -311,7 +377,7 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 	}
 	// South wall (bottom).
 	for wx := x; wx < x+w; wx += wall {
-		if wx >= doorS && wx < doorS+unit {
+		if doorFaces[faceS] && wx >= doorPositions[faceS] && wx < doorPositions[faceS]+unit {
 			continue
 		}
 		r := rect{x: wx, y: y + h - wall, w: wall, h: wall}
@@ -330,7 +396,7 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 	}
 	// West wall (left), skip corners.
 	for wy := y + wall; wy < y+h-wall; wy += wall {
-		if wy >= doorW && wy < doorW+unit {
+		if doorFaces[faceW] && wy >= doorPositions[faceW] && wy < doorPositions[faceW]+unit {
 			continue
 		}
 		r := rect{x: x, y: wy, w: wall, h: wall}
@@ -349,7 +415,7 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 	}
 	// East wall (right), skip corners.
 	for wy := y + wall; wy < y+h-wall; wy += wall {
-		if wy >= doorE && wy < doorE+unit {
+		if doorFaces[faceE] && wy >= doorPositions[faceE] && wy < doorPositions[faceE]+unit {
 			continue
 		}
 		r := rect{x: x + w - wall, y: wy, w: wall, h: wall}
@@ -367,36 +433,128 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 		}
 	}
 
-	// Internal partition walls with doorways (no windows on internal walls).
-	partitions := 1
-	if wUnits >= 5 || hUnits >= 5 {
-		partitions = 2
-	}
-	for p := 0; p < partitions; p++ {
-		if rng.Intn(2) == 0 && wUnits >= 4 {
-			px := x + (rng.Intn(wUnits-2)+1)*unit
-			doorY := y + (rng.Intn(hUnits-2)+1)*unit
-			for wy := y + wall; wy < y+h-wall; wy += wall {
+	// --- Recursive internal room subdivision (BSP-style). ---
+	// Split the interior into rooms. Each room is at least 2×2 units.
+	// Partition walls have doorways.
+	type room struct{ rx, ry, rw, rh int }
+	interior := room{x + unit, y + unit, w - 2*unit, h - 2*unit}
+	var subdivide func(rm room, depth int)
+	subdivide = func(rm room, depth int) {
+		rmWU := rm.rw / unit
+		rmHU := rm.rh / unit
+		// Stop if room is too small to split (min 3 units on the split axis).
+		if rmWU < 4 && rmHU < 4 {
+			return
+		}
+		// Stop probabilistically at deeper levels.
+		if depth > 0 && rng.Float64() < 0.15 {
+			return
+		}
+		// Choose split axis: prefer splitting the longer dimension.
+		splitH := rmWU > rmHU // true = vertical partition (split horizontally)
+		if rmWU == rmHU {
+			splitH = rng.Intn(2) == 0
+		}
+		// If one axis is too short, force the other.
+		if rmWU < 4 {
+			splitH = false
+		}
+		if rmHU < 4 {
+			splitH = true
+		}
+
+		if splitH && rmWU >= 4 {
+			// Vertical partition at a random x within the room.
+			minU := 2
+			maxU := rmWU - 2
+			if maxU <= minU {
+				return
+			}
+			splitU := minU + rng.Intn(maxU-minU)
+			px := rm.rx + splitU*unit
+			// Doorway in this partition.
+			doorU := rng.Intn(rmHU)
+			doorY := rm.ry + doorU*unit
+			for wy := rm.ry; wy < rm.ry+rm.rh; wy += wall {
 				if wy >= doorY && wy < doorY+unit {
 					continue
 				}
 				g.buildings = append(g.buildings, rect{x: px, y: wy, w: wall, h: wall})
 			}
-		} else if hUnits >= 4 {
-			py := y + (rng.Intn(hUnits-2)+1)*unit
-			doorX := x + (rng.Intn(wUnits-2)+1)*unit
-			for wx := x + wall; wx < x+w-wall; wx += wall {
+			// Recurse into the two sub-rooms.
+			leftW := splitU * unit
+			rightW := rm.rw - splitU*unit - wall
+			if leftW >= 2*unit {
+				subdivide(room{rm.rx, rm.ry, leftW, rm.rh}, depth+1)
+			}
+			if rightW >= 2*unit {
+				subdivide(room{px + wall, rm.ry, rightW, rm.rh}, depth+1)
+			}
+		} else if rmHU >= 4 {
+			// Horizontal partition at a random y within the room.
+			minU := 2
+			maxU := rmHU - 2
+			if maxU <= minU {
+				return
+			}
+			splitU := minU + rng.Intn(maxU-minU)
+			py := rm.ry + splitU*unit
+			// Doorway in this partition.
+			doorU := rng.Intn(rmWU)
+			doorX := rm.rx + doorU*unit
+			for wx := rm.rx; wx < rm.rx+rm.rw; wx += wall {
 				if wx >= doorX && wx < doorX+unit {
 					continue
 				}
 				g.buildings = append(g.buildings, rect{x: wx, y: py, w: wall, h: wall})
 			}
+			// Recurse into the two sub-rooms.
+			topH := splitU * unit
+			bottomH := rm.rh - splitU*unit - wall
+			if topH >= 2*unit {
+				subdivide(room{rm.rx, rm.ry, rm.rw, topH}, depth+1)
+			}
+			if bottomH >= 2*unit {
+				subdivide(room{rm.rx, py + wall, rm.rw, bottomH}, depth+1)
+			}
+		}
+	}
+
+	// Only subdivide buildings that are big enough (>=4 units on both axes).
+	if wUnits >= 4 && hUnits >= 4 {
+		subdivide(interior, 0)
+	} else if wUnits >= 4 || hUnits >= 4 {
+		// Simple single partition for medium buildings.
+		if rng.Intn(3) > 0 { // 66% chance
+			if wUnits >= 4 && rng.Intn(2) == 0 {
+				px := x + (rng.Intn(wUnits-2)+1)*unit
+				doorY := y + (rng.Intn(hUnits-2)+1)*unit
+				for wy := y + wall; wy < y+h-wall; wy += wall {
+					if wy >= doorY && wy < doorY+unit {
+						continue
+					}
+					g.buildings = append(g.buildings, rect{x: px, y: wy, w: wall, h: wall})
+				}
+			} else if hUnits >= 4 {
+				py := y + (rng.Intn(hUnits-2)+1)*unit
+				doorX := x + (rng.Intn(wUnits-2)+1)*unit
+				for wx := x + wall; wx < x+w-wall; wx += wall {
+					if wx >= doorX && wx < doorX+unit {
+						continue
+					}
+					g.buildings = append(g.buildings, rect{x: wx, y: py, w: wall, h: wall})
+				}
+			}
 		}
 	}
 }
 
-func (g *Game) overlapsAny(r rect) bool {
-	pad := 16
+// overlapsAnyBuilding checks if the candidate rect overlaps any existing
+// building footprint, using a variable padding for organic spacing.
+// Larger gaps appear randomly so that open plazas form naturally.
+func (g *Game) overlapsAnyBuilding(r rect, rng *rand.Rand) bool {
+	// Variable gap: most buildings get a small gap, some get a large one (plaza).
+	pad := 24 + rng.Intn(64) // 24-88px gap
 	rx0 := r.x - pad
 	ry0 := r.y - pad
 	rx1 := r.x + r.w + pad
@@ -404,13 +562,6 @@ func (g *Game) overlapsAny(r rect) bool {
 
 	for _, b := range g.buildingFootprints {
 		if rx0 < b.x+b.w && rx1 > b.x && ry0 < b.y+b.h && ry1 > b.y {
-			return true
-		}
-	}
-	// Also reject if the candidate overlaps any road.
-	for i := range g.roads {
-		rd := &g.roads[i]
-		if rx0 < rd.x+rd.w && rx1 > rd.x && ry0 < rd.y+rd.h && ry1 > rd.y {
 			return true
 		}
 	}
@@ -719,6 +870,9 @@ func (g *Game) handleInput() {
 func (g *Game) Draw(screen *ebiten.Image) {
 	// Window background: very dark, outside battlefield.
 	screen.Fill(color.RGBA{R: 12, G: 14, B: 12, A: 255})
+	if false {
+		g.drawFormationSlots(screen)
+	}
 
 	// Render world content to worldBuf at (0,0) origin, then blit with camera transform.
 	g.worldBuf.Clear()
@@ -731,41 +885,39 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	cam.Translate(-g.camX, -g.camY)
 	cam.Scale(g.camZoom, g.camZoom)
 	cam.Translate(vpW/2, vpH/2)
-
-	opt := &ebiten.DrawImageOptions{GeoM: cam}
-	// Clip to the battlefield viewport.
-	clipX := float32(g.offX)
-	clipY := float32(g.offY)
 	// Draw worldBuf onto screen at the battlefield offset.
 	var blit ebiten.DrawImageOptions
 	blit.GeoM = cam
 	blit.GeoM.Translate(float64(g.offX), float64(g.offY))
 	screen.DrawImage(g.worldBuf, &blit)
-	_ = opt
-	_ = clipX
-	_ = clipY
 
 	// Battlefield border frame (drawn at screen coords, not transformed).
 	ox := float32(g.offX)
 	oy := float32(g.offY)
 	gw := float32(g.gameWidth)
 	gh := float32(g.gameHeight)
-	borderCol := color.RGBA{R: 65, G: 90, B: 65, A: 255}
-	vector.StrokeRect(screen, ox-1, oy-1, gw+2, gh+2, 2.0, borderCol, false)
-	vector.StrokeRect(screen, ox-3, oy-3, gw+6, gh+6, 1.0, color.RGBA{R: 40, G: 65, B: 40, A: 100}, false)
+	// Outer glow.
+	vector.StrokeRect(screen, ox-4, oy-4, gw+8, gh+8, 1.0, color.RGBA{R: 30, G: 50, B: 30, A: 60}, false)
+	// Mid border.
+	vector.StrokeRect(screen, ox-2, oy-2, gw+4, gh+4, 1.5, color.RGBA{R: 50, G: 80, B: 50, A: 140}, false)
+	// Main bright border.
+	vector.StrokeRect(screen, ox-1, oy-1, gw+2, gh+2, 2.0, color.RGBA{R: 75, G: 110, B: 75, A: 255}, false)
+	// Inner highlight.
+	vector.StrokeRect(screen, ox, oy, gw, gh, 1.0, color.RGBA{R: 90, G: 140, B: 90, A: 60}, false)
 
-	// Thought log panel (screen coords).
+	// Thought log panel — rendered to scaled buffer, then blitted.
+	logBufW := logPanelWidth / logScale
+	logBufH := g.height / logScale
+	g.thoughtLog.Draw(g.logBuf, logBufW, logBufH)
 	logX := g.offX + g.gameWidth + g.offX
-	g.thoughtLog.Draw(screen, logX, g.height)
+	logOpts := &ebiten.DrawImageOptions{}
+	logOpts.GeoM.Scale(float64(logScale), float64(logScale))
+	logOpts.GeoM.Translate(float64(logX), 0)
+	screen.DrawImage(g.logBuf, logOpts)
 
 	// HUD key legend.
 	if g.showHUD {
 		g.drawHUD(screen)
-	}
-
-	// Zoom indicator.
-	if g.camZoom != 1.0 {
-		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("zoom: %.1fx", g.camZoom), g.offX+6, g.offY+6)
 	}
 
 	// Soldier inspector panel (screen-space, drawn over everything).
@@ -809,43 +961,98 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridMid, color.RGBA{R: 38, G: 55, B: 38, A: 255})
 	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridCoarse, color.RGBA{R: 48, G: 68, B: 48, A: 255})
 
-	// Roads — drawn before buildings so buildings sit on top of the road surface.
-	roadFill := color.RGBA{R: 48, G: 46, B: 42, A: 255} // dark asphalt
-	roadEdge := color.RGBA{R: 62, G: 60, B: 54, A: 255} // slightly lighter kerb
-	roadMark := color.RGBA{R: 70, G: 68, B: 58, A: 120} // faint centre-line
-	for _, rd := range g.roads {
-		rx := ox + float32(rd.x)
-		ry := oy + float32(rd.y)
-		rw := float32(rd.w)
-		rh := float32(rd.h)
-		vector.FillRect(screen, rx, ry, rw, rh, roadFill, false)
-		// Edge lines.
-		vector.StrokeLine(screen, rx, ry, rx+rw, ry, 1.0, roadEdge, false)
-		vector.StrokeLine(screen, rx, ry+rh, rx+rw, ry+rh, 1.0, roadEdge, false)
-		vector.StrokeLine(screen, rx, ry, rx, ry+rh, 1.0, roadEdge, false)
-		vector.StrokeLine(screen, rx+rw, ry, rx+rw, ry+rh, 1.0, roadEdge, false)
-		// Dashed centre marking.
-		if rd.horiz {
-			cy := ry + rh/2
-			dashLen := float32(24)
-			gap := float32(16)
-			for x := rx; x < rx+rw; x += dashLen + gap {
-				end := x + dashLen
-				if end > rx+rw {
-					end = rx + rw
-				}
-				vector.StrokeLine(screen, x, cy, end, cy, 1.0, roadMark, false)
+	// Roads — drawn as smooth curved polylines before buildings.
+	roadFill := color.RGBA{R: 48, G: 46, B: 42, A: 255}     // dark asphalt
+	roadEdge := color.RGBA{R: 62, G: 60, B: 54, A: 255}     // slightly lighter kerb
+	roadMark := color.RGBA{R: 70, G: 68, B: 58, A: 120}     // faint centre-line
+	roadShoulder := color.RGBA{R: 40, G: 38, B: 34, A: 255} // darker shoulder
+	for _, rp := range g.roadPolylines {
+		pts := rp.points
+		hw := float32(rp.width)
+		if len(pts) < 2 {
+			continue
+		}
+		// Draw road as thick line segments following the polyline.
+		// Shoulder (slightly wider, darker).
+		for i := 0; i < len(pts)-1; i++ {
+			x0 := ox + float32(pts[i][0])
+			y0 := oy + float32(pts[i][1])
+			x1 := ox + float32(pts[i+1][0])
+			y1 := oy + float32(pts[i+1][1])
+			vector.StrokeLine(screen, x0, y0, x1, y1, hw*2+6, roadShoulder, false)
+		}
+		// Main asphalt body.
+		for i := 0; i < len(pts)-1; i++ {
+			x0 := ox + float32(pts[i][0])
+			y0 := oy + float32(pts[i][1])
+			x1 := ox + float32(pts[i+1][0])
+			y1 := oy + float32(pts[i+1][1])
+			vector.StrokeLine(screen, x0, y0, x1, y1, hw*2, roadFill, false)
+		}
+		// Edge kerb lines.
+		for i := 0; i < len(pts)-1; i++ {
+			ax, ay := pts[i][0], pts[i][1]
+			bx, by := pts[i+1][0], pts[i+1][1]
+			dx := bx - ax
+			dy := by - ay
+			l := math.Sqrt(dx*dx + dy*dy)
+			if l < 1 {
+				continue
 			}
-		} else {
-			cx := rx + rw/2
-			dashLen := float32(24)
-			gap := float32(16)
-			for y := ry; y < ry+rh; y += dashLen + gap {
-				end := y + dashLen
-				if end > ry+rh {
-					end = ry + rh
+			nx := float32(-dy / l * float64(hw))
+			ny := float32(dx / l * float64(hw))
+			// Left edge.
+			vector.StrokeLine(screen,
+				ox+float32(ax)+nx, oy+float32(ay)+ny,
+				ox+float32(bx)+nx, oy+float32(by)+ny,
+				1.0, roadEdge, false)
+			// Right edge.
+			vector.StrokeLine(screen,
+				ox+float32(ax)-nx, oy+float32(ay)-ny,
+				ox+float32(bx)-nx, oy+float32(by)-ny,
+				1.0, roadEdge, false)
+		}
+		// Dashed centre-line.
+		dashLen := float32(24)
+		gapLen := float32(16)
+		accum := float32(0)
+		drawing := true
+		for i := 0; i < len(pts)-1; i++ {
+			x0 := ox + float32(pts[i][0])
+			y0 := oy + float32(pts[i][1])
+			x1 := ox + float32(pts[i+1][0])
+			y1 := oy + float32(pts[i+1][1])
+			dx := x1 - x0
+			dy := y1 - y0
+			segLen := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+			if segLen < 1 {
+				continue
+			}
+			pos := float32(0)
+			for pos < segLen {
+				threshold := dashLen
+				if !drawing {
+					threshold = gapLen
 				}
-				vector.StrokeLine(screen, cx, y, cx, end, 1.0, roadMark, false)
+				remain := threshold - accum
+				advance := remain
+				if pos+advance > segLen {
+					advance = segLen - pos
+				}
+				if drawing {
+					t0 := pos / segLen
+					t1 := (pos + advance) / segLen
+					vector.StrokeLine(screen,
+						x0+dx*t0, y0+dy*t0,
+						x0+dx*t1, y0+dy*t1,
+						1.0, roadMark, false)
+				}
+				accum += advance
+				pos += advance
+				if accum >= threshold {
+					accum = 0
+					drawing = !drawing
+				}
 			}
 		}
 	}
@@ -1391,22 +1598,30 @@ func (g *Game) drawGunfireLighting(screen *ebiten.Image, offX, offY int) {
 }
 
 // drawVignette darkens the edges of the battlefield for atmosphere.
-// Two-layer vignette: inner soft band + outer hard strip for depth.
+// Three-layer vignette: outer hard + mid + inner soft for cinematic depth.
 func (g *Game) drawVignette(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
 	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
 
 	// Outer hard strip — strong darkening at the absolute edge.
-	outer := float32(40)
-	outerDark := color.RGBA{R: 0, G: 0, B: 0, A: 80}
+	outer := float32(60)
+	outerDark := color.RGBA{R: 0, G: 0, B: 0, A: 100}
 	vector.FillRect(screen, ox, oy, gw, outer, outerDark, false)
 	vector.FillRect(screen, ox, oy+gh-outer, gw, outer, outerDark, false)
 	vector.FillRect(screen, ox, oy, outer, gh, outerDark, false)
 	vector.FillRect(screen, ox+gw-outer, oy, outer, gh, outerDark, false)
 
+	// Mid band — moderate darkening.
+	mid := float32(160)
+	midDark := color.RGBA{R: 0, G: 0, B: 0, A: 45}
+	vector.FillRect(screen, ox, oy, gw, mid, midDark, false)
+	vector.FillRect(screen, ox, oy+gh-mid, gw, mid, midDark, false)
+	vector.FillRect(screen, ox, oy, mid, gh, midDark, false)
+	vector.FillRect(screen, ox+gw-mid, oy, mid, gh, midDark, false)
+
 	// Inner soft band — subtle atmosphere gradient.
-	inner := float32(120)
-	innerDark := color.RGBA{R: 0, G: 0, B: 0, A: 30}
+	inner := float32(280)
+	innerDark := color.RGBA{R: 0, G: 0, B: 0, A: 18}
 	vector.FillRect(screen, ox, oy, gw, inner, innerDark, false)
 	vector.FillRect(screen, ox, oy+gh-inner, gw, inner, innerDark, false)
 	vector.FillRect(screen, ox, oy, inner, gh, innerDark, false)

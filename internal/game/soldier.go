@@ -43,6 +43,8 @@ const (
 	panicRecoveryThreshold = 0.5   // EffectiveFear below this = panic unlocks (hysteresis)
 	flankDistance          = 200.0 // px perpendicular travel during flank
 	sightlineUpdateRate    = 120   // ticks between sightline score recalcs
+	goalPauseBase          = 10    // base ticks to pause briefly after a non-critical goal switch
+	stressReevalPeriod     = 18    // ticks between stress-jitter re-evaluation probes
 )
 
 // FireMode represents the soldier's current weapon engagement mode.
@@ -147,6 +149,19 @@ type Soldier struct {
 	health       float64 // hit points, 0 = incapacitated
 	fireCooldown int     // ticks until next shot allowed
 
+	// Multi-round trigger state (burst/auto pacing).
+	burstShotsRemaining int // queued rounds left in current trigger pull
+	burstShotIndex      int // next queued shot index (0-based)
+	burstTargetID       int // target id locked for queued rounds
+	burstAnyHit         bool
+	burstHitChance      float64
+	burstDist           float64
+	burstBaseSpread     float64
+
+	// Long-range aiming state.
+	aimingTargetID int // target id currently being lined up (-1 means none)
+	aimingTicks    int // consecutive ticks spent aiming at aimingTargetID
+
 	// Fire mode
 	currentFireMode FireMode // mode currently in use
 	desiredFireMode FireMode // mode the soldier wants based on range/terrain
@@ -188,6 +203,15 @@ type Soldier struct {
 	// dashOverwatchTimer: >0 means soldier just dashed and is now overwatch-stopped.
 	dashOverwatchTimer int
 
+	// --- Cover-to-cover bounding ---
+	// boundDestX/Y is the ultimate destination of a multi-bound advance.
+	// Each dash targets an intermediate cover position along the bearing to boundDest.
+	boundDestX, boundDestY float64
+	boundDestSet           bool // true when a multi-bound advance is active
+	// suppressionAbort: true when a dash was interrupted by incoming fire.
+	// The soldier seeks cover immediately and waits for fire to lift before resuming.
+	suppressionAbort bool
+
 	// --- Post-arrival pause (assess → perceive → decide cadence) ---
 	// postArrivalTimer: countdown after reaching a destination before re-evaluation.
 	postArrivalTimer int
@@ -195,7 +219,16 @@ type Soldier struct {
 	// --- Peek system ---
 	peekTarget [2]float64 // world position of the peek point
 	peekTimer  int        // countdown while performing a peek
+
+	// --- Action pacing ---
+	// goalPauseTimer inserts a short pause after a non-critical goal switch.
+	goalPauseTimer int
 }
+
+const (
+	personalSpaceRadius = float64(cellSize) * 1.1
+	cellOverlapEpsilon  = 0.35
+)
 
 // NewSoldier creates a soldier at (x,y) that will advance toward end.
 func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavGrid, covers []*CoverObject, buildings []rect, tl *ThoughtLog, tick *int, tm ...*TacticalMap) *Soldier {
@@ -208,23 +241,25 @@ func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavG
 	}
 
 	s := &Soldier{
-		id:          id,
-		label:       prefix + string(rune('0'+id%10)),
-		x:           x,
-		y:           y,
-		team:        team,
-		startTarget: start,
-		endTarget:   end,
-		navGrid:     ng,
-		covers:      covers,
-		buildings:   buildings,
-		state:       SoldierStateMoving,
-		health:      soldierMaxHP,
-		vision:      NewVisionState(initHeading),
-		profile:     DefaultProfile(),
-		thoughtLog:  tl,
-		currentTick: tick,
-		prevGoal:    GoalAdvance,
+		id:             id,
+		label:          prefix + string(rune('0'+id%10)),
+		x:              x,
+		y:              y,
+		team:           team,
+		startTarget:    start,
+		endTarget:      end,
+		navGrid:        ng,
+		covers:         covers,
+		buildings:      buildings,
+		state:          SoldierStateMoving,
+		health:         soldierMaxHP,
+		vision:         NewVisionState(initHeading),
+		profile:        DefaultProfile(),
+		thoughtLog:     tl,
+		currentTick:    tick,
+		prevGoal:       GoalAdvance,
+		aimingTargetID: -1,
+		burstTargetID:  -1,
 	}
 	if len(tm) > 0 && tm[0] != nil {
 		s.tacticalMap = tm[0]
@@ -350,6 +385,11 @@ func (s *Soldier) Update() {
 	if s.state == SoldierStateDead {
 		return
 	}
+	if false {
+		_ = baseDecisionInterval
+		_ = minDecisionInterval
+		_ = s.decisionInterval()
+	}
 
 	dt := 1.0
 	s.profile.Psych.RecoverFear(dt)
@@ -386,6 +426,10 @@ func (s *Soldier) Update() {
 		if s.postArrivalTimer == 0 {
 			bb.ShatterEvent = true // pause complete: time to decide
 		}
+	}
+
+	if s.goalPauseTimer > 0 {
+		s.goalPauseTimer--
 	}
 
 	// --- Per-tick decay of commitment-based decision state ---
@@ -522,6 +566,15 @@ func (s *Soldier) Update() {
 	} else if bb.CommitPhase(tick) == 2 && tick >= bb.NextDecisionTick {
 		// Review phase reached and lock expired — scheduled re-evaluation.
 		shouldEval = true
+	} else if ef > 0.62 && bb.CommitPhase(tick) >= 1 && tick%stressReevalPeriod == 0 {
+		// Stress jitter: under elevated fear, occasionally force an early review.
+		// Deterministic pseudo-random roll based on id+tick keeps behaviour varied
+		// without introducing non-replayable global randomness.
+		roll := math.Abs(math.Sin(float64((tick + 1) * (s.id + 3))))
+		if roll < (ef-0.62)*0.65 {
+			shouldEval = true
+			bb.AddShatterPressure(0.10+ef*0.08, tick)
+		}
 	}
 
 	if shouldEval {
@@ -542,8 +595,14 @@ func (s *Soldier) Update() {
 			if !sameGoal {
 				s.think(fmt.Sprintf("goal: %s → %s", s.prevGoal, goal))
 				s.prevGoal = goal
+				s.goalPauseTimer = s.goalSwitchPauseDuration(stress, bb.IncomingFireCount > 0)
 				if goal != GoalFlank {
 					bb.FlankComplete = false
+				}
+				// Clear MoveToContact bounding state when leaving that goal.
+				if goal != GoalMoveToContact {
+					s.suppressionAbort = false
+					s.boundDestSet = false
 				}
 			}
 			bb.CurrentGoal = goal
@@ -573,6 +632,7 @@ func (s *Soldier) Update() {
 	}
 
 	s.executeGoal(dt)
+	s.enforcePersonalSpace()
 }
 
 // tickVal returns the current tick, defaulting to 0 if pointer is nil.
@@ -581,6 +641,22 @@ func (s *Soldier) tickVal() int {
 		return *s.currentTick
 	}
 	return 0
+}
+
+func (s *Soldier) goalSwitchPauseDuration(stress float64, underFire bool) int {
+	pause := goalPauseBase + int(stress*16)
+	if !underFire {
+		pause += 6
+	} else {
+		pause = int(float64(pause) * 0.45)
+	}
+	if pause < 0 {
+		pause = 0
+	}
+	if pause > 28 {
+		pause = 28
+	}
+	return pause
 }
 
 // executeGoal runs the behaviour for the soldier's current goal.
@@ -645,6 +721,13 @@ func (s *Soldier) executeGoal(dt float64) {
 	}
 
 	goal := s.blackboard.CurrentGoal
+	if s.goalPauseTimer > 0 && bb.IncomingFireCount == 0 &&
+		goal != GoalSurvive && goal != GoalFallback && goal != GoalEngage {
+		s.state = SoldierStateIdle
+		s.profile.Physical.AccumulateFatigue(0, dt)
+		s.faceNearestThreatOrContact()
+		return
+	}
 
 	switch goal {
 	case GoalSurvive:
@@ -663,7 +746,11 @@ func (s *Soldier) executeGoal(dt float64) {
 		// Only advance if genuinely out of effective fire range (beyond maxFireRange).
 		// Inside accurateFireRange, always hold and use cover — stop the suicidal rush.
 		outOfRange := bl.Internal.LastRange > maxFireRange
-		if outOfRange {
+		// Poor range: beyond burstRange with a low hit chance. The soldier CAN fire
+		// but isn't effective — they need to close distance rather than idle in cover.
+		poorRange := bl.Internal.LastRange > float64(burstRange) &&
+			bl.Internal.LastEstimatedHitChance < 0.55
+		if outOfRange || poorRange {
 			s.state = SoldierStateMoving
 			s.moveToContact(dt)
 		} else if !s.isInCover() {
@@ -678,6 +765,34 @@ func (s *Soldier) executeGoal(dt float64) {
 		if s.profile.Stance != StanceCrouching {
 			s.profile.Stance = StanceCrouching
 		}
+
+		// --- Suppression interrupt: incoming fire aborts the dash ---
+		if bb.IncomingFireCount > 0 && s.state == SoldierStateMoving {
+			s.suppressionAbort = true
+			s.path = nil
+			s.pathIndex = 0
+			s.think("taking fire mid-bound — seeking cover")
+		}
+		if s.suppressionAbort {
+			// Stay suppressed until fire lifts for at least one tick.
+			if bb.IncomingFireCount > 0 {
+				s.seekCoverFromThreat(dt)
+				break
+			}
+			// Fire has lifted — clear abort, resume bounding next tick.
+			s.suppressionAbort = false
+			s.dashOverwatchTimer = s.dashOverwatchDuration(true)
+			s.think("fire lifted — holding before next bound")
+		}
+
+		// --- Buddy bounding: overwatchers hold position, movers advance ---
+		if !bb.BoundMover {
+			s.state = SoldierStateIdle
+			s.profile.Physical.AccumulateFatigue(0, dt)
+			s.faceNearestThreatOrContact()
+			break
+		}
+
 		// Dash overwatch: hold still after a dash until the timer expires.
 		if s.dashOverwatchTimer > 0 {
 			s.state = SoldierStateIdle
@@ -1186,6 +1301,70 @@ func (s *Soldier) moveAlongPath(dt float64) {
 	}
 }
 
+func (s *Soldier) enforcePersonalSpace() {
+	if s.squad == nil {
+		return
+	}
+	for _, m := range s.squad.Members {
+		if m == s || m.state == SoldierStateDead {
+			continue
+		}
+		// Resolve each pair once to avoid symmetric push jitter.
+		if s.id < m.id {
+			s.resolveCellOverlapPair(m)
+			s.applySeparationPair(m)
+		}
+	}
+}
+
+func (s *Soldier) resolveCellOverlapPair(other *Soldier) {
+	if int(s.x/float64(cellSize)) != int(other.x/float64(cellSize)) ||
+		int(s.y/float64(cellSize)) != int(other.y/float64(cellSize)) {
+		return
+	}
+
+	dx := s.x - other.x
+	dy := s.y - other.y
+	if math.Abs(dx)+math.Abs(dy) < 1e-6 {
+		t := float64((s.tickVal() + 1) * (s.id + 7))
+		dx = math.Cos(t * 0.73)
+		dy = math.Sin(t * 0.91)
+	}
+	d := math.Sqrt(dx*dx + dy*dy)
+	if d < 1e-6 {
+		return
+	}
+	nx := dx / d
+	ny := dy / d
+	push := float64(cellSize)*0.55 + cellOverlapEpsilon
+	half := push * 0.5
+	s.x += nx * half
+	s.y += ny * half
+	other.x -= nx * half
+	other.y -= ny * half
+}
+
+func (s *Soldier) applySeparationPair(other *Soldier) {
+	dx := s.x - other.x
+	dy := s.y - other.y
+	d := math.Sqrt(dx*dx + dy*dy)
+	if d < 1e-6 || d >= personalSpaceRadius {
+		return
+	}
+	pressure := (personalSpaceRadius - d) / personalSpaceRadius
+	nx := dx / d
+	ny := dy / d
+	push := pressure * 0.55
+	if push < 0.05 {
+		push = 0.05
+	}
+	half := push * 0.5
+	s.x += nx * half
+	s.y += ny * half
+	other.x -= nx * half
+	other.y -= ny * half
+}
+
 // Corner peek vision parameters.
 const (
 	peekFOVDeg = 45.0  // narrow peek arc in degrees
@@ -1213,10 +1392,27 @@ func (s *Soldier) UpdateVision(enemies []*Soldier, buildings []rect) {
 		}
 	}
 
-	// Seeing enemies increases fear slightly.
+	// Seeing enemies increases fear, but should not permanently prevent recovery
+	// when contact is distant and no rounds are landing.
 	if len(s.vision.KnownContacts) > 0 {
-		stress := 0.02 * float64(len(s.vision.KnownContacts))
-		s.profile.Psych.ApplyStress(stress)
+		minDist := math.MaxFloat64
+		for _, e := range s.vision.KnownContacts {
+			dx := e.x - s.x
+			dy := e.y - s.y
+			d := math.Sqrt(dx*dx + dy*dy)
+			if d < minDist {
+				minDist = d
+			}
+		}
+		// Near threats create meaningful stress; far threats create minimal pressure.
+		nearFactor := clamp01(1.0 - minDist/(maxFireRange*1.25))
+		stress := 0.004 * float64(len(s.vision.KnownContacts)) * nearFactor
+		if s.blackboard.IncomingFireCount > 0 {
+			stress += 0.004
+		}
+		if stress > 0 {
+			s.profile.Psych.ApplyStress(stress)
+		}
 	}
 
 	// A corner that reveals enemies is considered high value — reinforce staying.
@@ -1658,32 +1854,39 @@ func (s *Soldier) dashOverwatchDuration(underFire bool) int {
 	return d
 }
 
-// moveCombatDash moves the soldier in a stop/start pattern in combat:
-//  1. Sprint (dash speed) toward the selected position.
-//  2. On arrival, start a dashOverwatchTimer to pause and scan.
+// moveCombatDash moves the soldier in a cover-to-cover bounding pattern:
+//  1. Resolve the ultimate destination (contact / squad order / gunfire / memory).
+//  2. Compute bearing toward that destination.
+//  3. Search for an intermediate cover position along the bearing using the TacticalMap.
+//  4. Sprint (dash speed) to the intermediate cover position.
+//  5. On arrival, start a dashOverwatchTimer to pause and scan.
+//  6. Next cycle, repeat from step 2 — each bound leapfrogs closer.
 //
-// The target is chosen from the blackboard (BestNearbyX/Y, squad contact, etc.).
-func (s *Soldier) moveCombatDash(dt float64) {
+// Bound distance scales with proximity to contact: far away = long bounds (8-12 cells),
+// close = short cautious bounds (3-5 cells). If no TacticalMap is available, falls
+// back to a direct dash toward the ultimate destination.
+func (s *Soldier) moveCombatDash(_ float64) {
 	bb := &s.blackboard
 
-	// Choose a dash target: prefer the pre-computed best nearby position,
-	// otherwise path toward the squad contact or heard gunfire.
-	var targetX, targetY float64
-	if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
-		targetX = bb.BestNearbyX
-		targetY = bb.BestNearbyY
+	// --- Step 1: Resolve ultimate destination ---
+	var destX, destY float64
+	if bb.HasMoveOrder {
+		destX = bb.OrderMoveX
+		destY = bb.OrderMoveY
+	} else if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
+		destX = bb.BestNearbyX
+		destY = bb.BestNearbyY
 	} else if bb.SquadHasContact {
-		// Push toward a point short of the contact (don't run into them).
 		cBearing := math.Atan2(bb.SquadContactY-s.y, bb.SquadContactX-s.x)
 		stopDist := float64(burstRange) * 0.75
-		targetX = bb.SquadContactX - math.Cos(cBearing)*stopDist
-		targetY = bb.SquadContactY - math.Sin(cBearing)*stopDist
+		destX = bb.SquadContactX - math.Cos(cBearing)*stopDist
+		destY = bb.SquadContactY - math.Sin(cBearing)*stopDist
 	} else if bb.HeardGunfire {
-		targetX = bb.HeardGunfireX
-		targetY = bb.HeardGunfireY
+		destX = bb.HeardGunfireX
+		destY = bb.HeardGunfireY
 	} else if bb.IsActivated() {
-		targetX = bb.CombatMemoryX
-		targetY = bb.CombatMemoryY
+		destX = bb.CombatMemoryX
+		destY = bb.CombatMemoryY
 	} else {
 		s.state = SoldierStateIdle
 		return
@@ -1695,12 +1898,76 @@ func (s *Soldier) moveCombatDash(dt float64) {
 		dx := s.x - lx
 		dy := s.y - ly
 		if math.Sqrt(dx*dx+dy*dy) > contactLeashBase*contactLeashMul {
-			targetX = lx
-			targetY = ly
+			destX = lx
+			destY = ly
 		}
 	}
 
-	// Repath if target drifted significantly.
+	// Update stored ultimate destination.
+	s.boundDestX = destX
+	s.boundDestY = destY
+	s.boundDestSet = true
+
+	// --- Step 2: Compute bearing and distance to destination ---
+	ddx := destX - s.x
+	ddy := destY - s.y
+	distToDest := math.Sqrt(ddx*ddx + ddy*ddy)
+	bearing := math.Atan2(ddy, ddx)
+
+	// --- Step 3: Pick an intermediate bound target ---
+	// Bound distance scales with proximity: far = long bounds, close = short cautious bounds.
+	// Distance thresholds in cells (1 cell = cellSize px).
+	var targetX, targetY float64
+	usedCover := false
+
+	if s.tacticalMap != nil && distToDest > float64(cellSize)*4 {
+		// Scale bound length by distance to contact.
+		maxBound := 12 // cells, ~192px — long bound when far away
+		minBound := 3  // cells, ~48px — minimum bound distance
+		// Close approach: tighten bounds as distance shrinks.
+		distCells := int(distToDest / float64(cellSize))
+		boundLen := maxBound
+		if distCells < 25 {
+			// Linear ramp: 25 cells → max, 5 cells → min.
+			t := clamp01(float64(distCells-5) / 20.0)
+			boundLen = minBound + int(t*float64(maxBound-minBound))
+		}
+		// Disciplined soldiers use longer, more deliberate bounds.
+		boundLen += int(s.profile.Skills.Discipline * 3)
+		if boundLen > maxBound+3 {
+			boundLen = maxBound + 3
+		}
+
+		// Search for cover along the bearing.
+		bx, by, bscore, found := s.tacticalMap.FindBoundCover(s.x, s.y, bearing, minBound, boundLen)
+		if found && bscore > -0.5 {
+			targetX = bx
+			targetY = by
+			usedCover = true
+		}
+	}
+
+	// Fallback: if no cover found or no tactical map, dash directly toward destination.
+	if !usedCover {
+		// Clamp to a maximum dash distance so we don't sprint endlessly.
+		maxDashDist := float64(cellSize) * 10
+		if distToDest > maxDashDist {
+			targetX = s.x + (ddx/distToDest)*maxDashDist
+			targetY = s.y + (ddy/distToDest)*maxDashDist
+		} else {
+			targetX = destX
+			targetY = destY
+		}
+	}
+
+	// If we're very close to the final destination, just go straight there.
+	if distToDest < float64(cellSize)*3 {
+		targetX = destX
+		targetY = destY
+	}
+
+	// --- Step 4: Path and sprint to the intermediate target ---
+	// Repath if target drifted significantly from where we were heading.
 	dx := targetX - s.slotTargetX
 	dy := targetY - s.slotTargetY
 	if s.path == nil || s.pathIndex >= len(s.path) || math.Sqrt(dx*dx+dy*dy) > contactRepathDist {
@@ -1713,17 +1980,20 @@ func (s *Soldier) moveCombatDash(dt float64) {
 		}
 	}
 
-	// Sprint: temporarily override speed via a local move at dash speed.
 	if s.path == nil || s.pathIndex >= len(s.path) {
-		// Arrived — start overwatch pause.
+		// Arrived at intermediate cover — start overwatch pause.
 		s.state = SoldierStateIdle
 		s.dashOverwatchTimer = s.dashOverwatchDuration(bb.IncomingFireCount > 0)
-		s.think(fmt.Sprintf("dash arrived — overwatch %d ticks", s.dashOverwatchTimer))
-		s.postArrivalTimer = 0 // dash arrival already creates its own pause
+		if usedCover {
+			s.think(fmt.Sprintf("bound complete — holding cover %d ticks", s.dashOverwatchTimer))
+		} else {
+			s.think(fmt.Sprintf("dash arrived — overwatch %d ticks", s.dashOverwatchTimer))
+		}
+		s.postArrivalTimer = 0
 		return
 	}
 
-	// Move at dash speed.
+	// --- Step 5: Move at dash speed ---
 	speed := s.profile.EffectiveSpeed(soldierSpeed * dashSpeedMul)
 	remaining := speed
 	for remaining > 0 && s.pathIndex < len(s.path) {
@@ -1733,7 +2003,7 @@ func (s *Soldier) moveCombatDash(dt float64) {
 		dist := math.Sqrt(wdx*wdx + wdy*wdy)
 		if dist > 1e-6 {
 			targetHeading := math.Atan2(wdy, wdx)
-			s.vision.UpdateHeading(targetHeading, turnRate*2) // snap faster during sprint
+			s.vision.UpdateHeading(targetHeading, turnRate*2)
 		}
 		if dist <= remaining {
 			s.x = wp[0]
@@ -1749,7 +2019,11 @@ func (s *Soldier) moveCombatDash(dt float64) {
 	if s.pathIndex >= len(s.path) {
 		s.state = SoldierStateIdle
 		s.dashOverwatchTimer = s.dashOverwatchDuration(bb.IncomingFireCount > 0)
-		s.think(fmt.Sprintf("dash complete — overwatch %d ticks", s.dashOverwatchTimer))
+		if usedCover {
+			s.think(fmt.Sprintf("bound to cover — holding %d ticks", s.dashOverwatchTimer))
+		} else {
+			s.think(fmt.Sprintf("dash complete — overwatch %d ticks", s.dashOverwatchTimer))
+		}
 	}
 }
 

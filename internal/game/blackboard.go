@@ -230,6 +230,28 @@ type Blackboard struct {
 	// Derived from OutnumberedFactor, squad intent, and casualty state.
 	SquadPosture float64
 
+	// --- Social awareness ---
+	// VisibleAllyCount is the number of squadmates currently visible to this soldier.
+	VisibleAllyCount int
+	// SquadAvgFear is the smoothed effective fear of visible/alive squadmates.
+	SquadAvgFear float64
+	// SquadFearDelta is the per-tick change in SquadAvgFear.
+	// Positive values mean ally stress is rising.
+	SquadFearDelta float64
+	// IsolatedTicks counts consecutive ticks with no visible enemies and no visible allies.
+	IsolatedTicks int
+	// CloseAllyPressure is a 0..1 crowding signal based on nearby ally spacing.
+	// Higher values mean allies are too close and spacing movement is needed.
+	CloseAllyPressure float64
+
+	// --- Buddy bounding (squad-level fire and movement) ---
+	// BoundGroup: 0 or 1, assigned by squad leader. Groups alternate: one moves
+	// while the other overwatches during MoveToContact.
+	BoundGroup int
+	// BoundRole: true = this soldier should move this cycle; false = overwatch.
+	// Toggled by SquadThink each bound cycle.
+	BoundMover bool
+
 	// --- Suppression state ---
 	// SuppressLevel is a persistent 0-1 value representing how pinned down
 	// this soldier is. Unlike IncomingFireCount (reset every tick), this
@@ -243,6 +265,9 @@ type Blackboard struct {
 	// suppressSpiked is true during the tick when suppression first crosses
 	// the SuppressThreshold — used to trigger an immediate ShatterEvent.
 	suppressSpiked bool
+	// suppressed is a hysteresis-smoothed suppression state.
+	// Enter at SuppressThreshold, clear at suppressClearThreshold.
+	suppressed bool
 }
 
 // GoalThresholds controls when a soldier prefers to shoot, push, or seek safety.
@@ -683,6 +708,9 @@ const (
 	// SuppressThreshold: SuppressLevel above this means the soldier is
 	// meaningfully pinned — goal selection will react.
 	SuppressThreshold = 0.30
+	// suppressClearThreshold is lower than SuppressThreshold to avoid
+	// suppression chatter at the boundary.
+	suppressClearThreshold = 0.22
 
 	// suppressDecayPerTick decays suppression toward zero.
 	// ~4s to fully clear from 1.0 at 60TPS (1/240 ≈ 0.00417).
@@ -705,6 +733,7 @@ func (bb *Blackboard) AccumulateSuppression(hit bool, fromX, fromY, toX, toY flo
 	} else {
 		bb.SuppressLevel = math.Min(1.0, bb.SuppressLevel+suppressNearMissDelta)
 	}
+	bb.updateSuppressedState()
 	// Update the suppression direction (bearing FROM the target TOWARD the shooter —
 	// the direction cover must be taken from).
 	dx := fromX - toX
@@ -722,18 +751,45 @@ func (bb *Blackboard) AccumulateSuppression(hit bool, fromX, fromY, toX, toY flo
 // zero. Returns true if a spike was consumed this tick (for shatter events).
 func (bb *Blackboard) DecaySuppression() bool {
 	bb.SuppressLevel = math.Max(0, bb.SuppressLevel-suppressDecayPerTick)
+	bb.updateSuppressedState()
 	spiked := bb.suppressSpiked
 	bb.suppressSpiked = false
 	return spiked
 }
 
+func (bb *Blackboard) updateSuppressedState() {
+	if bb.suppressed {
+		if bb.SuppressLevel < suppressClearThreshold {
+			bb.suppressed = false
+		}
+		return
+	}
+	if bb.SuppressLevel >= SuppressThreshold {
+		bb.suppressed = true
+	}
+}
+
 // IsSuppressed returns true when the soldier's suppression is high enough
 // to meaningfully change their behaviour.
 func (bb *Blackboard) IsSuppressed() bool {
-	return bb.SuppressLevel >= SuppressThreshold
+	bb.updateSuppressedState()
+	return bb.suppressed
 }
 
 // --- Goal Utility Scoring ---
+
+// socialMovePressure computes additional movement pressure from social context:
+// rising ally stress and isolation from both allies and enemies.
+func socialMovePressure(bb *Blackboard, ef float64) (isolationPush, supportPush float64) {
+	if bb.VisibleThreatCount() == 0 && bb.VisibleAllyCount == 0 && bb.IsolatedTicks > 0 {
+		isolationPush = 0.15 + clamp01(float64(bb.IsolatedTicks)/180.0)*0.45
+	}
+	if bb.VisibleThreatCount() == 0 && bb.SquadFearDelta > 0.01 && ef < 0.55 {
+		calmFactor := clamp01((0.55 - ef) / 0.55)
+		supportPush = clamp01(bb.SquadFearDelta*8.0) * (0.25 + calmFactor*0.35)
+	}
+	return isolationPush, supportPush
+}
 
 // SelectGoal evaluates competing goals and returns the highest-utility one.
 func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath bool) GoalKind {
@@ -756,6 +812,11 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	// anyContact covers all sources: visual, squad intel, fresh audio, or persistent memory.
 	hasAudioContact := bb.HeardGunfire && visibleThreats == 0
 	anyContact := bb.SquadHasContact || hasAudioContact || activated
+	combatCohesionPush := 0.0
+	if anyContact && bb.VisibleAllyCount == 0 {
+		combatCohesionPush = 0.35 + clamp01(float64(bb.IsolatedTicks)/120.0)*0.35
+	}
+	clumpPush := bb.CloseAllyPressure
 
 	// Posture influence: positive = offensive push, negative = defensive hold.
 	// When outnumbered the squad pushes aggressively; when outnumbering it holds.
@@ -1037,6 +1098,44 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		}
 	}
 
+	// --- Social movement pressure adjustments ---
+	isolationPush, supportPush := socialMovePressure(bb, ef)
+	if isolationPush > 0 {
+		advanceUtil += isolationPush
+		formationUtil += isolationPush * 0.85
+		holdUtil -= isolationPush * 0.70
+		overwatchUtil -= isolationPush * 0.55
+		if regroupUtil > 0 {
+			regroupUtil += isolationPush * 0.25
+		}
+	}
+	if supportPush > 0 {
+		advanceUtil += supportPush * 0.25
+		holdUtil -= supportPush * 0.30
+		overwatchUtil -= supportPush * 0.25
+		if anyContact {
+			moveToContactUtil += supportPush
+			flankUtil += supportPush * 0.35
+		}
+	}
+	if combatCohesionPush > 0 {
+		formationUtil += combatCohesionPush * 1.10
+		if !isLeader {
+			regroupUtil += combatCohesionPush * 0.90
+		}
+		moveToContactUtil += combatCohesionPush * 0.35
+		holdUtil -= combatCohesionPush * 0.50
+		overwatchUtil -= combatCohesionPush * 0.40
+	}
+	if clumpPush > 0 {
+		advanceUtil += clumpPush * 0.30
+		moveToContactUtil += clumpPush * 0.25
+		flankUtil += clumpPush * 0.20
+		formationUtil -= clumpPush * 0.25
+		holdUtil -= clumpPush * 0.55
+		overwatchUtil -= clumpPush * 0.45
+	}
+
 	// --- Pick highest utility ---
 	best := GoalAdvance
 	bestVal := advanceUtil
@@ -1103,6 +1202,12 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 	hasAudioContact := bb.HeardGunfire && visibleThreats == 0
 	anyContact := bb.SquadHasContact || hasAudioContact || activated
 	posture := bb.SquadPosture
+	isolationPush, supportPush := socialMovePressure(bb, ef)
+	combatCohesionPush := 0.0
+	if anyContact && bb.VisibleAllyCount == 0 {
+		combatCohesionPush = 0.35 + clamp01(float64(bb.IsolatedTicks)/120.0)*0.35
+	}
+	clumpPush := bb.CloseAllyPressure
 
 	switch goal {
 	case GoalEngage:
@@ -1197,6 +1302,11 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				u += posture * 0.12
 			}
 		}
+		if anyContact {
+			u += supportPush
+			u += combatCohesionPush * 0.35
+		}
+		u += clumpPush * 0.25
 		return u
 
 	case GoalFlank:
@@ -1220,6 +1330,10 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				u += posture * 0.10
 			}
 		}
+		if anyContact {
+			u += supportPush * 0.35
+		}
+		u += clumpPush * 0.20
 		return u
 
 	case GoalOverwatch:
@@ -1248,6 +1362,10 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		if bb.AtDoorway {
 			u -= 0.20
 		}
+		u -= isolationPush * 0.55
+		u -= supportPush * 0.25
+		u -= combatCohesionPush * 0.40
+		u -= clumpPush * 0.45
 		return u
 
 	case GoalRegroup:
@@ -1257,6 +1375,10 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 			if visibleThreats > 0 {
 				u *= 0.6
 			}
+		}
+		if u > 0 {
+			u += isolationPush * 0.25
+			u += combatCohesionPush * 0.90
 		}
 		return u
 
@@ -1277,6 +1399,10 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				u -= 0.15
 			}
 		}
+		u -= isolationPush * 0.70
+		u -= supportPush * 0.30
+		u -= combatCohesionPush * 0.50
+		u -= clumpPush * 0.55
 		return u
 
 	case GoalMaintainFormation:
@@ -1305,6 +1431,9 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				u = 0.1
 			}
 		}
+		u += isolationPush * 0.85
+		u += combatCohesionPush * 1.10
+		u -= clumpPush * 0.25
 		return u
 
 	case GoalAdvance:
@@ -1324,6 +1453,9 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		if bb.IsSuppressed() {
 			u *= clamp01(1.0 - suppress*1.5)
 		}
+		u += isolationPush
+		u += supportPush * 0.25
+		u += clumpPush * 0.30
 		return u
 
 	case GoalPeek:

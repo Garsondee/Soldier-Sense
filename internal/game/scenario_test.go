@@ -510,6 +510,115 @@ func TestCombat_HitLands(t *testing.T) {
 	}
 }
 
+func TestCombat_BurstShotsArePaced(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{600, 240}, ng, nil, nil, tl, &tick)
+	target := NewSoldier(1, 240, 240, TeamBlue, [2]float64{600, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
+	shooter.vision.KnownContacts = []*Soldier{target}
+
+	shooter.currentFireMode = FireModeBurst
+	shooter.desiredFireMode = FireModeBurst
+	shooter.burstShotsRemaining = 2
+	shooter.burstShotIndex = 1
+	shooter.burstTargetID = target.id
+	shooter.burstBaseSpread = 0.03
+
+	cm := NewCombatManager(42)
+	all := []*Soldier{shooter, target}
+
+	cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, all)
+	if got := len(cm.tracers); got != 1 {
+		t.Fatalf("expected first queued burst shot now, tracers=%d", got)
+	}
+	if shooter.fireCooldown != burstInterShotGap {
+		t.Fatalf("expected inter-shot cooldown=%d, got=%d", burstInterShotGap, shooter.fireCooldown)
+	}
+
+	cm.ResetFireCounts(all)
+	cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, all)
+	if got := len(cm.tracers); got != 1 {
+		t.Fatalf("expected no shot during first gap tick, tracers=%d", got)
+	}
+
+	cm.ResetFireCounts(all)
+	cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, all)
+	if got := len(cm.tracers); got != 1 {
+		t.Fatalf("expected no shot during second gap tick, tracers=%d", got)
+	}
+
+	cm.ResetFireCounts(all)
+	cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, all)
+	if got := len(cm.tracers); got != 2 {
+		t.Fatalf("expected next burst round after gap, tracers=%d", got)
+	}
+}
+
+func TestCombat_LongRangeAimingDelaysShotWhenCalm(t *testing.T) {
+	ng := NewNavGrid(800, 480, nil, soldierRadius, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{760, 240}, ng, nil, nil, tl, &tick)
+	target := NewSoldier(1, 430, 240, TeamBlue, [2]float64{760, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
+	shooter.vision.KnownContacts = []*Soldier{target}
+
+	// Ensure long-range trigger willingness so this test isolates aiming delay only.
+	shooter.blackboard.Internal.ShootDesire = 1.0
+	shooter.blackboard.Internal.ShotMomentum = 1.0
+	shooter.blackboard.Internal.MoveDesire = 0.0
+	shooter.currentFireMode = FireModeSingle
+	shooter.desiredFireMode = FireModeSingle
+
+	cm := NewCombatManager(7)
+	all := []*Soldier{shooter, target}
+	requiredAimTicks := aimingTicksForDistance(330)
+
+	for i := 0; i < requiredAimTicks; i++ {
+		cm.ResetFireCounts(all)
+		cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, all)
+		if got := len(cm.tracers); got != 0 {
+			t.Fatalf("expected no shot while aiming (tick %d/%d), tracers=%d", i+1, requiredAimTicks, got)
+		}
+	}
+
+	cm.ResetFireCounts(all)
+	cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, all)
+	if got := len(cm.tracers); got != 1 {
+		t.Fatalf("expected shot after aiming delay, tracers=%d", got)
+	}
+}
+
+func TestCombat_LongRangeAimingSkippedWhenUnderFire(t *testing.T) {
+	ng := NewNavGrid(800, 480, nil, soldierRadius, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{760, 240}, ng, nil, nil, tl, &tick)
+	target := NewSoldier(1, 430, 240, TeamBlue, [2]float64{760, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
+	shooter.vision.KnownContacts = []*Soldier{target}
+
+	shooter.blackboard.Internal.ShootDesire = 1.0
+	shooter.blackboard.Internal.ShotMomentum = 1.0
+	shooter.blackboard.Internal.MoveDesire = 0.0
+	shooter.blackboard.IncomingFireCount = 1
+	shooter.currentFireMode = FireModeSingle
+	shooter.desiredFireMode = FireModeSingle
+
+	cm := NewCombatManager(11)
+	all := []*Soldier{shooter, target}
+	cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, all)
+
+	if got := len(cm.tracers); got != 1 {
+		t.Fatalf("expected immediate long-range shot when under fire, tracers=%d", got)
+	}
+	if shooter.aimingTicks != 0 {
+		t.Fatalf("expected aiming state reset while under fire, aimingTicks=%d", shooter.aimingTicks)
+	}
+}
+
 // --- Scenario: Close Engagement ---
 // Two squads already close to each other. Verifies:
 // 1. Members select move_to_contact and then engage once they gain LOS.

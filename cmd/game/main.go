@@ -9,7 +9,7 @@ import (
 
 func main() {
 	ebiten.SetWindowTitle("Soldier Sense")
-	ebiten.SetWindowSize(1904, 912)
+	ebiten.SetFullscreen(true)
 	if err := ebiten.RunGame(game.New()); err != nil {
 		log.Fatal(err)
 	}

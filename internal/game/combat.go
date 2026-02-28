@@ -17,7 +17,6 @@ const (
 	accurateFireRange = 300.0 // px, reliable engagement envelope
 	maxFireRange      = 450.0 // px, includes low-accuracy long-range fire band (+50%)
 	tracerLifetime    = 10    // ticks a tracer persists
-	tracerSpeed       = 40.0  // px per tick (visual only)
 	nearMissStress    = 0.08  // fear added to target on miss
 	hitStress         = 0.20  // fear added to target on hit
 	witnessStress     = 0.03  // fear added to nearby friendlies seeing a hit
@@ -29,6 +28,13 @@ const (
 	fireIntervalSingle = 40 // ~0.67s — aim, squeeze
 	fireIntervalBurst  = 20 // ~0.33s — committed burst rhythm
 	fireIntervalAuto   = 10 // ~0.17s — sustained fire
+	burstInterShotGap  = 2  // ticks between rounds in a burst/auto string
+
+	// Long-range aiming behaviour.
+	aimingSuppressionBlock = 0.12 // suppression above this blocks deliberate aiming
+	aimingBaseTicks        = 4    // minimum ticks to line up a long-range shot
+	aimingExtraTicks       = 12   // additional ticks at max range
+	aimingMaxSpreadBonus   = 0.45 // max spread reduction from full deliberate aim
 
 	// Base damage per bullet. Short-range bonus applied separately.
 	baseDamage = 25.0
@@ -266,6 +272,8 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 				s.currentFireMode = s.desiredFireMode
 				s.think(fmt.Sprintf("fire mode → %s", s.currentFireMode))
 			}
+			resetBurstState(s)
+			resetAimingState(s)
 			continue
 		}
 
@@ -277,16 +285,28 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 
 		// Don't shoot while panicked.
 		if s.blackboard.CurrentGoal == GoalSurvive {
+			resetBurstState(s)
+			resetAimingState(s)
 			continue
 		}
 
 		// Need a visible target.
 		if len(s.vision.KnownContacts) == 0 {
+			resetBurstState(s)
+			resetAimingState(s)
 			continue
 		}
 
-		target := cm.closestContact(s)
+		queuedBurst := s.burstShotsRemaining > 0
+		var target *Soldier
+		if queuedBurst {
+			target = findSoldierByID(allSoldiers, s.burstTargetID)
+		} else {
+			target = cm.closestContact(s)
+		}
 		if target == nil || target.state == SoldierStateDead {
+			resetBurstState(s)
+			resetAimingState(s)
 			continue
 		}
 
@@ -295,26 +315,42 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		dy := target.y - s.y
 		dist := math.Sqrt(dx*dx + dy*dy)
 		if dist > maxFireRange {
+			resetBurstState(s)
+			resetAimingState(s)
 			continue
 		}
 
 		// LOS check (buildings and tall walls block firing lines).
 		if !HasLineOfSightWithCover(s.x, s.y, target.x, target.y, buildings, s.covers) {
+			resetBurstState(s)
+			resetAimingState(s)
 			continue
 		}
 
-		// --- Fuzzy fire mode selection ---
-		// Desired mode is determined by distance AND terrain sightline score.
-		// Auto: CQB range AND enclosed terrain (low sightline) — true CQB conditions.
-		// Burst: mid-range committed engagement.
-		// Single: deliberate long-range fire.
-		desired := cm.selectFireMode(s, dist)
-		if desired != s.currentFireMode {
-			// Trigger mode switch — pause firing while reconfiguring.
-			s.desiredFireMode = desired
-			s.modeSwitchTimer = modeSwitchTicks
-			s.think(fmt.Sprintf("switching fire mode %s → %s", s.currentFireMode, desired))
-			continue
+		if !queuedBurst {
+			// --- Fuzzy fire mode selection ---
+			// Desired mode is determined by distance AND terrain sightline score.
+			// Auto: CQB range AND enclosed terrain (low sightline) — true CQB conditions.
+			// Burst: mid-range committed engagement.
+			// Single: deliberate long-range fire.
+			desired := cm.selectFireMode(s, dist)
+			if desired != s.currentFireMode {
+				// Fire-mode commitment: avoid flip-flopping right on range boundaries.
+				// Under stress/suppression soldiers are more willing to force a switch.
+				stress := clamp01(s.profile.Psych.EffectiveFear() + s.blackboard.SuppressLevel*0.7)
+				switchPressure := clamp01(0.25 + stress*0.55 + s.blackboard.Internal.ShootDesire*0.20)
+				if cm.rng.Float64() > switchPressure {
+					desired = s.currentFireMode
+				}
+			}
+			if desired != s.currentFireMode {
+				// Trigger mode switch — pause firing while reconfiguring.
+				s.desiredFireMode = desired
+				s.modeSwitchTimer = modeSwitchTicks
+				s.think(fmt.Sprintf("switching fire mode %s → %s", s.currentFireMode, desired))
+				resetAimingState(s)
+				continue
+			}
 		}
 
 		// --- Build fire parameters from current mode ---
@@ -332,6 +368,9 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		// Stance multiplier: prone tightens spread, standing widens.
 		stanceMul := 1.0 / math.Max(0.3, s.profile.Stance.Profile().AccuracyMul)
 		baseShooterSpread := (s.aimSpread + suppressSpread + fearSpread) * stanceMul
+		if queuedBurst && s.burstBaseSpread > 0 {
+			baseShooterSpread = s.burstBaseSpread
+		}
 
 		// Effective target body radius reduced by cover and prone stance.
 		baseBodyRadius := float64(soldierRadius) * target.profile.Stance.Profile().ProfileMul
@@ -347,110 +386,226 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		// Expected hit probability for blackboard tracking (used by goal selection).
 		hitChance := clamp01(angularHalfSize / math.Max(0.01, baseShooterSpread+params.spreadRad))
 
-		// Long-range fire requires willingness to pull the trigger.
-		if dist > accurateFireRange {
-			temptation := clamp01(
-				0.25 +
-					s.blackboard.Internal.ShootDesire*0.55 +
-					s.blackboard.Internal.ShotMomentum*0.20 -
-					s.blackboard.Internal.MoveDesire*0.35,
-			)
-			if cm.rng.Float64() > temptation {
-				continue
+		if !queuedBurst {
+			// Long-range fire requires willingness to pull the trigger.
+			if dist > accurateFireRange {
+				temptation := clamp01(
+					0.25 +
+						s.blackboard.Internal.ShootDesire*0.55 +
+						s.blackboard.Internal.ShotMomentum*0.20 -
+						s.blackboard.Internal.MoveDesire*0.35,
+				)
+				if cm.rng.Float64() > temptation {
+					resetAimingState(s)
+					continue
+				}
 			}
+
+			if dist > accurateFireRange && s.blackboard.IncomingFireCount == 0 && s.blackboard.SuppressLevel < aimingSuppressionBlock {
+				requiredAimTicks := aimingTicksForDistance(dist)
+				if s.aimingTargetID != target.id {
+					s.aimingTargetID = target.id
+					s.aimingTicks = 0
+					s.think("lining up long-range shot")
+				}
+				if s.aimingTicks < requiredAimTicks {
+					s.aimingTicks++
+					continue
+				}
+				aimProgress := 1.0
+				if requiredAimTicks > 0 {
+					aimProgress = clamp01(float64(s.aimingTicks) / float64(requiredAimTicks))
+				}
+				baseShooterSpread *= (1.0 - aimingMaxSpreadBonus*aimProgress)
+			} else {
+				resetAimingState(s)
+			}
+		}
+
+		if baseShooterSpread < 0.005 {
+			baseShooterSpread = 0.005
 		}
 
 		// CQB damage multiplier — short range is much more lethal.
 		dmgMul := cqbDamageMul(dist) * params.damageMul
 
-		// Set cooldown for the next burst/pull.
-		s.fireCooldown = params.interval
-
-		// Register one gunfire event per trigger pull (sound propagation).
-		cm.Gunfires = append(cm.Gunfires, GunfireEvent{
-			X: s.x, Y: s.y, Team: s.team,
-		})
-		cm.flashes = append(cm.flashes, &MuzzleFlash{
-			x: s.x, y: s.y,
-			angle: targetH,
-			team:  s.team,
-		})
-
-		// --- Resolve each bullet in the burst/salvo ---
-		anyHit := false
-		for shotIdx := 0; shotIdx < params.shots; shotIdx++ {
-			// Total spread for this specific shot in the burst.
-			// Later shots in a burst have more muzzle climb.
-			burstClimb := params.spreadRad * float64(shotIdx)
-			totalSpread := baseShooterSpread + burstClimb
-			if totalSpread < 0.005 {
-				totalSpread = 0.005 // floor to avoid divide-by-zero
-			}
-
-			// Physical deflection: random angle within [-totalSpread, +totalSpread].
-			// Using a triangular distribution (two uniform samples averaged)
-			// for a more natural bell-shaped spread centre.
-			u1 := cm.rng.Float64()*2 - 1
-			u2 := cm.rng.Float64()*2 - 1
-			deflection := (u1 + u2) / 2.0 * totalSpread
-			actualAngle := targetH + deflection
-
-			// Hit if deflection falls within the target's angular body size.
-			hit := math.Abs(deflection) <= angularHalfSize
-
-			// Tracer endpoint follows actual bullet direction.
-			toX := s.x + math.Cos(actualAngle)*(dist+30)
-			toY := s.y + math.Sin(actualAngle)*(dist+30)
-			if hit {
-				toX, toY = target.x, target.y
-			}
-			cm.tracers = append(cm.tracers, &Tracer{
-				fromX: s.x, fromY: s.y,
-				toX: toX, toY: toY,
-				hit:  hit,
-				team: s.team,
-			})
-
-			if hit {
-				anyHit = true
-				damage := baseDamage * dmgMul
-				target.health -= damage
-				target.profile.Psych.ApplyStress(hitStress)
-				target.blackboard.IncomingFireCount++
-				target.blackboard.AccumulateSuppression(true, s.x, s.y, target.x, target.y)
-				if target.health <= 0 {
-					target.health = 0
-					target.state = SoldierStateDead
-					target.think("incapacitated")
-				} else {
-					target.think("hit — taking fire")
-				}
-				cm.applyWitnessStress(target, allFriendlies)
-			} else {
-				target.profile.Psych.ApplyStress(nearMissStress)
-				target.blackboard.IncomingFireCount++
-				target.blackboard.AccumulateSuppression(false, s.x, s.y, target.x, target.y)
-				if shotIdx == 0 {
-					target.think("near miss — incoming fire")
-				}
-				cm.spawnRicochets(s.x, s.y, toX, toY, s.team, buildings, allSoldiers)
-			}
+		shotIdx := 0
+		if queuedBurst {
+			shotIdx = s.burstShotIndex
 		}
 
-		// Record outcome for blackboard momentum tracking.
-		// RecordShotOutcome returns true when 3+ consecutive misses force a re-evaluation.
-		firstShotHit := anyHit
-		if forceReeval := s.blackboard.RecordShotOutcome(firstShotHit, hitChance, dist); forceReeval {
+		cm.Gunfires = append(cm.Gunfires, GunfireEvent{X: s.x, Y: s.y, Team: s.team})
+		cm.flashes = append(cm.flashes, &MuzzleFlash{x: s.x, y: s.y, angle: targetH, team: s.team})
+
+		hit := cm.resolveBullet(s, target, shotIdx, baseShooterSpread, params, targetH, dist, angularHalfSize, dmgMul, allFriendlies, buildings, allSoldiers)
+
+		if !queuedBurst {
+			resetAimingState(s)
+			if params.shots > 1 {
+				s.burstShotsRemaining = params.shots - 1
+				s.burstShotIndex = 1
+				s.burstTargetID = target.id
+				s.burstAnyHit = hit
+				s.burstHitChance = hitChance
+				s.burstDist = dist
+				s.burstBaseSpread = baseShooterSpread
+				s.fireCooldown = burstInterShotGap
+				continue
+			}
+
+			s.fireCooldown = params.interval
+			if forceReeval := s.blackboard.RecordShotOutcome(hit, hitChance, dist); forceReeval {
+				s.blackboard.ShatterEvent = true
+				s.think(fmt.Sprintf("3 consecutive misses (spread %.2f°) — changing approach",
+					baseShooterSpread*180/math.Pi))
+			}
+			if hit {
+				s.think(fmt.Sprintf("fired (%s) — HIT (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+			} else {
+				s.think(fmt.Sprintf("fired (%s) — miss (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+			}
+			continue
+		}
+
+		if hit {
+			s.burstAnyHit = true
+		}
+		s.burstShotsRemaining--
+		s.burstShotIndex++
+		if s.burstShotsRemaining > 0 {
+			s.fireCooldown = burstInterShotGap
+			continue
+		}
+
+		s.fireCooldown = params.interval
+		finalHitChance := s.burstHitChance
+		if finalHitChance <= 0 {
+			finalHitChance = hitChance
+		}
+		finalDist := s.burstDist
+		if finalDist <= 0 {
+			finalDist = dist
+		}
+		finalSpread := s.burstBaseSpread
+		if finalSpread <= 0 {
+			finalSpread = baseShooterSpread
+		}
+		if forceReeval := s.blackboard.RecordShotOutcome(s.burstAnyHit, finalHitChance, finalDist); forceReeval {
 			s.blackboard.ShatterEvent = true
 			s.think(fmt.Sprintf("3 consecutive misses (spread %.2f°) — changing approach",
-				baseShooterSpread*180/math.Pi))
+				finalSpread*180/math.Pi))
 		}
-		if anyHit {
-			s.think(fmt.Sprintf("fired (%s) — HIT (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+		if s.burstAnyHit {
+			s.think(fmt.Sprintf("fired (%s) — HIT (spread %.1f°)", s.currentFireMode, finalSpread*180/math.Pi))
 		} else {
-			s.think(fmt.Sprintf("fired (%s) — miss (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+			s.think(fmt.Sprintf("fired (%s) — miss (spread %.1f°)", s.currentFireMode, finalSpread*180/math.Pi))
+		}
+		resetBurstState(s)
+	}
+}
+
+func resetBurstState(s *Soldier) {
+	s.burstShotsRemaining = 0
+	s.burstShotIndex = 0
+	s.burstTargetID = -1
+	s.burstAnyHit = false
+	s.burstHitChance = 0
+	s.burstDist = 0
+	s.burstBaseSpread = 0
+}
+
+func resetAimingState(s *Soldier) {
+	s.aimingTargetID = -1
+	s.aimingTicks = 0
+}
+
+func aimingTicksForDistance(dist float64) int {
+	if dist <= accurateFireRange {
+		return 0
+	}
+	t := clamp01((dist - accurateFireRange) / (maxFireRange - accurateFireRange))
+	return aimingBaseTicks + int(math.Round(float64(aimingExtraTicks)*t))
+}
+
+func findSoldierByID(all []*Soldier, id int) *Soldier {
+	for _, s := range all {
+		if s.id == id {
+			return s
 		}
 	}
+	return nil
+}
+
+func (cm *CombatManager) resolveBullet(
+	shooter *Soldier,
+	target *Soldier,
+	shotIdx int,
+	baseShooterSpread float64,
+	params fireModeParams,
+	targetH float64,
+	dist float64,
+	angularHalfSize float64,
+	dmgMul float64,
+	allFriendlies []*Soldier,
+	buildings []rect,
+	allSoldiers []*Soldier,
+) bool {
+	// Later shots in a burst have more muzzle climb.
+	burstClimb := params.spreadRad * float64(shotIdx)
+	totalSpread := baseShooterSpread + burstClimb
+	if totalSpread < 0.005 {
+		totalSpread = 0.005 // floor to avoid divide-by-zero
+	}
+
+	// Physical deflection: random angle within [-totalSpread, +totalSpread].
+	// Using a triangular distribution (two uniform samples averaged)
+	// for a more natural bell-shaped spread centre.
+	u1 := cm.rng.Float64()*2 - 1
+	u2 := cm.rng.Float64()*2 - 1
+	deflection := (u1 + u2) / 2.0 * totalSpread
+	actualAngle := targetH + deflection
+
+	// Hit if deflection falls within the target's angular body size.
+	hit := math.Abs(deflection) <= angularHalfSize
+
+	// Tracer endpoint follows actual bullet direction.
+	toX := shooter.x + math.Cos(actualAngle)*(dist+30)
+	toY := shooter.y + math.Sin(actualAngle)*(dist+30)
+	if hit {
+		toX, toY = target.x, target.y
+	}
+	cm.tracers = append(cm.tracers, &Tracer{
+		fromX: shooter.x, fromY: shooter.y,
+		toX: toX, toY: toY,
+		hit:  hit,
+		team: shooter.team,
+	})
+
+	if hit {
+		damage := baseDamage * dmgMul
+		target.health -= damage
+		target.profile.Psych.ApplyStress(hitStress)
+		target.blackboard.IncomingFireCount++
+		target.blackboard.AccumulateSuppression(true, shooter.x, shooter.y, target.x, target.y)
+		if target.health <= 0 {
+			target.health = 0
+			target.state = SoldierStateDead
+			target.think("incapacitated")
+		} else {
+			target.think("hit — taking fire")
+		}
+		cm.applyWitnessStress(target, allFriendlies)
+		return true
+	}
+
+	target.profile.Psych.ApplyStress(nearMissStress)
+	target.blackboard.IncomingFireCount++
+	target.blackboard.AccumulateSuppression(false, shooter.x, shooter.y, target.x, target.y)
+	if shotIdx == 0 {
+		target.think("near miss — incoming fire")
+	}
+	cm.spawnRicochets(shooter.x, shooter.y, toX, toY, shooter.team, buildings, allSoldiers)
+	return false
 }
 
 // selectFireMode uses fuzzy logic to choose the desired fire mode.
@@ -471,6 +626,32 @@ func (cm *CombatManager) selectFireMode(s *Soldier, dist float64) FireMode {
 	sightline := s.blackboard.LocalSightlineScore
 	fear := s.profile.Psych.EffectiveFear()
 	shootDesire := s.blackboard.Internal.ShootDesire
+	stress := clamp01(fear + s.blackboard.SuppressLevel*0.7)
+
+	// Stickiness/hysteresis around mode boundaries to prevent chatter.
+	// Current mode gets a deadband where it tends to persist.
+	switch s.currentFireMode {
+	case FireModeAuto:
+		if dist <= float64(autoRange)*1.12 && (sightline < autoSightlineThresh+0.12 || fear > 0.45) {
+			if cm.rng.Float64() < 0.85 {
+				return FireModeAuto
+			}
+		}
+	case FireModeBurst:
+		if dist >= float64(autoRange)*0.92 && dist <= float64(burstRange)*1.08 {
+			burstStick := clamp01(0.35 + fear*0.25 + shootDesire*0.20)
+			if cm.rng.Float64() < burstStick {
+				return FireModeBurst
+			}
+		}
+	case FireModeSingle:
+		if dist >= float64(burstRange)*0.88 {
+			singleStick := clamp01(0.50 + s.profile.Skills.Marksmanship*0.20 - fear*0.15)
+			if cm.rng.Float64() < singleStick {
+				return FireModeSingle
+			}
+		}
+	}
 
 	// --- Rule 1: extreme CQB — always auto regardless of terrain.
 	pointBlankRange := float64(autoRange) / 2.0 // 5 tiles / 80px
@@ -488,7 +669,12 @@ func (cm *CombatManager) selectFireMode(s *Soldier, dist float64) FireMode {
 		fearBoost := fear * 0.3
 		autoMembership := enclosedFactor*0.5 + distFactor*0.35 + fearBoost + shootDesire*0.1
 		if autoMembership > 0.45 {
-			return FireModeAuto
+			if stress > 0.58 && cm.rng.Float64() < (stress-0.58)*0.45 {
+				return FireModeAuto
+			}
+			if cm.rng.Float64() < 0.80 {
+				return FireModeAuto
+			}
 		}
 		// Falls through to burst if not quite enclosed enough.
 		return FireModeBurst
@@ -505,6 +691,9 @@ func (cm *CombatManager) selectFireMode(s *Soldier, dist float64) FireMode {
 				s.profile.Skills.Marksmanship*0.2,
 		)
 		if burstPressure > 0.45 {
+			if stress > 0.60 && dist <= float64(autoRange)*1.05 && cm.rng.Float64() < (stress-0.60)*0.35 {
+				return FireModeAuto
+			}
 			return FireModeBurst
 		}
 		return FireModeSingle
@@ -612,27 +801,7 @@ func (cm *CombatManager) spawnRicochets(fromX, fromY, toX, toY float64, shooterT
 	}
 }
 
-// pointToSegmentDist returns the distance from point (px,py) to the closest
-// point on line segment (ax,ay)-(bx,by).
-func pointToSegmentDist(px, py, ax, ay, bx, by float64) float64 {
-	abx := bx - ax
-	aby := by - ay
-	apx := px - ax
-	apy := py - ay
-	ab2 := abx*abx + aby*aby
-	if ab2 < 1e-12 {
-		return math.Sqrt(apx*apx + apy*apy)
-	}
-	t := (apx*abx + apy*aby) / ab2
-	if t < 0 {
-		t = 0
-	} else if t > 1 {
-		t = 1
-	}
-	cx := ax + t*abx - px
-	cy := ay + t*aby - py
-	return math.Sqrt(cx*cx + cy*cy)
-}
+// pointToSegmentDist is defined in roads.go (shared helper).
 
 // closestContact returns the nearest visible contact for a shooter.
 func (cm *CombatManager) closestContact(s *Soldier) *Soldier {

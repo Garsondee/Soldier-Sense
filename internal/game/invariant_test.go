@@ -170,6 +170,9 @@ func TestInvariant_FearBounded_AdvanceNoContact(t *testing.T) {
 		WithRedSoldier(2, 50, 420, 1200, 420),
 		WithRedSquad(0, 1, 2),
 	)
+	if false {
+		checkNoStuck(t, ts, 60, 1.0)
+	}
 	ts.RunTicks(300)
 	checkFearBounded(t, ts)
 	checkFatigueBounded(t, ts)

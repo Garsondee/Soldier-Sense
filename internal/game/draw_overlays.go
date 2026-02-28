@@ -39,7 +39,7 @@ func (g *Game) drawMovementIntentLines(screen *ebiten.Image) {
 		var destX, destY float64
 		hasDest := false
 
-		if s.path != nil && len(s.path) > 0 {
+		if len(s.path) > 0 {
 			last := s.path[len(s.path)-1]
 			destX, destY = last[0], last[1]
 			hasDest = true
@@ -128,6 +128,15 @@ func (g *Game) drawMovementIntentLines(screen *ebiten.Image) {
 // drawSquadIntentLabels draws a small label near each squad leader showing
 // the squad's current intent and claimed building status.
 func (g *Game) drawSquadIntentLabels(screen *ebiten.Image) {
+	// Scale labels inversely with zoom so they stay readable.
+	invZoom := float32(1.0 / g.camZoom)
+	if invZoom < 1.0 {
+		invZoom = 1.0
+	}
+	if invZoom > 3.0 {
+		invZoom = 3.0
+	}
+
 	for _, sq := range g.squads {
 		if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
 			continue
@@ -144,27 +153,25 @@ func (g *Game) drawSquadIntentLabels(screen *ebiten.Image) {
 		total := len(sq.Members)
 		label := fmt.Sprintf("SQ%d %s (%d/%d)", sq.ID, intentStr, alive, total)
 
-		// Position below the leader.
-		textX := int(lx) - len(label)*3
-		textY := int(ly) + soldierRadius + 4
-
-		// Background pill.
+		// Position below the leader (scaled with invZoom).
 		const charW = 6
-		const padX = 4
-		const padY = 2
-		bgW := float32(len(label)*charW + padX*2)
-		bgH := float32(14 + padY*2)
-		bgX := float32(textX - padX)
-		bgY := float32(textY - padY)
+		const padX = 5
+		const padY = 3
+		bgW := float32(len(label)*charW+padX*2) * invZoom
+		bgH := float32(14+padY*2) * invZoom
+		bgX := lx - bgW/2
+		bgY := ly + float32(soldierRadius)*invZoom + 6*invZoom
 
 		var bgCol color.RGBA
 		if sq.Team == TeamRed {
-			bgCol = color.RGBA{R: 80, G: 20, B: 15, A: 140}
+			bgCol = color.RGBA{R: 90, G: 20, B: 15, A: 160}
 		} else {
-			bgCol = color.RGBA{R: 15, G: 25, B: 80, A: 140}
+			bgCol = color.RGBA{R: 15, G: 25, B: 90, A: 160}
 		}
 		vector.FillRect(screen, bgX, bgY, bgW, bgH, bgCol, false)
-		ebitenutil.DebugPrintAt(screen, label, textX, textY)
+		vector.StrokeRect(screen, bgX, bgY, bgW, bgH, 1.0*invZoom,
+			color.RGBA{R: 120, G: 120, B: 120, A: 50}, false)
+		ebitenutil.DebugPrintAt(screen, label, int(bgX+float32(padX)*invZoom), int(bgY+float32(padY)*invZoom))
 	}
 }
 
@@ -177,10 +184,18 @@ func (g *Game) drawSelectedSoldierInfo(screen *ebiten.Image) {
 	}
 	bb := &sel.blackboard
 
-	// Draw info panel below the inspector (or on screen near the soldier).
-	// Position: world-space, offset from soldier.
-	sx := float32(sel.x) + float32(soldierRadius) + 12
-	sy := float32(sel.y) - 40
+	// Scale inversely with zoom for readability.
+	invZoom := float32(1.0 / g.camZoom)
+	if invZoom < 1.0 {
+		invZoom = 1.0
+	}
+	if invZoom > 3.0 {
+		invZoom = 3.0
+	}
+
+	// Draw info panel near the soldier (world-space).
+	sx := float32(sel.x) + float32(soldierRadius)*invZoom + 14*invZoom
+	sy := float32(sel.y) - 50*invZoom
 
 	lines := []string{
 		fmt.Sprintf("Goal: %s", bb.CurrentGoal),
@@ -190,7 +205,7 @@ func (g *Game) drawSelectedSoldierInfo(screen *ebiten.Image) {
 		fmt.Sprintf("Squad: %s", bb.SquadIntent),
 	}
 	if bb.HasBestNearby {
-		lines = append(lines, fmt.Sprintf("Best pos: (%.0f,%.0f) score:%.2f", bb.BestNearbyX, bb.BestNearbyY, bb.BestNearbyScore))
+		lines = append(lines, fmt.Sprintf("Best pos: (%.0f,%.0f) s:%.2f", bb.BestNearbyX, bb.BestNearbyY, bb.BestNearbyScore))
 	}
 	if bb.ClaimedBuildingIdx >= 0 {
 		lines = append(lines, fmt.Sprintf("Claimed bldg #%d", bb.ClaimedBuildingIdx))
@@ -214,22 +229,22 @@ func (g *Game) drawSelectedSoldierInfo(screen *ebiten.Image) {
 			maxLen = len(l)
 		}
 	}
-	bgW := float32(maxLen*6 + padX*2)
-	bgH := float32(len(lines)*lineH + padY*2)
-	bgCol := color.RGBA{R: 15, G: 18, B: 15, A: 200}
+	bgW := float32(maxLen*6+padX*2) * invZoom
+	bgH := float32(len(lines)*lineH+padY*2) * invZoom
+	bgCol := color.RGBA{R: 12, G: 15, B: 12, A: 215}
 	vector.FillRect(screen, sx, sy, bgW, bgH, bgCol, false)
 
 	// Accent border.
 	var accent color.RGBA
 	if sel.team == TeamRed {
-		accent = color.RGBA{R: 200, G: 60, B: 40, A: 160}
+		accent = color.RGBA{R: 210, G: 60, B: 40, A: 180}
 	} else {
-		accent = color.RGBA{R: 40, G: 80, B: 200, A: 160}
+		accent = color.RGBA{R: 40, G: 80, B: 210, A: 180}
 	}
-	vector.StrokeRect(screen, sx, sy, bgW, bgH, 1.0, accent, false)
+	vector.StrokeRect(screen, sx, sy, bgW, bgH, 1.5*invZoom, accent, false)
 
 	// Text.
 	for i, l := range lines {
-		ebitenutil.DebugPrintAt(screen, l, int(sx)+padX, int(sy)+padY+i*lineH)
+		ebitenutil.DebugPrintAt(screen, l, int(sx+float32(padX)*invZoom), int(sy+float32(padY+i*lineH)*invZoom))
 	}
 }

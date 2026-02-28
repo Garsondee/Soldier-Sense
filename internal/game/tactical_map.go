@@ -284,6 +284,73 @@ func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing f
 	return bestX, bestY, bestScore
 }
 
+// FindBoundCover searches for the best cover position along a bearing from (wx,wy).
+// It scans cells in a corridor ±corridorHalf cells wide, from minDist to maxDist
+// cells ahead along the bearing. Returns (x, y, score, found).
+// Used by cover-to-cover bounding: soldiers sprint to the nearest good cover
+// along their advance direction rather than one long dash to the final target.
+func (tm *TacticalMap) FindBoundCover(wx, wy, bearing float64, minDist, maxDist int) (float64, float64, float64, bool) {
+	cx, cy := WorldToCell(wx, wy)
+	cosB := math.Cos(bearing)
+	sinB := math.Sin(bearing)
+
+	corridorHalf := 3 // cells either side of the bearing line
+
+	bestScore := -999.0
+	var bestX, bestY float64
+	found := false
+
+	for ahead := minDist; ahead <= maxDist; ahead++ {
+		for lateral := -corridorHalf; lateral <= corridorHalf; lateral++ {
+			// Rotate (ahead, lateral) by bearing.
+			fx := float64(ahead)*cosB - float64(lateral)*sinB
+			fy := float64(ahead)*sinB + float64(lateral)*cosB
+			nx := cx + int(math.Round(fx))
+			ny := cy + int(math.Round(fy))
+			if nx < 0 || ny < 0 || nx >= tm.cols || ny >= tm.rows {
+				continue
+			}
+			idx := ny*tm.cols + nx
+			if tm.desirability[idx] <= -1.0 {
+				continue
+			}
+
+			score := tm.desirability[idx]
+
+			// Strong preference for cover traits.
+			t := tm.traits[idx]
+			if t&CellTraitCorner != 0 {
+				score += 0.40
+			}
+			if t&CellTraitWallAdj != 0 {
+				score += 0.20
+			}
+			if t&CellTraitDoorAdj != 0 {
+				score += 0.25
+			}
+			if t&CellTraitWindowAdj != 0 {
+				score += 0.50
+			}
+			// Doorways are terrible stopping points.
+			if t&CellTraitDoorway != 0 {
+				score -= 0.80
+			}
+
+			// Slight preference for cells closer (shorter bound = safer).
+			score -= float64(ahead) * 0.01
+			// Penalise lateral drift — prefer staying on the bearing line.
+			score -= math.Abs(float64(lateral)) * 0.03
+
+			if score > bestScore {
+				bestScore = score
+				bestX, bestY = CellToWorld(nx, ny)
+				found = true
+			}
+		}
+	}
+	return bestX, bestY, bestScore, found
+}
+
 // TraitAt returns the CellTrait flags for a world position.
 func (tm *TacticalMap) TraitAt(wx, wy float64) CellTrait {
 	cx, cy := WorldToCell(wx, wy)

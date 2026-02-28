@@ -244,7 +244,7 @@ func footprintsToRects(fps []rect) []rect { return fps }
 // generateExplosionRubble fires numExplosions into the map, preferring to hit
 // buildings. Each explosion that overlaps a building removes wall segments
 // (handled by applyBuildingDamage) and drops rubble in a radius.
-func generateExplosionRubble(mapW, mapH int, footprints []rect, walls []rect, rng *rand.Rand, roads []roadSegment) []*CoverObject {
+func generateExplosionRubble(mapW, mapH int, footprints []rect, _ []rect, rng *rand.Rand, roads []roadSegment) []*CoverObject {
 	cs := coverCellSize
 	rubble := make([]*CoverObject, 0, 32)
 	type cellKey struct{ cx, cy int }
@@ -320,16 +320,6 @@ func coverOverlapsBuildings(c *CoverObject, buildings []rect) bool {
 	cy1 := c.y + coverCellSize + pad
 	for _, b := range buildings {
 		if cx0 < b.x+b.w && cx1 > b.x && cy0 < b.y+b.h && cy1 > b.y {
-			return true
-		}
-	}
-	return false
-}
-
-// coverOverlapsCover returns true if the candidate collides with any existing cover.
-func coverOverlapsCover(c *CoverObject, existing []*CoverObject) bool {
-	for _, e := range existing {
-		if c.x == e.x && c.y == e.y {
 			return true
 		}
 	}

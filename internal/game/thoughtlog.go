@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	logPanelWidth     = 480
+	logPanelWidth     = 720
 	logMaxEntries     = 120
 	logLineHeight     = 14
+	logScale          = 3   // text rendered at 1x into buffer, blitted at 3× for readability
 	squadPollInterval = 300 // ticks between squad summary polls (~5s at 60TPS)
 )
 
@@ -142,23 +143,26 @@ func (tl *ThoughtLog) AddSpeech(tick int, label string, team Team, msg string) {
 	tl.Add(tick, label, team, msg)
 }
 
-// Draw renders the thought log panel on the right side of the screen.
-func (tl *ThoughtLog) Draw(screen *ebiten.Image, panelX int, panelH int) {
+// Draw renders the thought log into the provided offscreen buffer at 1× scale.
+// The caller is responsible for blitting this buffer onto the screen at logScale.
+func (tl *ThoughtLog) Draw(buf *ebiten.Image, bufW, bufH int) {
+	buf.Clear()
+
 	// Panel background.
-	vector.FillRect(screen, float32(panelX), 0, float32(logPanelWidth), float32(panelH), color.RGBA{R: 10, G: 12, B: 10, A: 248}, false)
+	vector.FillRect(buf, 0, 0, float32(bufW), float32(bufH), color.RGBA{R: 10, G: 12, B: 10, A: 248}, false)
 	// Left separator line.
-	vector.StrokeLine(screen, float32(panelX), 0, float32(panelX), float32(panelH), 1.0, color.RGBA{R: 50, G: 70, B: 50, A: 255}, false)
+	vector.StrokeLine(buf, 0, 0, 0, float32(bufH), 1.0, color.RGBA{R: 60, G: 90, B: 60, A: 255}, false)
 
 	// Title bar background.
-	vector.FillRect(screen, float32(panelX), 0, float32(logPanelWidth), 16, color.RGBA{R: 20, G: 30, B: 20, A: 255}, false)
-	ebitenutil.DebugPrintAt(screen, "SQUAD LOG", panelX+8, 2)
+	vector.FillRect(buf, 0, 0, float32(bufW), 18, color.RGBA{R: 22, G: 34, B: 22, A: 255}, false)
+	ebitenutil.DebugPrintAt(buf, "── SQUAD LOG ──", 6, 4)
 	// Title separator.
-	vector.StrokeLine(screen, float32(panelX), 16, float32(panelX+logPanelWidth), 16, 1.0, color.RGBA{R: 50, G: 80, B: 50, A: 200}, false)
+	vector.StrokeLine(buf, 0, 18, float32(bufW), 18, 1.0, color.RGBA{R: 60, G: 100, B: 60, A: 220}, false)
 
 	entries := tl.Recent()
 
 	// Draw from bottom up so newest is at bottom.
-	maxVisible := (panelH - 24) / logLineHeight
+	maxVisible := (bufH - 24) / logLineHeight
 	startIdx := 0
 	if len(entries) > maxVisible {
 		startIdx = len(entries) - maxVisible
@@ -167,29 +171,29 @@ func (tl *ThoughtLog) Draw(screen *ebiten.Image, panelX int, panelH int) {
 	visible := entries[startIdx:]
 	recent := 5 // how many latest entries to highlight
 
-	y := 20
+	y := 22
 	for i, e := range visible {
 		isRecent := i >= len(visible)-recent
 
 		// Team colour dot.
 		var dotCol color.RGBA
 		if e.Team == TeamRed {
-			dotCol = color.RGBA{R: 210, G: 70, B: 70, A: 255}
+			dotCol = color.RGBA{R: 230, G: 70, B: 60, A: 255}
 		} else {
-			dotCol = color.RGBA{R: 70, G: 110, B: 210, A: 255}
+			dotCol = color.RGBA{R: 70, G: 120, B: 230, A: 255}
 		}
 
 		// Highlight row background for recent entries.
 		if isRecent {
-			vector.FillRect(screen, float32(panelX+2), float32(y), float32(logPanelWidth-4), float32(logLineHeight), color.RGBA{R: 30, G: 40, B: 30, A: 160}, false)
+			vector.FillRect(buf, 2, float32(y), float32(bufW-4), float32(logLineHeight), color.RGBA{R: 30, G: 45, B: 30, A: 180}, false)
 		}
 
-		// Team colour indicator dot.
-		vector.FillRect(screen, float32(panelX+5), float32(y+3), 3, 5, dotCol, false)
+		// Team colour indicator stripe.
+		vector.FillRect(buf, 2, float32(y+1), 3, float32(logLineHeight-2), dotCol, false)
 
 		// Tick + label + message.
 		line := fmt.Sprintf("%4d [%s] %s", e.Tick, e.Label, e.Message)
-		ebitenutil.DebugPrintAt(screen, line, panelX+12, y)
+		ebitenutil.DebugPrintAt(buf, line, 8, y)
 		y += logLineHeight
 	}
 }
