@@ -308,11 +308,11 @@ func (m *IntelMap) AccumulateThreatDensity() {
 
 // IntelStore owns all intelligence maps for all teams.
 type IntelStore struct {
-	maps    map[Team]*IntelMap
-	rows    int
-	cols    int
-	mapW    int // playfield width in pixels
-	mapH    int // playfield height in pixels
+	maps map[Team]*IntelMap
+	rows int
+	cols int
+	mapW int // playfield width in pixels
+	mapH int // playfield height in pixels
 }
 
 // NewIntelStore creates maps for TeamRed and TeamBlue sized to the given

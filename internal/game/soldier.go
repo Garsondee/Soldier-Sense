@@ -1551,11 +1551,11 @@ func (s *Soldier) isNearCoverTarget() bool {
 	return dx*dx+dy*dy < float64(coverCellSize*coverCellSize)*2.0
 }
 
-func min8(a, b int) int {
+func min8(a, b int) uint8 {
 	if a < b {
-		return a
+		return uint8(a) // #nosec G115 -- a is always in [0,255] at all call sites
 	}
-	return b
+	return uint8(b) // #nosec G115 -- b is always in [0,255] at all call sites
 }
 
 // applyProximityStress evaluates nearby soldiers and applies fuzzy stress responses.
