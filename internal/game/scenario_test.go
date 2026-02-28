@@ -477,12 +477,12 @@ func TestScenario_IntentPropagation(t *testing.T) {
 // --- Unit test: combat hit lands ---
 
 func TestCombat_HitLands(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, soldierRadius)
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
 
-	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{600, 240}, ng, tl, &tick)
-	target := NewSoldier(1, 200, 240, TeamBlue, [2]float64{600, 240}, [2]float64{0, 240}, ng, tl, &tick)
+	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{600, 240}, ng, nil, nil, tl, &tick)
+	target := NewSoldier(1, 200, 240, TeamBlue, [2]float64{600, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
 
 	// Give shooter perfect accuracy, target standing.
 	shooter.profile.Skills.Marksmanship = 1.0
@@ -497,14 +497,14 @@ func TestCombat_HitLands(t *testing.T) {
 	initialHealth := target.health
 
 	// Run enough ticks to guarantee at least one shot fires.
-	for i := 0; i < fireInterval+5; i++ {
+	for i := 0; i < fireIntervalSingle+5; i++ {
 		tick++
 		cm.ResetFireCounts([]*Soldier{shooter, target})
-		cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil)
+		cm.ResolveCombat([]*Soldier{shooter}, []*Soldier{target}, []*Soldier{shooter}, nil, []*Soldier{shooter, target})
 	}
 
 	if target.health == initialHealth {
-		t.Errorf("no damage dealt after %d ticks: health still %.0f", fireInterval+5, target.health)
+		t.Errorf("no damage dealt after %d ticks: health still %.0f", fireIntervalSingle+5, target.health)
 	} else {
 		t.Logf("PASS: target health went from %.0f to %.0f", initialHealth, target.health)
 	}

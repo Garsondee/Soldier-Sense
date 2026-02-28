@@ -144,12 +144,21 @@ func (sp *SoldierProfile) EffectiveSpeed(baseSpeed float64) float64 {
 }
 
 // EffectiveAccuracy returns a 0-1 accuracy score.
-func (sp *SoldierProfile) EffectiveAccuracy() float64 {
+// An optional suppressLevel (0-1) can be passed to apply suppression degradation.
+// Call with no arguments for the base accuracy (ignores suppression).
+func (sp *SoldierProfile) EffectiveAccuracy(suppressLevel ...float64) float64 {
 	base := sp.Skills.Marksmanship
 	stanceMul := sp.Stance.Profile().AccuracyMul
 	fatiguePen := 1.0 - sp.Physical.Fatigue*0.4
 	fearPen := 1.0 - sp.Psych.EffectiveFear()*0.5
-	return clamp01(base * stanceMul * fatiguePen * fearPen)
+	acc := clamp01(base * stanceMul * fatiguePen * fearPen)
+	if len(suppressLevel) > 0 && suppressLevel[0] > 0 {
+		// Suppression degrades accuracy: at suppress=1.0 a baseline soldier
+		// loses ~40% accuracy. Discipline resists — veterans hold their shots.
+		pen := suppressLevel[0] * (0.40 - sp.Skills.Discipline*0.20)
+		acc = clamp01(acc * (1.0 - pen))
+	}
+	return acc
 }
 
 func clamp01(v float64) float64 {

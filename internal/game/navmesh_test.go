@@ -6,7 +6,7 @@ import (
 )
 
 func TestNavGrid_UnblockedByDefault(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(640, 480, nil, 0, nil, nil)
 	if ng.IsBlocked(0, 0) {
 		t.Fatal("empty grid should have no blocked cells")
 	}
@@ -18,7 +18,7 @@ func TestNavGrid_UnblockedByDefault(t *testing.T) {
 func TestNavGrid_BuildingBlocksCells(t *testing.T) {
 	// Building at pixel (64,64) size 64×64. cellSize=16, so cells (4,4)-(7,7).
 	buildings := []rect{{x: 64, y: 64, w: 64, h: 64}}
-	ng := NewNavGrid(640, 480, buildings, 0)
+	ng := NewNavGrid(640, 480, buildings, 0, nil, nil)
 	if !ng.IsBlocked(4, 4) {
 		t.Fatal("cell inside building should be blocked")
 	}
@@ -30,7 +30,7 @@ func TestNavGrid_BuildingBlocksCells(t *testing.T) {
 func TestNavGrid_PaddingBlocksAdjacentCells(t *testing.T) {
 	buildings := []rect{{x: 64, y: 64, w: 64, h: 64}}
 	pad := 8
-	ng := NewNavGrid(640, 480, buildings, pad)
+	ng := NewNavGrid(640, 480, buildings, pad, nil, nil)
 	// Cell just outside the building but within pad should be blocked.
 	// Building starts at x=64, pad=8 → padded start at x=56 → cell 56/16=3.
 	if !ng.IsBlocked(3, 4) {
@@ -39,7 +39,7 @@ func TestNavGrid_PaddingBlocksAdjacentCells(t *testing.T) {
 }
 
 func TestNavGrid_OOB_IsBlocked(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(640, 480, nil, 0, nil, nil)
 	if !ng.IsBlocked(-1, 0) {
 		t.Fatal("out-of-bounds cell should be blocked")
 	}
@@ -68,7 +68,7 @@ func TestCellToWorld(t *testing.T) {
 }
 
 func TestNavGrid_FindPath_Straight(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(640, 480, nil, 0, nil, nil)
 	path := ng.FindPath(8, 8, 600, 8)
 	if path == nil {
 		t.Fatal("expected a path on open grid")
@@ -89,7 +89,7 @@ func TestNavGrid_FindPath_Straight(t *testing.T) {
 func TestNavGrid_FindPath_AroundBuilding(t *testing.T) {
 	// Building blocks the direct path but leaves a gap at the bottom.
 	buildings := []rect{{x: 200, y: 0, w: 32, h: 300}}
-	ng := NewNavGrid(640, 480, buildings, 0)
+	ng := NewNavGrid(640, 480, buildings, 0, nil, nil)
 	// Path from left side to right side; must route below the building.
 	path := ng.FindPath(8, 100, 600, 100)
 	if path == nil {
@@ -100,7 +100,7 @@ func TestNavGrid_FindPath_AroundBuilding(t *testing.T) {
 func TestNavGrid_FindPath_NoPath(t *testing.T) {
 	// Block the start cell: building covers the top row entirely.
 	buildingsFull := []rect{{x: 0, y: 0, w: 640, h: 16}}
-	ng := NewNavGrid(640, 480, buildingsFull, 0)
+	ng := NewNavGrid(640, 480, buildingsFull, 0, nil, nil)
 	path := ng.FindPath(8, 8, 8, 400)
 	if path != nil {
 		t.Fatal("expected nil path when start is blocked")
@@ -108,14 +108,14 @@ func TestNavGrid_FindPath_NoPath(t *testing.T) {
 }
 
 func TestNavGrid_FindPath_StartEqualsGoal(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(640, 480, nil, 0, nil, nil)
 	// Same start and goal: A* should return a trivial path or nil (both valid).
 	_ = ng.FindPath(100, 100, 100, 100)
 	// Just ensure no panic.
 }
 
 func TestNavGrid_FindPath_Deterministic(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(640, 480, nil, 0, nil, nil)
 	p1 := ng.FindPath(8, 8, 600, 400)
 	p2 := ng.FindPath(8, 8, 600, 400)
 	if len(p1) != len(p2) {

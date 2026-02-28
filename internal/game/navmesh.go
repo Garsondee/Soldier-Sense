@@ -16,7 +16,8 @@ type NavGrid struct {
 
 // NewNavGrid builds a walkability grid from the map dimensions and buildings.
 // Each cell that overlaps a building (with padding for soldier radius) is blocked.
-func NewNavGrid(mapW, mapH int, buildings []rect, soldierRadius int) *NavGrid {
+// Windows block movement (no padding). Tall wall cover objects are also blocked.
+func NewNavGrid(mapW, mapH int, buildings []rect, soldierRadius int, covers []*CoverObject, windows []rect) *NavGrid {
 	cols := mapW / cellSize
 	rows := mapH / cellSize
 	ng := &NavGrid{
@@ -44,6 +45,28 @@ func NewNavGrid(mapW, mapH int, buildings []rect, soldierRadius int) *NavGrid {
 			}
 		}
 	}
+
+	// Windows block movement but not LOS — no padding, just the cell itself.
+	for _, w := range windows {
+		cx := w.x / cellSize
+		cy := w.y / cellSize
+		if cx >= 0 && cx < cols && cy >= 0 && cy < rows {
+			ng.blocked[cy*cols+cx] = true
+		}
+	}
+
+	// Tall walls block movement like buildings (no padding — they are thin).
+	for _, c := range covers {
+		if !c.BlocksMovement() {
+			continue
+		}
+		cx := c.x / cellSize
+		cy := c.y / cellSize
+		if cx >= 0 && cx < cols && cy >= 0 && cy < rows {
+			ng.blocked[cy*cols+cx] = true
+		}
+	}
+
 	return ng
 }
 

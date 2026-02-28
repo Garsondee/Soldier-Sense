@@ -27,11 +27,11 @@ func makeSquadSim(count int) (*TestSim, *Squad) {
 }
 
 func TestSquadSpread_AllTogether(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	sq := NewSquad(0, TeamRed, []*Soldier{m0, m1})
 	spread := sq.squadSpread()
 	if spread != 0 {
@@ -40,11 +40,11 @@ func TestSquadSpread_AllTogether(t *testing.T) {
 }
 
 func TestSquadSpread_Separated(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	sq := NewSquad(0, TeamRed, []*Soldier{m0, m1})
 	spread := sq.squadSpread()
 	if math.Abs(spread-100) > 1e-6 {
@@ -53,11 +53,11 @@ func TestSquadSpread_Separated(t *testing.T) {
 }
 
 func TestSquadSpread_DeadMembersIgnored(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 500, 500, TeamRed, [2]float64{500, 500}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 500, 500, TeamRed, [2]float64{500, 500}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	m1.state = SoldierStateDead
 	sq := NewSquad(0, TeamRed, []*Soldier{m0, m1})
 	spread := sq.squadSpread()
@@ -67,11 +67,11 @@ func TestSquadSpread_DeadMembersIgnored(t *testing.T) {
 }
 
 func TestLeaderCohesionSlowdown_Thresholds(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	sq := NewSquad(0, TeamRed, []*Soldier{m0, m1})
 
 	// Spread = 0 → full speed
@@ -79,22 +79,22 @@ func TestLeaderCohesionSlowdown_Thresholds(t *testing.T) {
 	if sq.LeaderCohesionSlowdown() != 1.0 {
 		t.Fatal("spread=0 should give full speed")
 	}
-	// Spread > 220 → stop
-	m1.x, m1.y = 100+230, 100
+	// Spread > 420 → stop
+	m1.x, m1.y = 100+430, 100
 	if sq.LeaderCohesionSlowdown() != 0.0 {
-		t.Fatal("spread>220 should stop leader")
+		t.Fatal("spread>420 should stop leader")
 	}
-	// Spread in (180,220] → crawl
-	m1.x, m1.y = 100+200, 100
+	// Spread in (340,420] → crawl
+	m1.x, m1.y = 100+380, 100
 	v := sq.LeaderCohesionSlowdown()
 	if v != 0.3 {
-		t.Fatalf("spread=200 should give 0.3 slowdown, got %.2f", v)
+		t.Fatalf("spread=380 should give 0.3 slowdown, got %.2f", v)
 	}
-	// Spread in (150,180] → slow
-	m1.x, m1.y = 100+160, 100
+	// Spread in (280,340] → slow
+	m1.x, m1.y = 100+310, 100
 	v = sq.LeaderCohesionSlowdown()
 	if v != 0.6 {
-		t.Fatalf("spread=160 should give 0.6 slowdown, got %.2f", v)
+		t.Fatalf("spread=310 should give 0.6 slowdown, got %.2f", v)
 	}
 }
 
@@ -111,11 +111,11 @@ func TestSquadThink_AdvanceWhenClear(t *testing.T) {
 }
 
 func TestSquadThink_HoldWhenContact(t *testing.T) {
-	ng := NewNavGrid(1280, 720, nil, 0)
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
 
-	leader := NewSoldier(0, 640, 360, TeamRed, [2]float64{50, 360}, [2]float64{1230, 360}, ng, tl, &tick)
+	leader := NewSoldier(0, 640, 360, TeamRed, [2]float64{50, 360}, [2]float64{1230, 360}, ng, nil, nil, tl, &tick)
 	leader.profile.Psych.Fear = 0
 	sq := NewSquad(0, TeamRed, []*Soldier{leader})
 
@@ -131,13 +131,13 @@ func TestSquadThink_HoldWhenContact(t *testing.T) {
 }
 
 func TestSquadThink_RegroupWhenSpread(t *testing.T) {
-	ng := NewNavGrid(1280, 720, nil, 0)
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
 
-	leader := NewSoldier(0, 100, 360, TeamRed, [2]float64{50, 360}, [2]float64{1230, 360}, ng, tl, &tick)
+	leader := NewSoldier(0, 100, 360, TeamRed, [2]float64{50, 360}, [2]float64{1230, 360}, ng, nil, nil, tl, &tick)
 	// Member very far away (>120px).
-	member := NewSoldier(1, 100+150, 360, TeamRed, [2]float64{50, 360}, [2]float64{1230, 360}, ng, tl, &tick)
+	member := NewSoldier(1, 100+150, 360, TeamRed, [2]float64{50, 360}, [2]float64{1230, 360}, ng, nil, nil, tl, &tick)
 	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
 
 	sq.SquadThink(nil)
@@ -147,11 +147,11 @@ func TestSquadThink_RegroupWhenSpread(t *testing.T) {
 }
 
 func TestNewSquad_LeaderIsFirst(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	sq := NewSquad(0, TeamRed, []*Soldier{m0, m1})
 
 	if sq.Leader != m0 {
@@ -166,11 +166,11 @@ func TestNewSquad_LeaderIsFirst(t *testing.T) {
 }
 
 func TestNewSquad_MembersGetFormationSlots(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	NewSquad(0, TeamRed, []*Soldier{m0, m1})
 
 	if m1.formationMember != true {
@@ -182,11 +182,11 @@ func TestNewSquad_MembersGetFormationSlots(t *testing.T) {
 }
 
 func TestSquad_Alive(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	m1.state = SoldierStateDead
 	sq := NewSquad(0, TeamRed, []*Soldier{m0, m1})
 
@@ -200,11 +200,11 @@ func TestSquad_Alive(t *testing.T) {
 }
 
 func TestSquad_CasualtyCount(t *testing.T) {
-	ng := NewNavGrid(640, 480, nil, 0)
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, tl, &tick)
-	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, tl, &tick)
+	m0 := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 200, 100, TeamRed, [2]float64{200, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
 	m1.state = SoldierStateDead
 	sq := NewSquad(0, TeamRed, []*Soldier{m0, m1})
 
@@ -243,14 +243,14 @@ func TestSquad_LeaderAdvances_WithFormationFollowers(t *testing.T) {
 func TestAdjustFormationTarget_SnapsFromBlockedCell(t *testing.T) {
 	// Building blocks the desired slot cell.
 	buildings := []rect{{x: 160, y: 160, w: 64, h: 64}}
-	ng := NewNavGrid(640, 480, buildings, soldierRadius)
+	ng := NewNavGrid(640, 480, buildings, soldierRadius, nil, nil)
 
 	// Dummy leader + members.
-	ng2 := NewNavGrid(640, 480, nil, 0)
+	ng2 := NewNavGrid(800, 600, nil, 6, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
-	leader := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng2, tl, &tick)
-	m1 := NewSoldier(1, 120, 100, TeamRed, [2]float64{120, 100}, [2]float64{600, 100}, ng2, tl, &tick)
+	leader := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng2, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 120, 100, TeamRed, [2]float64{120, 100}, [2]float64{600, 100}, ng2, nil, nil, tl, &tick)
 	members := []*Soldier{leader, m1}
 	assigned := map[int][2]float64{}
 

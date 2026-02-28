@@ -19,15 +19,32 @@ type Squad struct {
 	smoothedHeading float64
 	headingInit     bool
 	prevIntent      SquadIntentKind
+
+	// EnemyBearing is the squad-level bearing from centroid toward the enemy.
+	// Updated each SquadThink when contact exists. Used to assign flank sides.
+	EnemyBearing float64
+
+	// Command succession: when the leader dies the next member takes over
+	// after a delay scaled by their stress level.
+	leaderDeadTick       int  // tick when the leader was first found dead
+	leaderSuccessionTick int  // tick when command is re-established
+	leaderSucceeding     bool // true while awaiting succession
+
+	// Building takeover: leader claims a building along the advance route.
+	// Members then prioritize doors/windows of that building.
+	ClaimedBuildingIdx int    // index into buildingFootprints, -1 = none
+	claimEvalTick      int    // tick of last building evaluation
+	buildingFootprints []rect // shared reference to game footprints
 }
 
 // NewSquad creates a squad. The first member is designated leader.
 func NewSquad(id int, team Team, members []*Soldier) *Squad {
 	sq := &Squad{
-		ID:        id,
-		Team:      team,
-		Members:   members,
-		Formation: FormationWedge,
+		ID:                 id,
+		Team:               team,
+		Members:            members,
+		Formation:          FormationWedge,
+		ClaimedBuildingIdx: -1,
 	}
 	if len(members) > 0 {
 		sq.Leader = members[0]
@@ -38,27 +55,59 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 		if i > 0 {
 			m.slotIndex = i
 			m.formationMember = true
-			// Remove the fixed bounce patrol from non-leaders;
-			// they will follow formation slot targets instead.
-			m.path = nil
-			m.pathIndex = 0
+			// Keep the member's initial path so they start moving immediately.
+			// UpdateFormation will redirect them to formation slots once the
+			// leader begins moving and the squad spreads naturally.
 		}
 	}
 	return sq
 }
+
+// successionDelayTicks is the base delay (in ticks) for command succession.
+// Scaled by the new leader's effective fear (panicked = much longer).
+const successionDelayTicks = 180 // 3 seconds at 60TPS base
 
 // SquadThink runs the leader's squad-level decision loop.
 // It evaluates the leader's blackboard and sets Intent + orders for members.
 // intel is the world IntelStore; may be nil (degrades gracefully to blackboard-only).
 func (sq *Squad) SquadThink(intel *IntelStore) {
 	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
-		// If leader is down, use the most senior alive member as a proxy.
 		alive := sq.Alive()
 		if len(alive) == 0 {
 			return
 		}
-		sq.Leader = alive[0]
+		candidate := alive[0]
+
+		if !sq.leaderSucceeding {
+			// Leader just died — start succession clock.
+			// Delay is longer if candidate is stressed or inexperienced.
+			ef := candidate.profile.Psych.EffectiveFear()
+			exp := candidate.profile.Psych.Experience
+			delay := int(float64(successionDelayTicks) * (1.0 + ef*2.0) * (1.2 - exp*0.8))
+			sq.leaderSuccessionTick = *candidate.currentTick + delay
+			sq.leaderSucceeding = true
+			sq.leaderDeadTick = *candidate.currentTick
+			candidate.think("leader down — taking command")
+		}
+
+		// During the succession window, squad operates without clear leadership.
+		// Members hold/survive on their own until command is re-established.
+		if candidate.currentTick != nil && *candidate.currentTick < sq.leaderSuccessionTick {
+			// Propagate a holding intent but don't update the leader pointer yet.
+			for _, m := range sq.Members {
+				if m.state == SoldierStateDead {
+					continue
+				}
+				m.blackboard.SquadIntent = IntentHold
+			}
+			return
+		}
+
+		// Succession complete — install new leader.
+		sq.Leader = candidate
 		sq.Leader.isLeader = true
+		sq.leaderSucceeding = false
+		candidate.think("command established")
 	}
 
 	// Gather contact info across ALL alive members, not just leader.
@@ -108,6 +157,40 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		}
 	}
 
+	// Fall back to heard gunfire as a contact source (infinite range sound).
+	if !hasContact {
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			if m.blackboard.HeardGunfire {
+				contactX = m.blackboard.HeardGunfireX
+				contactY = m.blackboard.HeardGunfireY
+				hasContact = true
+				break
+			}
+		}
+	}
+
+	// Final fallback: use the strongest persistent combat memory across all members.
+	// This keeps the squad activated and moving even when the field goes quiet.
+	if !hasContact {
+		bestMem := 0.0
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			if m.blackboard.CombatMemoryStrength > bestMem {
+				bestMem = m.blackboard.CombatMemoryStrength
+				contactX = m.blackboard.CombatMemoryX
+				contactY = m.blackboard.CombatMemoryY
+			}
+		}
+		if bestMem > 0.05 {
+			hasContact = true
+		}
+	}
+
 	spread := sq.squadSpread()
 
 	// --- Intel map queries (augment blackboard counts with spatial data) ---
@@ -154,11 +237,78 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		sq.Leader.think(fmt.Sprintf("squad: %s → %s", oldIntent, sq.Intent))
 	}
 
-	// Build per-member move orders when engaging.
-	// Fan members out around the contact point so they don't all pile on the same cell.
+	// Compute enemy bearing from squad centroid toward contact.
+	// This is the shared "normal toward enemy" all members use for flanking.
+	if hasContact {
+		cx, cy := sq.squadCentroid()
+		sq.EnemyBearing = math.Atan2(contactY-cy, contactX-cx)
+	}
+
+	// Build per-member spread positions when engaging.
 	var moveOrders [][2]float64
 	if hasContact && sq.Intent == IntentEngage {
 		moveOrders = sq.spreadPositions(contactX, contactY)
+	}
+
+	// Assign alternating flank sides based on member index so half go left, half right.
+	// Left = bearing - 90°, right = bearing + 90°.
+	flankIdx := 0
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			continue
+		}
+		if flankIdx%2 == 0 {
+			m.blackboard.FlankSide = +1.0 // left
+		} else {
+			m.blackboard.FlankSide = -1.0 // right
+		}
+		m.blackboard.SquadEnemyBearing = sq.EnemyBearing
+		flankIdx++
+	}
+
+	// --- Outnumbered factor ---
+	// Count how many unique enemies the squad can see and how many members have
+	// eyes on at least one enemy. The ratio tells us if we're outnumbered.
+	membersWithContact := 0
+	alive := sq.Alive()
+	for _, m := range alive {
+		if m.blackboard.VisibleThreatCount() > 0 {
+			membersWithContact++
+		}
+	}
+	// OutnumberedFactor: enemies seen / members with contact.
+	// >1 = outnumbered (more enemies than friendlies engaged), <1 = we outnumber them.
+	outnumberedFactor := 1.0
+	if membersWithContact > 0 && anyVisibleThreats > 0 {
+		outnumberedFactor = float64(anyVisibleThreats) / float64(membersWithContact)
+	}
+
+	// Squad posture: derived from outnumbered factor, intent, and casualties.
+	// Outnumbered → more offensive (aggressive push to overwhelm before being picked apart).
+	// Outnumbering → more defensive (hold ground, let them come to us).
+	posture := 0.0
+	if outnumberedFactor > 1.2 {
+		// Outnumbered: push offensive to break through.
+		posture = math.Min(1.0, (outnumberedFactor-1.0)*0.8)
+	} else if outnumberedFactor < 0.8 && outnumberedFactor > 0 {
+		// Outnumbering: defensive hold.
+		posture = math.Max(-1.0, -(1.0-outnumberedFactor)*0.8)
+	}
+	// Intent modifiers.
+	switch sq.Intent {
+	case IntentEngage:
+		posture += 0.2
+	case IntentHold, IntentWithdraw:
+		posture -= 0.2
+	}
+	// Casualty pressure: more dead = more desperate = more aggressive.
+	casualtyRate := 1.0 - float64(len(alive))/float64(len(sq.Members))
+	posture += casualtyRate * 0.4
+	if posture > 1.0 {
+		posture = 1.0
+	}
+	if posture < -1.0 {
+		posture = -1.0
 	}
 
 	// Write orders to all members' blackboards, including shared contact position.
@@ -170,6 +320,8 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		m.blackboard.SquadIntent = sq.Intent
 		m.blackboard.OrderReceived = true
 		m.blackboard.SquadHasContact = hasContact
+		m.blackboard.OutnumberedFactor = outnumberedFactor
+		m.blackboard.SquadPosture = posture
 		if hasContact {
 			m.blackboard.SquadContactX = contactX
 			m.blackboard.SquadContactY = contactY
@@ -184,10 +336,141 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			m.blackboard.HasMoveOrder = false
 		}
 	}
+
+	// --- Building takeover ---
+	// Leader periodically evaluates nearby buildings along the advance route.
+	sq.evaluateBuildings()
+	// Propagate claim to all alive members.
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			continue
+		}
+		m.blackboard.ClaimedBuildingIdx = sq.ClaimedBuildingIdx
+		if sq.ClaimedBuildingIdx >= 0 && sq.ClaimedBuildingIdx < len(sq.buildingFootprints) {
+			fp := sq.buildingFootprints[sq.ClaimedBuildingIdx]
+			m.blackboard.ClaimedBuildingX = float64(fp.x) + float64(fp.w)/2
+			m.blackboard.ClaimedBuildingY = float64(fp.y) + float64(fp.h)/2
+		}
+	}
+
+	// --- Morale-driven reinforcement ---
+	// The leader identifies the most-stressed alive member and directs calm
+	// soldiers toward them. Only active outside a full panic situation.
+	leaderFear := sq.Leader.profile.Psych.EffectiveFear()
+	if leaderFear < 0.6 {
+		// Find the member with the highest effective fear.
+		var distressedMember *Soldier
+		worstFear := 0.35 // minimum threshold to be considered distressed
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead || m == sq.Leader {
+				continue
+			}
+			ef := m.profile.Psych.EffectiveFear()
+			if ef > worstFear {
+				worstFear = ef
+				distressedMember = m
+			}
+		}
+
+		if distressedMember != nil {
+			// Direct calm members toward the distressed one.
+			for _, m := range sq.Members {
+				if m.state == SoldierStateDead || m == distressedMember {
+					continue
+				}
+				mf := m.profile.Psych.EffectiveFear()
+				mm := m.profile.Psych.Morale
+				// A soldier needs high morale + low fear to be a reinforcer.
+				if mf < 0.25 && mm > 0.55 {
+					m.blackboard.ReinforceMemberX = distressedMember.x
+					m.blackboard.ReinforceMemberY = distressedMember.y
+					m.blackboard.ShouldReinforce = true
+				} else {
+					m.blackboard.ShouldReinforce = false
+				}
+			}
+		}
+	}
 }
 
-// spreadPositions returns a set of world-space positions fanned around
-// the contact point, one per alive member, at a tactically useful standoff.
+// buildingClaimInterval is how often (ticks) the leader re-evaluates buildings.
+const buildingClaimInterval = 300 // ~5s at 60TPS
+
+// evaluateBuildings checks nearby buildings along the advance route and claims
+// one if it lies roughly ahead of the squad. Prefers buildings that are:
+// (a) between the squad and its advance target, (b) close to the squad,
+// (c) not already behind the squad.
+func (sq *Squad) evaluateBuildings() {
+	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
+		return
+	}
+	if len(sq.buildingFootprints) == 0 {
+		return
+	}
+	tick := 0
+	if sq.Leader.currentTick != nil {
+		tick = *sq.Leader.currentTick
+	}
+	if tick-sq.claimEvalTick < buildingClaimInterval {
+		return
+	}
+	sq.claimEvalTick = tick
+
+	lx, ly := sq.Leader.x, sq.Leader.y
+	// Advance direction: from start toward end target.
+	advX := sq.Leader.endTarget[0] - lx
+	advY := sq.Leader.endTarget[1] - ly
+	advLen := math.Sqrt(advX*advX + advY*advY)
+	if advLen < 1 {
+		return
+	}
+	advX /= advLen
+	advY /= advLen
+
+	bestIdx := -1
+	bestScore := -999.0
+	maxDist := 400.0 // only consider buildings within 400px
+
+	for i, fp := range sq.buildingFootprints {
+		// Building centroid.
+		cx := float64(fp.x) + float64(fp.w)/2
+		cy := float64(fp.y) + float64(fp.h)/2
+		dx := cx - lx
+		dy := cy - ly
+		dist := math.Sqrt(dx*dx + dy*dy)
+		if dist > maxDist || dist < 1 {
+			continue
+		}
+		// Dot product: how much the building is "ahead" of the squad.
+		dot := (dx*advX + dy*advY) / dist
+		if dot < 0.1 {
+			continue // building is behind or to the side
+		}
+		// Score: prefer ahead and close.
+		score := dot*0.6 - dist/maxDist*0.4
+		// Bigger buildings are more valuable (more cover).
+		area := float64(fp.w * fp.h)
+		score += math.Min(0.3, area/50000.0)
+
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+
+	if bestIdx >= 0 && bestScore > 0.1 {
+		if bestIdx != sq.ClaimedBuildingIdx {
+			sq.ClaimedBuildingIdx = bestIdx
+			fp := sq.buildingFootprints[bestIdx]
+			sq.Leader.think(fmt.Sprintf("claiming building at (%d,%d)", fp.x, fp.y))
+		}
+	}
+}
+
+// spreadPositions returns spread positions for members during IntentEngage.
+// Soldiers are placed in a lateral line perpendicular to the enemy bearing,
+// at a standoff distance from the contact point. This prevents the joust pattern
+// (running straight at the enemy) by ensuring everyone approaches from a flank angle.
 func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 	alive := sq.Alive()
 	n := len(alive)
@@ -195,30 +478,46 @@ func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 		return nil
 	}
 
-	// Approach bearing: from leader toward contact.
-	lx, ly := sq.Leader.x, sq.Leader.y
-	bearing := math.Atan2(cy-ly, cx-lx)
+	// Use the squad-level enemy bearing (from centroid), not the leader alone.
+	bearing := sq.EnemyBearing
+	perpAngle := bearing + math.Pi/2
 
-	// Standoff: stop short of the contact by this many px.
-	const standoff = 160.0
-	// Lateral spacing between members.
-	const lateralSpacing = 40.0
+	// Standoff: positions are this far back from the contact, so nobody runs
+	// directly into the enemy's face.
+	const standoff = 180.0
+	// Lateral spacing: members spread wider so they approach from multiple angles.
+	const lateralSpacing = 55.0
 
-	// Spread symmetrically left/right of the bearing, perpendicular.
+	// Base point: contact pulled back by standoff along the approach bearing.
+	baseX := cx - math.Cos(bearing)*standoff
+	baseY := cy - math.Sin(bearing)*standoff
+
 	positions := make([][2]float64, n)
-	for i, m := range alive {
-		_ = m
-		// Symmetric index: 0 is centre, then alternating ±1, ±2, ...
+	for i := range alive {
+		// Symmetric lateral offset: centre is at 0, then alternating ±1, ±2...
 		halfN := float64(n-1) / 2.0
 		lateral := (float64(i) - halfN) * lateralSpacing
-
-		// Position = contact point pulled back by standoff, then offset laterally.
-		perpAngle := bearing + math.Pi/2
-		targetX := cx - math.Cos(bearing)*standoff + math.Cos(perpAngle)*lateral
-		targetY := cy - math.Sin(bearing)*standoff + math.Sin(perpAngle)*lateral
-		positions[i] = [2]float64{targetX, targetY}
+		positions[i] = [2]float64{
+			baseX + math.Cos(perpAngle)*lateral,
+			baseY + math.Sin(perpAngle)*lateral,
+		}
 	}
 	return positions
+}
+
+// squadCentroid returns the average position of all alive members.
+func (sq *Squad) squadCentroid() (float64, float64) {
+	alive := sq.Alive()
+	if len(alive) == 0 {
+		return sq.Leader.x, sq.Leader.y
+	}
+	var sumX, sumY float64
+	for _, m := range alive {
+		sumX += m.x
+		sumY += m.y
+	}
+	n := float64(len(alive))
+	return sumX / n, sumY / n
 }
 
 // squadSpread returns the max distance of any alive member from the leader.
@@ -246,15 +545,16 @@ func (sq *Squad) squadSpread() float64 {
 // or stops to let them catch up.
 func (sq *Squad) LeaderCohesionSlowdown() float64 {
 	spread := sq.squadSpread()
+	// Thresholds widened for 8-man squads.
+	// An 8-man wedge has max slot distance ~197px (slot 7: depth=4*28, side=4*28).
+	// Leaders should only slow when members are genuinely left behind, not just
+	// spread in a valid formation.
 	switch {
-	// Note: a normal 6-man wedge formation has a max slot distance of ~119px
-	// from leader (sqrt(84^2 + 84^2)). Thresholds must be above that or the
-	// leader will stop even when the squad is correctly formed.
-	case spread > 220:
-		return 0.0 // stop completely, let members catch up
-	case spread > 180:
-		return 0.3 // crawl speed
-	case spread > 150:
+	case spread > 420:
+		return 0.0 // stop: squad is truly scattered
+	case spread > 340:
+		return 0.3 // crawl
+	case spread > 280:
 		return 0.6 // slow
 	default:
 		return 1.0 // full speed
@@ -290,7 +590,7 @@ func (sq *Squad) UpdateFormation() {
 		// Don't clobber paths for members who are actively engaging or closing on contact.
 		// Their paths are managed by moveToContact / GoalEngage logic.
 		g := m.blackboard.CurrentGoal
-		if g == GoalMoveToContact || g == GoalEngage || g == GoalFallback {
+		if g == GoalMoveToContact || g == GoalEngage || g == GoalFallback || g == GoalFlank || g == GoalOverwatch {
 			continue
 		}
 		// If a member has completed their current path, force a repath to the

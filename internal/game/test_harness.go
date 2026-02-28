@@ -16,6 +16,7 @@ type TestSim struct {
 	Soldiers  []*Soldier // all soldiers across both teams
 	Squads    []*Squad
 	SimLog    *SimLog
+	Reporter  *SimReporter
 	Tick      int
 	rng       *rand.Rand
 	combat    *CombatManager
@@ -126,6 +127,7 @@ func NewTestSim(opts ...SimOption) *TestSim {
 		}
 	}
 	ts.combat = NewCombatManager(ts.rng.Int63())
+	ts.Reporter = NewSimReporter(reportWindowTicks, true)
 	return ts
 }
 
@@ -133,7 +135,7 @@ func NewTestSim(opts ...SimOption) *TestSim {
 // buildings have been added. Must be called before soldiers are added if you
 // want their initial paths to be correct — NewTestSim handles this automatically.
 func (ts *TestSim) buildNavGrid() {
-	ts.NavGrid = NewNavGrid(ts.Width, ts.Height, ts.buildings, soldierRadius)
+	ts.NavGrid = NewNavGrid(ts.Width, ts.Height, ts.buildings, soldierRadius, nil, nil)
 	// Re-path any soldiers that were added before the grid was built.
 	for _, s := range ts.Soldiers {
 		s.navGrid = ts.NavGrid
@@ -144,7 +146,7 @@ func (ts *TestSim) buildNavGrid() {
 // addSoldier is the internal helper used by WithRedSoldier / WithBlueSoldier.
 func (ts *TestSim) addSoldier(id int, x, y float64, team Team, start, end [2]float64) {
 	tl := NewThoughtLog() // per-sim log; not rendered
-	s := NewSoldier(id, x, y, team, start, end, ts.NavGrid, tl, &ts.tick)
+	s := NewSoldier(id, x, y, team, start, end, ts.NavGrid, nil, ts.buildings, tl, &ts.tick)
 	ts.Soldiers = append(ts.Soldiers, s)
 	if id >= ts.nextID {
 		ts.nextID = id + 1
@@ -244,9 +246,12 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 
 	// 2. COMBAT
 	ts.combat.ResetFireCounts(ts.Soldiers)
-	ts.combat.ResolveCombat(reds, blues, reds, ts.buildings)
-	ts.combat.ResolveCombat(blues, reds, blues, ts.buildings)
+	ts.combat.ResolveCombat(reds, blues, reds, ts.buildings, ts.Soldiers)
+	ts.combat.ResolveCombat(blues, reds, blues, ts.buildings, ts.Soldiers)
 	ts.combat.UpdateTracers()
+
+	// 2.1. SOUND
+	ts.combat.BroadcastGunfire(reds, blues, tick)
 
 	// 3. SQUAD THINK
 	for _, sq := range ts.Squads {
@@ -329,6 +334,11 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 		// Verbose: fear.
 		ts.SimLog.AddVerbose(tick, s.label, tStr, "stats", "fear",
 			fmt.Sprintf("%.3f", s.profile.Psych.Fear), s.profile.Psych.Fear)
+	}
+
+	// Analytics: collect behaviour report every ~1s.
+	if tick%60 == 0 && ts.Reporter != nil {
+		ts.Reporter.Collect(tick, reds, blues, ts.Squads)
 	}
 }
 

@@ -4,8 +4,8 @@ import "math"
 
 const (
 	// Default vision parameters.
-	defaultFOVDeg   = 120.0 // field of view in degrees
-	defaultViewDist = 300.0 // max sight range in pixels
+	defaultFOVDeg   = 120.0              // field of view in degrees
+	defaultViewDist = maxFireRange * 2.0 // detect threats at ~2x long-range shot distance
 )
 
 // VisionState tracks a soldier's current look direction and what they see.
@@ -75,14 +75,19 @@ func normalizeAngle(a float64) float64 {
 
 // PerformVisionScan clears known contacts and checks all candidates
 // for line-of-sight within the vision cone.
-func (v *VisionState) PerformVisionScan(ox, oy float64, candidates []*Soldier, buildings []rect) {
+// covers is the map's cover object list; tall walls block LOS.
+func (v *VisionState) PerformVisionScan(ox, oy float64, candidates []*Soldier, buildings []rect, covers []*CoverObject) {
 	v.KnownContacts = v.KnownContacts[:0]
 	for _, c := range candidates {
+		// Never keep dead soldiers as live contacts.
+		if c.state == SoldierStateDead {
+			continue
+		}
 		if !v.InCone(ox, oy, c.x, c.y) {
 			continue
 		}
-		// Cone check passed — now do hard LOS (building occlusion).
-		if HasLineOfSight(ox, oy, c.x, c.y, buildings) {
+		// Cone check passed — now do hard LOS (building + tall-wall occlusion).
+		if HasLineOfSightWithCover(ox, oy, c.x, c.y, buildings, covers) {
 			v.KnownContacts = append(v.KnownContacts, c)
 		}
 	}
