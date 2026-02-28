@@ -123,7 +123,7 @@ func clampToByte(v int) uint8 {
 
 // terrainHash returns a deterministic pseudo-random value for a cell pair.
 func terrainHash(x, y int) uint32 {
-	v := uint32(x)*73856093 ^ uint32(y)*19349663
+	v := uint32(x)*73856093 ^ uint32(y)*19349663 // #nosec G115 -- intentional wrapping for hash distribution
 	v ^= v >> 13
 	v *= 1274126177
 	v ^= v >> 16
@@ -177,7 +177,7 @@ func New() *Game {
 	g.camY = float64(battleH) / 2
 	g.camZoom = 0.5
 	g.simSpeed = 1.0
-	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999))
+	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999)) // #nosec G404 -- game behavior only
 	g.reporter = NewSimReporter(reportWindowTicks, false)
 	return g
 }
@@ -193,7 +193,7 @@ func (g *Game) initTerrainPatches() {
 		x := float32(rng.Intn(g.gameWidth))
 		y := float32(rng.Intn(g.gameHeight))
 		// shade offset: -6 to +6 from base green
-		shade := uint8(rng.Intn(13))
+		shade := uint8(rng.Intn(13)) // #nosec G115 -- Intn(13) returns 0-12, safely fits in uint8
 		g.terrainPatches = append(g.terrainPatches, terrainPatch{x: x, y: y, w: w, h: h, shade: shade})
 	}
 }
