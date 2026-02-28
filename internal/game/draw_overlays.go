@@ -26,6 +26,66 @@ func commitPhaseStr(bb *Blackboard, s *Soldier) string {
 	}
 }
 
+// drawOfficerOrders renders active squad leader orders on the world map.
+func (g *Game) drawOfficerOrders(screen *ebiten.Image) {
+	for _, sq := range g.squads {
+		if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
+			continue
+		}
+		if !sq.ActiveOrder.IsActiveAt(g.tick) {
+			continue
+		}
+
+		lx := float32(sq.Leader.x)
+		ly := float32(sq.Leader.y)
+		tx := float32(sq.ActiveOrder.TargetX)
+		ty := float32(sq.ActiveOrder.TargetY)
+
+		var orderCol color.RGBA
+		if sq.Team == TeamRed {
+			orderCol = color.RGBA{R: 235, G: 90, B: 70, A: 140}
+		} else {
+			orderCol = color.RGBA{R: 80, G: 130, B: 235, A: 140}
+		}
+
+		radius := float32(sq.ActiveOrder.Radius)
+		if radius < 24 {
+			radius = 24
+		}
+
+		switch sq.ActiveOrder.Kind {
+		case CmdMoveTo, CmdAssault, CmdFanOut, CmdBoundForward:
+			vector.StrokeLine(screen, lx, ly, tx, ty, 1.3, orderCol, false)
+			// Arrowhead.
+			ang := math.Atan2(float64(ty-ly), float64(tx-lx))
+			h := float32(9)
+			l1 := ang + math.Pi*0.78
+			l2 := ang - math.Pi*0.78
+			vector.StrokeLine(screen, tx, ty, tx+h*float32(math.Cos(l1)), ty+h*float32(math.Sin(l1)), 1.3, orderCol, false)
+			vector.StrokeLine(screen, tx, ty, tx+h*float32(math.Cos(l2)), ty+h*float32(math.Sin(l2)), 1.3, orderCol, false)
+
+		case CmdHold, CmdRegroup, CmdForm:
+			for i := 0; i < 18; i++ {
+				a0 := float64(i) / 18 * 2 * math.Pi
+				a1 := float64(i+1) / 18 * 2 * math.Pi
+				vector.StrokeLine(
+					screen,
+					tx+radius*float32(math.Cos(a0)),
+					ty+radius*float32(math.Sin(a0)),
+					tx+radius*float32(math.Cos(a1)),
+					ty+radius*float32(math.Sin(a1)),
+					1.1,
+					orderCol,
+					false,
+				)
+			}
+		}
+
+		label := sq.ActiveOrder.Kind.String()
+		ebitenutil.DebugPrintAt(screen, label, int(tx+8), int(ty-10))
+	}
+}
+
 // drawMovementIntentLines draws faint lines from each soldier to their path
 // endpoint or best nearby position. For the selected soldier, the line is
 // brighter and includes a small destination marker.
@@ -146,6 +206,9 @@ func (g *Game) drawSquadIntentLabels(screen *ebiten.Image) {
 
 		// Intent text.
 		intentStr := sq.Intent.String()
+		if sq.ActiveOrder.IsActiveAt(g.tick) {
+			intentStr += fmt.Sprintf(" [%s]", sq.ActiveOrder.Kind)
+		}
 		if sq.ClaimedBuildingIdx >= 0 {
 			intentStr += " [BLDG]"
 		}

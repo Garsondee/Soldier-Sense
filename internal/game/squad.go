@@ -14,6 +14,11 @@ type Squad struct {
 	Formation FormationType
 	Intent    SquadIntentKind
 
+	// Active officer command for the squad. Commands are strong signals that
+	// bias individual utility, not hard overrides.
+	ActiveOrder OfficerOrder
+	nextOrderID int
+
 	// smoothedHeading is a low-pass filtered version of the leader's heading,
 	// used to prevent formation thrash on minor direction changes.
 	smoothedHeading float64
@@ -59,6 +64,10 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 		Members:            members,
 		Formation:          FormationWedge,
 		ClaimedBuildingIdx: -1,
+		ActiveOrder: OfficerOrder{
+			Kind:  CmdNone,
+			State: OfficerOrderInactive,
+		},
 	}
 	if len(members) > 0 {
 		sq.Leader = members[0]
@@ -85,6 +94,78 @@ const (
 	engageEnterDist = 300.0 // must be this close to enter engage
 	engageExitDist  = 360.0 // can stay engaged until this distance
 )
+
+func (sq *Squad) issueOfficerOrder(tick int, kind OfficerCommandKind, targetX, targetY, radius float64, formation FormationType, priority, strength float64, ttl int) {
+	if sq.ActiveOrder.Kind == kind && sq.ActiveOrder.State == OfficerOrderActive {
+		dx := sq.ActiveOrder.TargetX - targetX
+		dy := sq.ActiveOrder.TargetY - targetY
+		if math.Sqrt(dx*dx+dy*dy) < 16 && sq.ActiveOrder.Formation == formation {
+			sq.ActiveOrder.ExpiresTick = tick + ttl
+			sq.ActiveOrder.Priority = priority
+			sq.ActiveOrder.Strength = strength
+			sq.ActiveOrder.Radius = radius
+			return
+		}
+	}
+
+	sq.nextOrderID++
+	sq.ActiveOrder = OfficerOrder{
+		ID:          sq.nextOrderID,
+		Kind:        kind,
+		IssuedTick:  tick,
+		ExpiresTick: tick + ttl,
+		Priority:    priority,
+		Strength:    strength,
+		TargetX:     targetX,
+		TargetY:     targetY,
+		Radius:      radius,
+		Formation:   formation,
+		State:       OfficerOrderActive,
+	}
+	if sq.Leader != nil {
+		sq.Leader.think(fmt.Sprintf("order: %s", kind))
+	}
+}
+
+func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY float64) {
+	if sq.Leader == nil {
+		return
+	}
+
+	leaderX, leaderY := sq.Leader.x, sq.Leader.y
+	goalX, goalY := sq.Leader.endTarget[0], sq.Leader.endTarget[1]
+	goalDist := math.Hypot(goalX-leaderX, goalY-leaderY)
+
+	switch sq.Intent {
+	case IntentAdvance:
+		form := FormationWedge
+		if !hasContact && goalDist > 650 {
+			form = FormationColumn
+		}
+		sq.Formation = form
+		sq.issueOfficerOrder(tick, CmdMoveTo, goalX, goalY, 120, form, 0.65, 0.80, 360)
+
+	case IntentHold:
+		sq.Formation = FormationLine
+		sq.issueOfficerOrder(tick, CmdHold, leaderX, leaderY, 150, sq.Formation, 0.70, 0.85, 240)
+
+	case IntentRegroup, IntentWithdraw:
+		sq.Formation = FormationWedge
+		sq.issueOfficerOrder(tick, CmdRegroup, leaderX, leaderY, 180, sq.Formation, 0.85, 0.95, 220)
+
+	case IntentEngage:
+		sq.Formation = FormationLine
+		tx, ty := contactX, contactY
+		if !hasContact {
+			tx, ty = goalX, goalY
+		}
+		sq.issueOfficerOrder(tick, CmdFanOut, tx, ty, 220, sq.Formation, 0.80, 0.90, 260)
+	}
+
+	if sq.ActiveOrder.State == OfficerOrderActive && sq.ActiveOrder.ExpiresTick > 0 && tick > sq.ActiveOrder.ExpiresTick {
+		sq.ActiveOrder.State = OfficerOrderExpired
+	}
+}
 
 // SquadThink runs the leader's squad-level decision loop.
 // It evaluates the leader's blackboard and sets Intent + orders for members.
@@ -270,6 +351,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		}
 	}
 	sq.Intent = candidateIntent
+	sq.syncOfficerOrder(tick, hasContact, contactX, contactY)
 
 	// Log intent changes.
 	if sq.Intent != oldIntent {
@@ -358,6 +440,20 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		}
 		m.blackboard.SquadIntent = sq.Intent
 		m.blackboard.OrderReceived = true
+		if sq.ActiveOrder.IsActiveAt(tick) {
+			m.blackboard.OfficerOrderKind = sq.ActiveOrder.Kind
+			m.blackboard.OfficerOrderTargetX = sq.ActiveOrder.TargetX
+			m.blackboard.OfficerOrderTargetY = sq.ActiveOrder.TargetY
+			m.blackboard.OfficerOrderRadius = sq.ActiveOrder.Radius
+			m.blackboard.OfficerOrderPriority = sq.ActiveOrder.Priority
+			m.blackboard.OfficerOrderStrength = sq.ActiveOrder.Strength
+			m.blackboard.OfficerOrderActive = true
+		} else {
+			m.blackboard.OfficerOrderKind = CmdNone
+			m.blackboard.OfficerOrderActive = false
+			m.blackboard.OfficerOrderPriority = 0
+			m.blackboard.OfficerOrderStrength = 0
+		}
 		m.blackboard.SquadHasContact = hasContact
 		m.blackboard.OutnumberedFactor = outnumberedFactor
 		m.blackboard.SquadPosture = posture

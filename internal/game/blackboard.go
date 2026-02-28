@@ -50,6 +50,80 @@ func (g GoalKind) String() string {
 	}
 }
 
+// --- Officer Orders ---
+
+// OfficerCommandKind is an explicit command issued by a squad leader.
+// Commands are strong positive signals, not hard overrides.
+type OfficerCommandKind int
+
+const (
+	CmdNone OfficerCommandKind = iota
+	CmdMoveTo
+	CmdHold
+	CmdRegroup
+	CmdBoundForward
+	CmdForm
+	CmdFanOut
+	CmdAssault
+)
+
+func (oc OfficerCommandKind) String() string {
+	switch oc {
+	case CmdMoveTo:
+		return "move_to"
+	case CmdHold:
+		return "hold"
+	case CmdRegroup:
+		return "regroup"
+	case CmdBoundForward:
+		return "bound"
+	case CmdForm:
+		return "form"
+	case CmdFanOut:
+		return "fan_out"
+	case CmdAssault:
+		return "assault"
+	default:
+		return "none"
+	}
+}
+
+// OfficerOrderState tracks the lifecycle of an officer order.
+type OfficerOrderState int
+
+const (
+	OfficerOrderInactive OfficerOrderState = iota
+	OfficerOrderActive
+	OfficerOrderExpired
+	OfficerOrderCancelled
+)
+
+// OfficerOrder is the squad-level command emitted by the current squad leader.
+type OfficerOrder struct {
+	ID          int
+	Kind        OfficerCommandKind
+	IssuedTick  int
+	ExpiresTick int
+	Priority    float64 // 0..1
+	Strength    float64 // 0..1
+	TargetX     float64
+	TargetY     float64
+	Radius      float64
+	Formation   FormationType
+	State       OfficerOrderState
+}
+
+// IsActiveAt reports whether this order should currently influence behaviour.
+func (o OfficerOrder) IsActiveAt(tick int) bool {
+	if o.State != OfficerOrderActive || o.Kind == CmdNone {
+		return false
+	}
+	if o.ExpiresTick > 0 && tick > o.ExpiresTick {
+		return false
+	}
+	return true
+}
+
 // --- Squad Intent ---
 
 // SquadIntentKind is the high-level posture a leader sets for the squad.
@@ -100,6 +174,15 @@ type Blackboard struct {
 	SquadIntent       SquadIntentKind // set by leader via order
 	OrderReceived     bool            // true if an order was written this cycle
 	IncomingFireCount int             // shots received (hit or miss) this tick — reset each tick
+
+	// Active officer-order signal propagated from squad leader.
+	OfficerOrderKind     OfficerCommandKind
+	OfficerOrderTargetX  float64
+	OfficerOrderTargetY  float64
+	OfficerOrderRadius   float64
+	OfficerOrderPriority float64 // 0..1
+	OfficerOrderStrength float64 // 0..1
+	OfficerOrderActive   bool
 
 	// Internal models each soldier's personal tactical drive for this tick.
 	Internal SoldierInternalGoals
@@ -791,6 +874,83 @@ func socialMovePressure(bb *Blackboard, ef float64) (isolationPush, supportPush 
 	return isolationPush, supportPush
 }
 
+// officerOrderBias computes an additive utility bias for a specific goal when a
+// squad leader order is active. It nudges behaviour strongly but does not force
+// outcomes, preserving self-preservation and local context effects.
+func officerOrderBias(goal GoalKind, bb *Blackboard, profile *SoldierProfile) float64 {
+	if !bb.OfficerOrderActive || bb.OfficerOrderKind == CmdNone {
+		return 0
+	}
+
+	ef := profile.Psych.EffectiveFear()
+	compliance := (0.45 + profile.Skills.Discipline*0.55) * (1.0 - ef*0.45)
+	if compliance < 0.1 {
+		compliance = 0.1
+	}
+	if compliance > 1.0 {
+		compliance = 1.0
+	}
+
+	base := (0.15 + bb.OfficerOrderPriority*0.20 + bb.OfficerOrderStrength*0.35) * compliance
+
+	switch bb.OfficerOrderKind {
+	case CmdMoveTo:
+		switch goal {
+		case GoalMaintainFormation:
+			return base * 1.15
+		case GoalAdvance:
+			return base * 1.00
+		case GoalMoveToContact:
+			return base * 0.50
+		}
+	case CmdHold:
+		switch goal {
+		case GoalHoldPosition:
+			return base * 1.20
+		case GoalOverwatch:
+			return base * 0.75
+		}
+	case CmdRegroup:
+		switch goal {
+		case GoalRegroup:
+			return base * 1.25
+		case GoalMaintainFormation:
+			return base * 0.60
+		}
+	case CmdBoundForward:
+		switch goal {
+		case GoalMoveToContact:
+			return base * 1.00
+		case GoalOverwatch:
+			return base * 0.90
+		}
+	case CmdForm:
+		if goal == GoalMaintainFormation {
+			return base * 1.20
+		}
+	case CmdFanOut:
+		switch goal {
+		case GoalFlank:
+			return base * 1.10
+		case GoalMoveToContact:
+			return base * 0.85
+		case GoalOverwatch:
+			return base * 0.35
+		}
+	case CmdAssault:
+		switch goal {
+		case GoalMoveToContact:
+			return base * 1.20
+		case GoalEngage:
+			return base * 0.95
+		case GoalFlank:
+			return base * 0.55
+		}
+	}
+
+	return 0
+}
+
 // SelectGoal evaluates competing goals and returns the highest-utility one.
 func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath bool) GoalKind {
 	bb.ensureInternalDefaults()
@@ -1136,6 +1296,16 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		overwatchUtil -= clumpPush * 0.45
 	}
 
+	// --- Officer order signal (strong positive bias, not hard override) ---
+	advanceUtil += officerOrderBias(GoalAdvance, bb, profile)
+	formationUtil += officerOrderBias(GoalMaintainFormation, bb, profile)
+	regroupUtil += officerOrderBias(GoalRegroup, bb, profile)
+	holdUtil += officerOrderBias(GoalHoldPosition, bb, profile)
+	engageUtil += officerOrderBias(GoalEngage, bb, profile)
+	moveToContactUtil += officerOrderBias(GoalMoveToContact, bb, profile)
+	flankUtil += officerOrderBias(GoalFlank, bb, profile)
+	overwatchUtil += officerOrderBias(GoalOverwatch, bb, profile)
+
 	// --- Pick highest utility ---
 	best := GoalAdvance
 	bestVal := advanceUtil
@@ -1208,6 +1378,7 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		combatCohesionPush = 0.35 + clamp01(float64(bb.IsolatedTicks)/120.0)*0.35
 	}
 	clumpPush := bb.CloseAllyPressure
+	orderBias := officerOrderBias(goal, bb, profile)
 
 	switch goal {
 	case GoalEngage:
@@ -1232,7 +1403,7 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				u += posture * 0.15
 			}
 		}
-		return u
+		return u + orderBias
 
 	case GoalFallback:
 		u := 0.0
@@ -1254,7 +1425,7 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		if posture < 0 {
 			u += (-posture) * 0.10
 		}
-		return u
+		return u + orderBias
 
 	case GoalSurvive:
 		u := 0.0

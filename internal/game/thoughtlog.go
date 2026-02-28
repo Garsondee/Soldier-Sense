@@ -130,6 +130,9 @@ func (tl *ThoughtLog) AddSquadPoll(tick int, sq *Squad) {
 	// Status line: intent + alive + fear + activation.
 	statusLine := fmt.Sprintf("%s %d/%d f:%.0f%%",
 		sq.Intent, alive, len(sq.Members), avgFear*100)
+	if sq.ActiveOrder.IsActiveAt(tick) {
+		statusLine += fmt.Sprintf(" ord:%s", sq.ActiveOrder.Kind)
+	}
 	if activated > 0 {
 		statusLine += fmt.Sprintf(" act:%d", activated)
 	}

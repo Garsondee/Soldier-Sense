@@ -111,6 +111,25 @@ type terrainPatch struct {
 	shade uint8 // offset from base green
 }
 
+func clampToByte(v int) uint8 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
+}
+
+// terrainHash returns a deterministic pseudo-random value for a cell pair.
+func terrainHash(x, y int) uint32 {
+	v := uint32(x)*73856093 ^ uint32(y)*19349663
+	v ^= v >> 13
+	v *= 1274126177
+	v ^= v >> 16
+	return v
+}
+
 func New() *Game {
 	// Battlefield is 3072x1728 — double the original size.
 	battleW := 3072
@@ -930,27 +949,43 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
 
 	// Ground fill inside battlefield.
-	vector.FillRect(screen, ox, oy, gw, gh, color.RGBA{R: 28, G: 42, B: 28, A: 255}, false)
+	vector.FillRect(screen, ox, oy, gw, gh, color.RGBA{R: 30, G: 45, B: 30, A: 255}, false)
+	// Broad grass bands to keep the field from looking uniformly flat.
+	for y := 0; y < g.gameHeight; y += 48 {
+		band := (y / 48) % 5
+		bandCol := color.RGBA{R: 0, G: clampToByte(36 + band*3), B: 0, A: 18}
+		vector.FillRect(screen, ox, oy+float32(y), gw, 24, bandCol, false)
+	}
 
-	// Terrain noise patches — subtle colour variation on the ground.
+	// Terrain patches — richer grassy variation and subtle texture.
 	for _, tp := range g.terrainPatches {
-		baseG := int(42) + int(tp.shade) - 6
-		if baseG < 0 {
-			baseG = 0
-		}
-		if baseG > 255 {
-			baseG = 255
-		}
-		baseR := 28 + int(tp.shade)/2 - 3
-		baseB := 28 + int(tp.shade)/3 - 2
-		if baseR < 0 {
-			baseR = 0
-		}
-		if baseB < 0 {
-			baseB = 0
-		}
+		delta := int(tp.shade) - 6
+		baseG := 42 + delta
+		baseR := 28 + delta/2
+		baseB := 26 + delta/4
 		vector.FillRect(screen, ox+tp.x, oy+tp.y, tp.w, tp.h,
-			color.RGBA{R: uint8(baseR), G: uint8(baseG), B: uint8(baseB), A: 40}, false)
+			color.RGBA{R: clampToByte(baseR), G: clampToByte(baseG), B: clampToByte(baseB), A: 38}, false)
+		// Secondary tint for less boxy, more natural variation.
+		vector.FillRect(screen,
+			ox+tp.x+tp.w*0.15, oy+tp.y+tp.h*0.15,
+			tp.w*0.65, tp.h*0.65,
+			color.RGBA{R: clampToByte(baseR - 3), G: clampToByte(baseG + 4), B: clampToByte(baseB - 2), A: 24}, false)
+	}
+
+	// Sparse grass tufts for visual detail at medium zoom.
+	for gy := 8; gy < g.gameHeight; gy += 12 {
+		for gx := 8; gx < g.gameWidth; gx += 12 {
+			h := terrainHash(gx/12, gy/12)
+			if h%11 != 0 {
+				continue
+			}
+			height := float32(3 + int((h>>4)%5))
+			tilt := float32(int(h>>8)%3 - 1)
+			c := color.RGBA{R: clampToByte(46 + int((h>>12)%14)), G: clampToByte(70 + int((h>>16)%28)), B: clampToByte(44 + int((h>>20)%12)), A: 85}
+			x0 := ox + float32(gx)
+			y0 := oy + float32(gy)
+			vector.StrokeLine(screen, x0, y0, x0+tilt, y0-height, 0.5, c, false)
+		}
 	}
 
 	gridFine := 16
@@ -1117,35 +1152,93 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 			vector.StrokeLine(screen, x0, ty, x0+bw, ty, 0.5, tileCol, false)
 		}
 	}
-	// Wall segments — drawn as solid filled cells with lighting.
-	wallFill := color.RGBA{R: 85, G: 80, B: 68, A: 255}
-	wallLight := color.RGBA{R: 110, G: 105, B: 90, A: 200}
-	wallDark := color.RGBA{R: 50, G: 47, B: 38, A: 200}
+	// Build occupancy sets for orientation-aware wall/window rendering.
+	solidSet := make(map[[2]int]bool, len(g.buildings)+len(g.windows))
+	for _, b := range g.buildings {
+		solidSet[[2]int{b.x / cellSize, b.y / cellSize}] = true
+	}
+	for _, w := range g.windows {
+		solidSet[[2]int{w.x / cellSize, w.y / cellSize}] = true
+	}
+
+	// Wall segments — neighbour-aware lighting so edges/corners read correctly.
+	wallFill := color.RGBA{R: 86, G: 80, B: 66, A: 255}
+	wallLight := color.RGBA{R: 124, G: 115, B: 96, A: 210}
+	wallDark := color.RGBA{R: 44, G: 40, B: 33, A: 220}
 	for _, b := range g.buildings {
 		x0 := ox + float32(b.x)
 		y0 := oy + float32(b.y)
 		bw := float32(b.w)
 		bh := float32(b.h)
+		cx := b.x / cellSize
+		cy := b.y / cellSize
+		hasN := solidSet[[2]int{cx, cy - 1}]
+		hasS := solidSet[[2]int{cx, cy + 1}]
+		hasW := solidSet[[2]int{cx - 1, cy}]
+		hasE := solidSet[[2]int{cx + 1, cy}]
+
 		vector.FillRect(screen, x0, y0, bw, bh, wallFill, false)
-		// Top-left highlight.
-		vector.StrokeLine(screen, x0, y0, x0+bw, y0, 0.5, wallLight, false)
-		vector.StrokeLine(screen, x0, y0, x0, y0+bh, 0.5, wallLight, false)
-		// Bottom-right shadow.
-		vector.StrokeLine(screen, x0, y0+bh, x0+bw, y0+bh, 0.5, wallDark, false)
-		vector.StrokeLine(screen, x0+bw, y0, x0+bw, y0+bh, 0.5, wallDark, false)
+		// Exposed edges only (more accurate wall runs).
+		if !hasN {
+			vector.StrokeLine(screen, x0, y0, x0+bw, y0, 0.8, wallLight, false)
+		}
+		if !hasW {
+			vector.StrokeLine(screen, x0, y0, x0, y0+bh, 0.8, wallLight, false)
+		}
+		if !hasS {
+			vector.StrokeLine(screen, x0, y0+bh, x0+bw, y0+bh, 0.8, wallDark, false)
+		}
+		if !hasE {
+			vector.StrokeLine(screen, x0+bw, y0, x0+bw, y0+bh, 0.8, wallDark, false)
+		}
+		// Mortar-like midline for larger contiguous pieces.
+		if (hasW || hasE) && !(hasN && hasS) {
+			vector.StrokeLine(screen, x0, y0+bh*0.5, x0+bw, y0+bh*0.5, 0.5, color.RGBA{R: 72, G: 66, B: 55, A: 110}, false)
+		} else if hasN || hasS {
+			vector.StrokeLine(screen, x0+bw*0.5, y0, x0+bw*0.5, y0+bh, 0.5, color.RGBA{R: 72, G: 66, B: 55, A: 110}, false)
+		}
 	}
 
-	// Window segments — translucent blue glass over the floor.
+	// Window segments — framed and orientation-aware glass panes.
 	for _, w := range g.windows {
 		x0 := ox + float32(w.x)
 		y0 := oy + float32(w.y)
 		bw := float32(w.w)
 		bh := float32(w.h)
-		// Glass fill — dark blue-tinted, semi-transparent.
-		vector.FillRect(screen, x0, y0, bw, bh, color.RGBA{R: 55, G: 70, B: 100, A: 180}, false)
-		// Bright highlight edge (top-left) to suggest reflective glass.
-		vector.StrokeLine(screen, x0, y0, x0+bw, y0, 0.5, color.RGBA{R: 120, G: 160, B: 210, A: 220}, false)
-		vector.StrokeLine(screen, x0, y0, x0, y0+bh, 0.5, color.RGBA{R: 110, G: 150, B: 200, A: 180}, false)
+		cx := w.x / cellSize
+		cy := w.y / cellSize
+		hasN := solidSet[[2]int{cx, cy - 1}]
+		hasS := solidSet[[2]int{cx, cy + 1}]
+		hasW := solidSet[[2]int{cx - 1, cy}]
+		hasE := solidSet[[2]int{cx + 1, cy}]
+
+		// Frame.
+		vector.FillRect(screen, x0, y0, bw, bh, color.RGBA{R: 60, G: 65, B: 72, A: 220}, false)
+		inset := float32(2)
+		paneX := x0 + inset
+		paneY := y0 + inset
+		paneW := bw - inset*2
+		paneH := bh - inset*2
+		if hasW && hasE && !(hasN && hasS) {
+			paneY = y0 + bh*0.25
+			paneH = bh * 0.5
+		}
+		if hasN && hasS && !(hasW && hasE) {
+			paneX = x0 + bw*0.25
+			paneW = bw * 0.5
+		}
+		if paneW < 2 {
+			paneW = 2
+		}
+		if paneH < 2 {
+			paneH = 2
+		}
+		// Glass pane.
+		vector.FillRect(screen, paneX, paneY, paneW, paneH, color.RGBA{R: 68, G: 92, B: 126, A: 190}, false)
+		// Reflective highlight + lower shadow for depth.
+		vector.StrokeLine(screen, paneX, paneY, paneX+paneW, paneY, 0.8, color.RGBA{R: 145, G: 188, B: 232, A: 220}, false)
+		vector.StrokeLine(screen, paneX, paneY+paneH, paneX+paneW, paneY+paneH, 0.8, color.RGBA{R: 30, G: 44, B: 70, A: 190}, false)
+		vector.StrokeLine(screen, paneX+paneW*0.2, paneY+paneH*0.15, paneX+paneW*0.8, paneY+paneH*0.85, 0.5, color.RGBA{R: 175, G: 215, B: 245, A: 110}, false)
 	}
 
 	// Cover objects.
@@ -1164,6 +1257,9 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 
 	// Movement intent lines: faint dashed line from soldier to path endpoint.
 	g.drawMovementIntentLines(screen)
+
+	// Active officer orders (leader-issued command markers).
+	g.drawOfficerOrders(screen)
 
 	// Squad intent labels near leaders.
 	g.drawSquadIntentLabels(screen)
