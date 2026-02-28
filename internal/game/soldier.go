@@ -69,6 +69,47 @@ func (fm FireMode) String() string {
 	}
 }
 
+func isCombatMobilityGoal(g GoalKind) bool {
+	switch g {
+	case GoalMoveToContact, GoalEngage, GoalFlank:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Soldier) recoveryTargetHint() (float64, float64) {
+	bb := &s.blackboard
+	if bb.HasMoveOrder {
+		return bb.OrderMoveX, bb.OrderMoveY
+	}
+	if bb.VisibleThreatCount() > 0 {
+		best := math.MaxFloat64
+		tx, ty := s.endTarget[0], s.endTarget[1]
+		for _, t := range bb.Threats {
+			if !t.IsVisible {
+				continue
+			}
+			d := math.Hypot(t.X-s.x, t.Y-s.y)
+			if d < best {
+				best = d
+				tx, ty = t.X, t.Y
+			}
+		}
+		return tx, ty
+	}
+	if bb.SquadHasContact {
+		return bb.SquadContactX, bb.SquadContactY
+	}
+	if bb.HeardGunfire {
+		return bb.HeardGunfireX, bb.HeardGunfireY
+	}
+	if bb.IsActivated() {
+		return bb.CombatMemoryX, bb.CombatMemoryY
+	}
+	return s.endTarget[0], s.endTarget[1]
+}
+
 // Fire mode distance thresholds (in pixels).
 const (
 	// autoRange: 10 tiles — CQB range. Auto only triggers here AND in low-sightline terrain.
@@ -226,6 +267,9 @@ type Soldier struct {
 	// --- Action pacing ---
 	// goalPauseTimer inserts a short pause after a non-critical goal switch.
 	goalPauseTimer int
+	// mobilityStallTicks counts consecutive combat-mobility ticks where the
+	// soldier is idle with a missing/terminal path; used to force recovery.
+	mobilityStallTicks int
 
 	// --- Fuzzy path-reacquisition memory ---
 	// These track short-horizon movement confidence and support a human-like
@@ -235,6 +279,9 @@ type Soldier struct {
 	recoveryStallEMA     float64
 	recoveryCommitTicks  int
 	recoveryAction       RecoveryAction
+	recoveryAttempts     int
+	recoverySuccesses    int
+	recoveryActionCounts [4]int
 }
 
 type RecoveryAction int
@@ -742,6 +789,24 @@ func (s *Soldier) executeGoal(dt float64) {
 	}
 
 	goal := s.blackboard.CurrentGoal
+	if isCombatMobilityGoal(goal) {
+		terminal := s.path == nil || s.pathIndex >= len(s.path)
+		combatContext := bb.SquadHasContact || bb.VisibleThreatCount() > 0 || bb.IsActivated()
+		if combatContext && s.state == SoldierStateIdle && terminal {
+			s.mobilityStallTicks++
+			if s.mobilityStallTicks >= 45 {
+				s.mobilityStallTicks = 0
+				tx, ty := s.recoveryTargetHint()
+				bb.ShatterEvent = true
+				s.applyRecoveryAction(dt, tx, ty)
+				return
+			}
+		} else {
+			s.mobilityStallTicks = 0
+		}
+	} else {
+		s.mobilityStallTicks = 0
+	}
 	if goal != GoalMoveToContact {
 		s.boundHoldTicks = 0
 	}
@@ -989,11 +1054,32 @@ func (s *Soldier) chooseRecoveryAction() RecoveryAction {
 	threatPressure := clamp01(bb.SuppressLevel*0.65 + float64(bb.IncomingFireCount)*0.12)
 	supportConfidence := clamp01(float64(bb.VisibleAllyCount) / 3.0)
 	urgency := s.recoveryUrgency()
+	stuckHard := s.recoveryNoPathStreak >= 2 || s.recoveryRouteFailEMA > 0.50
+	noise := math.Sin(float64((s.id+1)*17 + s.tickVal()*3 + s.recoveryNoPathStreak*11))
+	randomTilt := noise * 0.05
 
-	directScore := routeConfidence*0.50 + supportConfidence*0.20 + urgency*0.30 - stallSeverity*0.40
-	lateralScore := stallSeverity*0.45 + urgency*0.25 + (1.0-threatPressure)*0.20 + (1.0-routeConfidence)*0.20
-	anchorScore := supportConfidence*0.45 + threatPressure*0.20 + stallSeverity*0.20 + urgency*0.15
-	holdScore := threatPressure*0.60 + (1.0-supportConfidence)*0.20 + stallSeverity*0.20
+	directScore := routeConfidence*0.48 + supportConfidence*0.16 + urgency*0.24 - stallSeverity*0.46
+	lateralScore := stallSeverity*0.42 + urgency*0.22 + (1.0-threatPressure)*0.22 + (1.0-routeConfidence)*0.24
+	anchorScore := supportConfidence*0.42 + threatPressure*0.20 + stallSeverity*0.22 + urgency*0.16
+	holdScore := threatPressure*0.56 + (1.0-supportConfidence)*0.22 + stallSeverity*0.22
+
+	if stuckHard {
+		directScore -= 0.25
+		lateralScore += 0.12
+		anchorScore += 0.10
+	}
+	if threatPressure > 0.45 {
+		holdScore += 0.10
+		directScore -= 0.05
+	}
+	if supportConfidence > 0.45 && threatPressure > 0.20 {
+		anchorScore += 0.08
+	}
+
+	directScore -= randomTilt * 0.4
+	lateralScore += randomTilt
+	anchorScore -= randomTilt * 0.6
+	holdScore += randomTilt * 0.2
 
 	best := RecoveryActionDirect
 	bestScore := directScore
@@ -1010,7 +1096,13 @@ func (s *Soldier) chooseRecoveryAction() RecoveryAction {
 	}
 
 	s.recoveryAction = best
-	s.recoveryCommitTicks = 45
+	s.recoveryCommitTicks = 36
+	if best == RecoveryActionHold {
+		s.recoveryCommitTicks = 24
+	}
+	if best == RecoveryActionDirect && stuckHard {
+		s.recoveryCommitTicks = 20
+	}
 	return best
 }
 
@@ -1019,6 +1111,10 @@ func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
 	action := s.chooseRecoveryAction()
 	if s.recoveryCommitTicks > 0 {
 		s.recoveryCommitTicks--
+	}
+	s.recoveryAttempts++
+	if int(action) >= 0 && int(action) < len(s.recoveryActionCounts) {
+		s.recoveryActionCounts[int(action)]++
 	}
 
 	tryPath := func(tx, ty float64) bool {
@@ -1033,6 +1129,7 @@ func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
 		s.recoveryNoPathStreak = 0
 		s.recoveryRouteFailEMA = emaBlend(s.recoveryRouteFailEMA, 0, 0.30)
 		s.recoveryStallEMA = emaBlend(s.recoveryStallEMA, 0.15, 0.20)
+		s.recoverySuccesses++
 		s.state = SoldierStateMoving
 		s.moveAlongPath(dt)
 		return true
@@ -2069,7 +2166,7 @@ func (s *Soldier) dashOverwatchDuration(underFire bool) int {
 // Bound distance scales with proximity to contact: far away = long bounds (8-12 cells),
 // close = short cautious bounds (3-5 cells). If no TacticalMap is available, falls
 // back to a direct dash toward the ultimate destination.
-func (s *Soldier) moveCombatDash(_ float64) {
+func (s *Soldier) moveCombatDash(dt float64) {
 	bb := &s.blackboard
 
 	// --- Step 1: Resolve ultimate destination ---
@@ -2185,14 +2282,16 @@ func (s *Soldier) moveCombatDash(_ float64) {
 	}
 
 	if s.path == nil || s.pathIndex >= len(s.path) {
-		// Arrived at intermediate cover — start overwatch pause.
-		s.state = SoldierStateIdle
-		s.dashOverwatchTimer = s.dashOverwatchDuration(bb.IncomingFireCount > 0)
-		if usedCover {
-			s.think(fmt.Sprintf("bound complete — holding cover %d ticks", s.dashOverwatchTimer))
-		} else {
-			s.think(fmt.Sprintf("dash arrived — overwatch %d ticks", s.dashOverwatchTimer))
+		if distToDest > float64(cellSize)*1.5 {
+			// Reacquisition failure, not true arrival: run fuzzy recovery.
+			s.applyRecoveryAction(dt, destX, destY)
+			return
 		}
+		// We're close but have no path. Don't repeatedly reset an overwatch pause;
+		// trigger a re-evaluation and hold briefly.
+		s.state = SoldierStateIdle
+		bb.ShatterEvent = true
+		s.faceNearestThreatOrContact()
 		s.postArrivalTimer = 0
 		return
 	}

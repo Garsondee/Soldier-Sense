@@ -123,7 +123,16 @@ func clampToByte(v int) uint8 {
 
 // terrainHash returns a deterministic pseudo-random value for a cell pair.
 func terrainHash(x, y int) uint32 {
-	v := uint32(x)*73856093 ^ uint32(y)*19349663
+	if x < 0 {
+		x = -x
+	}
+	if y < 0 {
+		y = -y
+	}
+	ux := uint64(x) // #nosec G115 -- x is non-negative and bounded (cell coords)
+	uy := uint64(y) // #nosec G115 -- y is non-negative and bounded (cell coords)
+	v64 := (ux * 73856093) ^ (uy * 19349663)
+	v := uint32(v64 & 0xffffffff)
 	v ^= v >> 13
 	v *= 1274126177
 	v ^= v >> 16
@@ -177,7 +186,7 @@ func New() *Game {
 	g.camY = float64(battleH) / 2
 	g.camZoom = 0.5
 	g.simSpeed = 1.0
-	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999))
+	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999)) // #nosec G404 -- non-crypto RNG for local flavor text
 	g.reporter = NewSimReporter(reportWindowTicks, false)
 	return g
 }
@@ -193,7 +202,7 @@ func (g *Game) initTerrainPatches() {
 		x := float32(rng.Intn(g.gameWidth))
 		y := float32(rng.Intn(g.gameHeight))
 		// shade offset: -6 to +6 from base green
-		shade := uint8(rng.Intn(13))
+		shade := clampToByte(rng.Intn(13))
 		g.terrainPatches = append(g.terrainPatches, terrainPatch{x: x, y: y, w: w, h: h, shade: shade})
 	}
 }
@@ -849,11 +858,15 @@ func (g *Game) handleInput() {
 	}
 	currentKeys[ebiten.KeyComma] = ebiten.IsKeyPressed(ebiten.KeyComma)
 	if currentKeys[ebiten.KeyComma] && !g.prevKeys[ebiten.KeyComma] {
-		for i, s := range speeds {
-			if s >= g.simSpeed && i > 0 {
-				g.simSpeed = speeds[i-1]
+		idx := 0
+		for i := 0; i < len(speeds); i++ {
+			if speeds[i] == g.simSpeed {
+				idx = i
 				break
 			}
+		}
+		if idx > 0 {
+			g.simSpeed = speeds[idx-1]
 		}
 	}
 	currentKeys[ebiten.KeyPeriod] = ebiten.IsKeyPressed(ebiten.KeyPeriod)

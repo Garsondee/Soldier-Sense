@@ -44,6 +44,9 @@ type Squad struct {
 
 	// Intent hysteresis: avoid order thrash at range boundaries.
 	intentLockUntil int // tick until which non-critical intent changes are deferred
+	// Cooldown for targeted officer intervention on stalled members.
+	lastStalledOrderTick int
+	lastStalledOrderID   int
 
 	// Phase controller state (squad-level), used to enforce progress while
 	// preserving per-soldier autonomy.
@@ -63,6 +66,8 @@ type Squad struct {
 	// boundCycleActive: true when buddy bounding is in effect (contact + MoveToContact).
 	boundCycleActive bool
 }
+
+const stalledOrderCooldownTicks = 90
 
 type SquadPhase int
 
@@ -600,7 +605,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	// preserving individual agency under fear/suppression/self-preservation.
 	switch sq.Phase {
 	case SquadPhaseApproach:
-		if spread < 220 && candidateIntent == IntentRegroup {
+		if spread < 120 && candidateIntent == IntentRegroup {
 			candidateIntent = IntentAdvance
 		}
 	case SquadPhaseFixFire:
@@ -661,6 +666,54 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	var moveOrders [][2]float64
 	if hasContact && sq.Intent == IntentEngage {
 		moveOrders = sq.spreadPositions(contactX, contactY)
+	}
+
+	// Officer intervention: if one mobility soldier is clearly stalled, prioritize
+	// giving that soldier a direct move order to break local stalemate.
+	var stalledPriorityMember *Soldier
+	stalledPriorityX, stalledPriorityY := 0.0, 0.0
+	stalledPriorityScore := 0.0
+	if hasContact && spread < 260 {
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			if sq.lastStalledOrderID == m.id && tick-sq.lastStalledOrderTick < stalledOrderCooldownTicks {
+				continue
+			}
+			if !isCombatMobilityGoal(m.blackboard.CurrentGoal) {
+				continue
+			}
+			pathLen := len(m.path)
+			pathRemain := 0
+			if m.path != nil && m.pathIndex >= 0 && m.pathIndex < pathLen {
+				pathRemain = pathLen - m.pathIndex
+			}
+			terminal := m.path == nil || pathRemain <= 1
+			if !terminal && m.mobilityStallTicks < 24 && m.recoveryNoPathStreak == 0 {
+				continue
+			}
+
+			score := float64(m.mobilityStallTicks) + float64(m.recoveryNoPathStreak)*30.0 + m.recoveryRouteFailEMA*35.0
+			if m.state == SoldierStateIdle && terminal {
+				score += 25
+			}
+			if score <= stalledPriorityScore {
+				continue
+			}
+
+			tx, ty := m.recoveryTargetHint()
+			if spread > 180 && sq.Leader != nil {
+				lx, ly := sq.Leader.x, sq.Leader.y
+				ab := math.Atan2(ty-ly, tx-lx)
+				r := float64(cellSize) * 3.0
+				tx = lx + math.Cos(ab)*r
+				ty = ly + math.Sin(ab)*r
+			}
+			stalledPriorityMember = m
+			stalledPriorityX, stalledPriorityY = tx, ty
+			stalledPriorityScore = score
+		}
 	}
 
 	// Assign alternating flank sides based on member index so half go left, half right.
@@ -761,6 +814,20 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			orderIdx++
 		} else {
 			m.blackboard.HasMoveOrder = false
+		}
+		if stalledPriorityMember == m {
+			m.blackboard.HasMoveOrder = true
+			m.blackboard.OrderMoveX = stalledPriorityX
+			m.blackboard.OrderMoveY = stalledPriorityY
+			m.blackboard.OfficerOrderKind = CmdMoveTo
+			m.blackboard.OfficerOrderTargetX = stalledPriorityX
+			m.blackboard.OfficerOrderTargetY = stalledPriorityY
+			m.blackboard.OfficerOrderRadius = 150
+			m.blackboard.OfficerOrderPriority = math.Max(m.blackboard.OfficerOrderPriority, 0.92)
+			m.blackboard.OfficerOrderStrength = math.Max(m.blackboard.OfficerOrderStrength, 0.98)
+			m.blackboard.OfficerOrderActive = true
+			sq.lastStalledOrderTick = tick
+			sq.lastStalledOrderID = m.id
 		}
 
 		// --- Social awareness propagation ---

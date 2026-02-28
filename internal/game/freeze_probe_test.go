@@ -250,6 +250,18 @@ func TestScenario_FreezeProbe_MutualAdvance(t *testing.T) {
 			t.Logf("  internal move=%.2f shoot=%.2f cover=%.2f momentum=%.2f lastRange=%.1f lastHit=%.2f", s.blackboard.Internal.MoveDesire, s.blackboard.Internal.ShootDesire, s.blackboard.Internal.CoverDesire, s.blackboard.Internal.ShotMomentum, s.blackboard.Internal.LastRange, s.blackboard.Internal.LastEstimatedHitChance)
 			t.Logf("  signals vis=%d squadContact=%t hasMoveOrder=%t incoming=%d suppress=%.2f combatMemory=%.2f heardGunfire=%t", s.blackboard.VisibleThreatCount(), s.blackboard.SquadHasContact, s.blackboard.HasMoveOrder, s.blackboard.IncomingFireCount, s.blackboard.SuppressLevel, s.blackboard.CombatMemoryStrength, s.blackboard.HeardGunfire)
 			t.Logf("  timers goalPause=%d dashOverwatch=%d postArrival=%d fireCooldown=%d modeSwitch=%d boundMover=%t suppressionAbort=%t", s.goalPauseTimer, s.dashOverwatchTimer, s.postArrivalTimer, s.fireCooldown, s.modeSwitchTimer, s.blackboard.BoundMover, s.suppressionAbort)
+			t.Logf("  recovery action=%d commit=%d noPathStreak=%d attempts=%d success=%d routeFailEMA=%.2f stallEMA=%.2f actions[d=%d l=%d a=%d h=%d]",
+				s.recoveryAction,
+				s.recoveryCommitTicks,
+				s.recoveryNoPathStreak,
+				s.recoveryAttempts,
+				s.recoverySuccesses,
+				s.recoveryRouteFailEMA,
+				s.recoveryStallEMA,
+				s.recoveryActionCounts[RecoveryActionDirect],
+				s.recoveryActionCounts[RecoveryActionLateral],
+				s.recoveryActionCounts[RecoveryActionAnchor],
+				s.recoveryActionCounts[RecoveryActionHold])
 			t.Logf("  reason=%s", reason)
 
 			p.reportedAt = tick
@@ -265,6 +277,29 @@ func TestScenario_FreezeProbe_MutualAdvance(t *testing.T) {
 
 	t.Log(ts.SimLog.Summary(ts.CurrentTick(), ts.Soldiers, ts.Squads))
 	dumpFreezeNarrative(t, ts, freezeTicks, freezeReasonCounts, freezeBySoldier)
+
+	recoveryAttempts := 0
+	recoverySuccesses := 0
+	recoveryActionMix := map[string]int{
+		"direct":  0,
+		"lateral": 0,
+		"anchor":  0,
+		"hold":    0,
+	}
+	for _, s := range ts.Soldiers {
+		recoveryAttempts += s.recoveryAttempts
+		recoverySuccesses += s.recoverySuccesses
+		recoveryActionMix["direct"] += s.recoveryActionCounts[RecoveryActionDirect]
+		recoveryActionMix["lateral"] += s.recoveryActionCounts[RecoveryActionLateral]
+		recoveryActionMix["anchor"] += s.recoveryActionCounts[RecoveryActionAnchor]
+		recoveryActionMix["hold"] += s.recoveryActionCounts[RecoveryActionHold]
+	}
+	recoverySuccessRate := 0.0
+	if recoveryAttempts > 0 {
+		recoverySuccessRate = float64(recoverySuccesses) / float64(recoveryAttempts)
+	}
+	t.Logf("recovery telemetry: attempts=%d successes=%d success_rate=%.2f", recoveryAttempts, recoverySuccesses, recoverySuccessRate)
+	t.Log(formatTopCounts("recovery action mix", recoveryActionMix, 4))
 	t.Logf("freeze aggregates: boundMover=false:%d boundMover=true:%d pathRemain<=1:%d noPath:%d spread>250:%d",
 		boundMoverFalseReports, boundMoverTrueReports, pathNearlyDoneReports, noPathReports, highSpreadReports)
 	t.Logf("freeze reports captured: %d", reports)
