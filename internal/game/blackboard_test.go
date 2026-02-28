@@ -214,6 +214,52 @@ func TestSelectGoal_LongRangeMissMomentumPrefersMoveToContact(t *testing.T) {
 	}
 }
 
+func TestOverwatchDistanceFactor_AttenuatesFarContact(t *testing.T) {
+	near := overwatchDistanceFactor(float64(maxFireRange) * 0.9)
+	far := overwatchDistanceFactor(float64(maxFireRange) * 1.8)
+	veryFar := overwatchDistanceFactor(float64(maxFireRange) * 2.2)
+
+	if near < 0.95 {
+		t.Fatalf("near contact should keep overwatch appeal high, got %.3f", near)
+	}
+	if far >= near {
+		t.Fatalf("far contact should attenuate overwatch more than near: near=%.3f far=%.3f", near, far)
+	}
+	if veryFar > 0.16 {
+		t.Fatalf("very far contact should clamp to low overwatch appeal, got %.3f", veryFar)
+	}
+}
+
+func TestGoalUtilSingle_OverwatchDropsWhenContactTooFar(t *testing.T) {
+	p := DefaultProfile()
+	p.Psych.Fear = 0.1
+	p.Skills.Discipline = 0.7
+	p.Skills.Fieldcraft = 0.8
+
+	near := &Blackboard{
+		SquadIntent:         IntentHold,
+		SquadHasContact:     true,
+		SquadContactX:       float64(maxFireRange) * 0.8,
+		SquadContactY:       0,
+		LocalSightlineScore: 0.9,
+		AtWindowAdj:         true,
+		AtInterior:          true,
+		VisibleAllyCount:    1,
+	}
+	near.RefreshInternalGoals(&p, 0, 0)
+	nearU := goalUtilSingle(near, &p, false, true, GoalOverwatch)
+
+	far := *near
+	far.SquadContactX = float64(maxFireRange) * 1.9
+	far.SquadContactY = 0
+	far.RefreshInternalGoals(&p, 0, 0)
+	farU := goalUtilSingle(&far, &p, false, true, GoalOverwatch)
+
+	if farU >= nearU {
+		t.Fatalf("expected far-contact overwatch utility to drop: near=%.3f far=%.3f", nearU, farU)
+	}
+}
+
 // --- Suppression system ---
 
 func TestSuppression_AccumulatesFromNearMiss(t *testing.T) {

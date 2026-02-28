@@ -48,6 +48,23 @@ func (g GoalKind) String() string {
 	default:
 		return "unknown"
 	}
+
+}
+
+func overwatchDistanceFactor(contactRange float64) float64 {
+	if contactRange <= 0 {
+		return 1.0
+	}
+	maxPractical := float64(maxFireRange)
+	if contactRange <= maxPractical {
+		return 1.0
+	}
+	tooFar := maxPractical * 2.0
+	if contactRange >= tooFar {
+		return 0.15
+	}
+	t := (contactRange - maxPractical) / (tooFar - maxPractical)
+	return 1.0 - t*0.85
 }
 
 // --- Officer Orders ---
@@ -370,6 +387,7 @@ type SoldierInternalGoals struct {
 	ShotMomentum           float64
 	LastEstimatedHitChance float64
 	LastRange              float64
+	LastContactRange       float64
 	Thresholds             GoalThresholds
 	// ThresholdAge is how long (ticks) this threshold set has been active.
 	// Used to drive adaptive drift: thresholds slowly shift toward current conditions.
@@ -606,6 +624,27 @@ func (bb *Blackboard) RefreshInternalGoals(profile *SoldierProfile, selfX, selfY
 
 	dist := bb.ClosestVisibleThreatDist(selfX, selfY)
 	if dist == math.MaxFloat64 {
+		contactDist := math.MaxFloat64
+		if bb.SquadHasContact {
+			contactDist = math.Hypot(bb.SquadContactX-selfX, bb.SquadContactY-selfY)
+		}
+		if bb.HeardGunfire {
+			audioDist := math.Hypot(bb.HeardGunfireX-selfX, bb.HeardGunfireY-selfY)
+			if audioDist < contactDist {
+				contactDist = audioDist
+			}
+		}
+		if bb.IsActivated() {
+			memoryDist := math.Hypot(bb.CombatMemoryX-selfX, bb.CombatMemoryY-selfY)
+			if memoryDist < contactDist {
+				contactDist = memoryDist
+			}
+		}
+		if contactDist < math.MaxFloat64 {
+			bb.Internal.LastContactRange = contactDist
+		} else {
+			bb.Internal.LastContactRange = 0
+		}
 		bb.Internal.LastRange = 0
 		bb.Internal.LastEstimatedHitChance = 0
 
@@ -629,6 +668,7 @@ func (bb *Blackboard) RefreshInternalGoals(profile *SoldierProfile, selfX, selfY
 	rangePressure := clamp01((dist - accurateFireRange) / (maxFireRange - accurateFireRange))
 
 	bb.Internal.LastRange = dist
+	bb.Internal.LastContactRange = dist
 	bb.Internal.LastEstimatedHitChance = estHitChance
 
 	rawShoot := clamp01(estHitChance + bb.Internal.ShotMomentum*0.30 - fear*0.20)
@@ -1157,6 +1197,9 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	if bb.AtDoorway {
 		overwatchUtil -= 0.20
 	}
+	if anyContact && visibleThreats == 0 {
+		overwatchUtil *= overwatchDistanceFactor(internal.LastContactRange)
+	}
 
 	// --- Regroup: cohesion emergency.
 	regroupUtil := 0.0
@@ -1532,6 +1575,9 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		}
 		if bb.AtDoorway {
 			u -= 0.20
+		}
+		if anyContact && visibleThreats == 0 {
+			u *= overwatchDistanceFactor(internal.LastContactRange)
 		}
 		u -= isolationPush * 0.55
 		u -= supportPush * 0.25

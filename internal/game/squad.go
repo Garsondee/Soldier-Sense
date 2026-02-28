@@ -13,6 +13,7 @@ type Squad struct {
 	Members   []*Soldier
 	Formation FormationType
 	Intent    SquadIntentKind
+	Phase     SquadPhase
 
 	// Active officer command for the squad. Commands are strong signals that
 	// bias individual utility, not hard overrides.
@@ -44,6 +45,13 @@ type Squad struct {
 	// Intent hysteresis: avoid order thrash at range boundaries.
 	intentLockUntil int // tick until which non-critical intent changes are deferred
 
+	// Phase controller state (squad-level), used to enforce progress while
+	// preserving per-soldier autonomy.
+	phaseInit          bool
+	phaseEnteredTick   int
+	lastProgressTick   int
+	lastProgressMetric float64
+
 	// --- Buddy bounding (fire and movement) ---
 	// BoundMovingGroup: which group (0 or 1) is currently the mover.
 	// Toggled each bound cycle so groups alternate.
@@ -56,6 +64,98 @@ type Squad struct {
 	boundCycleActive bool
 }
 
+type SquadPhase int
+
+const (
+	SquadPhaseApproach SquadPhase = iota
+	SquadPhaseFixFire
+	SquadPhaseBound
+	SquadPhaseAssault
+	SquadPhaseStalledRecovery
+	SquadPhaseConsolidate
+)
+
+func (sp SquadPhase) String() string {
+	switch sp {
+	case SquadPhaseApproach:
+		return "approach"
+	case SquadPhaseFixFire:
+		return "fix_fire"
+	case SquadPhaseBound:
+		return "bound"
+	case SquadPhaseAssault:
+		return "assault"
+	case SquadPhaseStalledRecovery:
+		return "stalled_recovery"
+	case SquadPhaseConsolidate:
+		return "consolidate"
+	default:
+		return "unknown"
+	}
+}
+
+func (sq *Squad) recoveryRetaskTarget(hasContact bool, contactX, contactY float64) (float64, float64) {
+	if sq.Leader == nil {
+		return 0, 0
+	}
+	lx, ly := sq.Leader.x, sq.Leader.y
+	tx, ty := sq.Leader.endTarget[0], sq.Leader.endTarget[1]
+	if hasContact {
+		dx := contactX - lx
+		dy := contactY - ly
+		dist := math.Hypot(dx, dy)
+		if dist > 1e-6 {
+			step := math.Min(220.0, math.Max(90.0, dist*0.4))
+			tx = lx + dx/dist*step
+			ty = ly + dy/dist*step
+		} else {
+			tx, ty = contactX, contactY
+		}
+	}
+	if sq.Leader.navGrid != nil {
+		w := float64(sq.Leader.navGrid.cols * cellSize)
+		h := float64(sq.Leader.navGrid.rows * cellSize)
+		if tx < 16 {
+			tx = 16
+		}
+		if tx > w-16 {
+			tx = w - 16
+		}
+		if ty < 16 {
+			ty = 16
+		}
+		if ty > h-16 {
+			ty = h - 16
+		}
+	}
+	return tx, ty
+}
+
+func (sq *Squad) clearStalledPathDebt() int {
+	cleared := 0
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			continue
+		}
+		if m.blackboard.CurrentGoal != GoalMoveToContact && m.blackboard.CurrentGoal != GoalEngage {
+			continue
+		}
+		pathLen := len(m.path)
+		pathRemain := 0
+		if m.path != nil && m.pathIndex >= 0 && m.pathIndex < pathLen {
+			pathRemain = pathLen - m.pathIndex
+		}
+		terminal := m.path == nil || pathRemain <= 1
+		if m.state == SoldierStateIdle && terminal {
+			m.path = nil
+			m.pathIndex = 0
+			m.boundHoldTicks = 0
+			cleared++
+		}
+	}
+	return cleared
+}
+
 // NewSquad creates a squad. The first member is designated leader.
 func NewSquad(id int, team Team, members []*Soldier) *Squad {
 	sq := &Squad{
@@ -63,6 +163,7 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 		Team:               team,
 		Members:            members,
 		Formation:          FormationWedge,
+		Phase:              SquadPhaseApproach,
 		ClaimedBuildingIdx: -1,
 		ActiveOrder: OfficerOrder{
 			Kind:  CmdNone,
@@ -93,7 +194,126 @@ const successionDelayTicks = 180 // 3 seconds at 60TPS base
 const (
 	engageEnterDist = 300.0 // must be this close to enter engage
 	engageExitDist  = 360.0 // can stay engaged until this distance
+
+	phaseMinHoldTicks    = 90
+	phaseStallTicks      = 240
+	phaseProgressEpsilon = 12.0
+	phaseRecoveryTicks   = 120
 )
+
+func (sq *Squad) phaseProgressMetric(hasContact bool, contactX, contactY float64) float64 {
+	if sq.Leader == nil {
+		return 0
+	}
+	lx, ly := sq.Leader.x, sq.Leader.y
+	if hasContact {
+		return math.Hypot(contactX-lx, contactY-ly)
+	}
+	return math.Hypot(sq.Leader.endTarget[0]-lx, sq.Leader.endTarget[1]-ly)
+}
+
+func (sq *Squad) advancePhase(tick int, next SquadPhase) {
+	if next == sq.Phase {
+		return
+	}
+	old := sq.Phase
+	sq.Phase = next
+	sq.phaseEnteredTick = tick
+	if sq.Leader != nil {
+		sq.Leader.think(fmt.Sprintf("phase: %s -> %s", old, sq.Phase))
+	}
+}
+
+func (sq *Squad) updatePhaseWithGuards(tick int, hasContact bool, anyVisibleThreats int, closestDist, spread float64, contactX, contactY float64, terminalStalledCount, aliveCount int) bool {
+	if sq.Leader == nil {
+		return false
+	}
+	progressMetric := sq.phaseProgressMetric(hasContact, contactX, contactY)
+	if !sq.phaseInit {
+		sq.phaseInit = true
+		sq.phaseEnteredTick = tick
+		sq.lastProgressTick = tick
+		sq.lastProgressMetric = progressMetric
+	}
+
+	if progressMetric+phaseProgressEpsilon < sq.lastProgressMetric {
+		sq.lastProgressMetric = progressMetric
+		sq.lastProgressTick = tick
+	}
+
+	stalled := tick-sq.lastProgressTick >= phaseStallTicks
+	elapsed := tick - sq.phaseEnteredTick
+	next := sq.Phase
+	manyTerminalStalled := aliveCount >= 2 && terminalStalledCount*2 >= aliveCount
+
+	switch sq.Phase {
+	case SquadPhaseApproach:
+		if spread > 250 {
+			next = SquadPhaseConsolidate
+		} else if hasContact && anyVisibleThreats > 0 && closestDist < engageExitDist {
+			next = SquadPhaseFixFire
+		}
+	case SquadPhaseFixFire:
+		if spread > 250 {
+			next = SquadPhaseConsolidate
+		} else if !hasContact {
+			next = SquadPhaseApproach
+		} else if closestDist < engageEnterDist && elapsed >= phaseMinHoldTicks {
+			next = SquadPhaseBound
+		}
+	case SquadPhaseBound:
+		if spread > 260 {
+			next = SquadPhaseConsolidate
+		} else if !hasContact {
+			next = SquadPhaseApproach
+		} else if closestDist < engageEnterDist*0.80 && elapsed >= phaseMinHoldTicks {
+			next = SquadPhaseAssault
+		}
+	case SquadPhaseAssault:
+		if spread > 260 {
+			next = SquadPhaseConsolidate
+		} else if !hasContact {
+			next = SquadPhaseApproach
+		} else if closestDist > engageExitDist && elapsed >= phaseMinHoldTicks {
+			next = SquadPhaseFixFire
+		}
+	case SquadPhaseStalledRecovery:
+		if spread > 260 {
+			next = SquadPhaseConsolidate
+		} else if !hasContact {
+			next = SquadPhaseApproach
+		} else if elapsed >= phaseRecoveryTicks && !manyTerminalStalled {
+			next = SquadPhaseBound
+		}
+	case SquadPhaseConsolidate:
+		if spread < 160 && elapsed >= phaseMinHoldTicks/2 {
+			next = SquadPhaseApproach
+		}
+	}
+
+	if manyTerminalStalled && sq.Phase != SquadPhaseStalledRecovery && elapsed >= phaseMinHoldTicks/2 {
+		next = SquadPhaseStalledRecovery
+	}
+
+	if stalled {
+		switch sq.Phase {
+		case SquadPhaseApproach, SquadPhaseFixFire, SquadPhaseBound, SquadPhaseAssault:
+			next = SquadPhaseStalledRecovery
+		case SquadPhaseStalledRecovery:
+			next = SquadPhaseConsolidate
+		case SquadPhaseConsolidate:
+			next = SquadPhaseApproach
+		}
+		sq.lastProgressTick = tick
+		sq.lastProgressMetric = progressMetric
+	}
+
+	if next != sq.Phase && (elapsed >= phaseMinHoldTicks || stalled || next == SquadPhaseConsolidate || next == SquadPhaseStalledRecovery) {
+		sq.advancePhase(tick, next)
+	}
+
+	return stalled
+}
 
 func (sq *Squad) issueOfficerOrder(tick int, kind OfficerCommandKind, targetX, targetY, radius float64, formation FormationType, priority, strength float64, ttl int) {
 	if sq.ActiveOrder.Kind == kind && sq.ActiveOrder.State == OfficerOrderActive {
@@ -159,7 +379,19 @@ func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY 
 		if !hasContact {
 			tx, ty = goalX, goalY
 		}
-		sq.issueOfficerOrder(tick, CmdFanOut, tx, ty, 220, sq.Formation, 0.80, 0.90, 260)
+		switch sq.Phase {
+		case SquadPhaseFixFire:
+			sq.issueOfficerOrder(tick, CmdHold, leaderX, leaderY, 170, sq.Formation, 0.80, 0.92, 220)
+		case SquadPhaseBound:
+			sq.issueOfficerOrder(tick, CmdBoundForward, tx, ty, 220, sq.Formation, 0.84, 0.95, 220)
+		case SquadPhaseAssault:
+			sq.issueOfficerOrder(tick, CmdAssault, tx, ty, 230, sq.Formation, 0.88, 0.98, 220)
+		case SquadPhaseStalledRecovery:
+			rx, ry := sq.recoveryRetaskTarget(hasContact, tx, ty)
+			sq.issueOfficerOrder(tick, CmdMoveTo, rx, ry, 190, sq.Formation, 0.90, 0.96, 180)
+		default:
+			sq.issueOfficerOrder(tick, CmdFanOut, tx, ty, 220, sq.Formation, 0.80, 0.90, 260)
+		}
 	}
 
 	if sq.ActiveOrder.State == OfficerOrderActive && sq.ActiveOrder.ExpiresTick > 0 && tick > sq.ActiveOrder.ExpiresTick {
@@ -294,6 +526,33 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 
 	spread := sq.squadSpread()
 
+	aliveCount := 0
+	terminalStalledCount := 0
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			continue
+		}
+		aliveCount++
+		if m.blackboard.CurrentGoal != GoalMoveToContact && m.blackboard.CurrentGoal != GoalEngage {
+			continue
+		}
+		pathLen := len(m.path)
+		pathRemain := 0
+		if m.path != nil && m.pathIndex >= 0 && m.pathIndex < pathLen {
+			pathRemain = pathLen - m.pathIndex
+		}
+		terminal := m.path == nil || pathRemain <= 1
+		if m.state == SoldierStateIdle && terminal {
+			terminalStalledCount++
+		}
+	}
+
+	tick := 0
+	if sq.Leader != nil && sq.Leader.currentTick != nil {
+		tick = *sq.Leader.currentTick
+	}
+	phaseStalled := sq.updatePhaseWithGuards(tick, hasContact, anyVisibleThreats, closestDist, spread, contactX, contactY, terminalStalledCount, aliveCount)
+
 	// --- Intel map queries (augment blackboard counts with spatial data) ---
 	// dangerAtPos: how much danger heat is around the leader's current position.
 	// contactAhead: how much contact heat is between here and the advance direction.
@@ -308,7 +567,8 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		}
 	}
 
-	// Decide squad intent.
+	// Decide squad intent (phase-aware, still soft; individual soldiers retain
+	// local autonomy and self-preservation via their own utility functions).
 	oldIntent := sq.Intent
 	candidateIntent := sq.Intent
 	switch {
@@ -336,9 +596,41 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		candidateIntent = IntentAdvance
 	}
 
-	tick := 0
-	if sq.Leader != nil && sq.Leader.currentTick != nil {
-		tick = *sq.Leader.currentTick
+	// Phase-to-intent shaping: constrains indecisive thrash at squad level while
+	// preserving individual agency under fear/suppression/self-preservation.
+	switch sq.Phase {
+	case SquadPhaseApproach:
+		if spread < 220 && candidateIntent == IntentRegroup {
+			candidateIntent = IntentAdvance
+		}
+	case SquadPhaseFixFire:
+		if hasContact && candidateIntent == IntentAdvance {
+			candidateIntent = IntentHold
+		}
+	case SquadPhaseBound:
+		if hasContact && candidateIntent != IntentRegroup {
+			candidateIntent = IntentEngage
+		}
+	case SquadPhaseAssault:
+		if hasContact {
+			candidateIntent = IntentEngage
+		}
+	case SquadPhaseConsolidate:
+		if spread > 120 {
+			candidateIntent = IntentRegroup
+		} else {
+			candidateIntent = IntentHold
+		}
+	case SquadPhaseStalledRecovery:
+		if hasContact {
+			candidateIntent = IntentEngage
+		} else {
+			candidateIntent = IntentAdvance
+		}
+	}
+
+	if phaseStalled && hasContact && candidateIntent != IntentRegroup {
+		candidateIntent = IntentEngage
 	}
 	criticalIntent := spread > 250 || (anyVisibleThreats > 0 && closestDist < engageEnterDist)
 	if candidateIntent != sq.Intent {
@@ -484,10 +776,19 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		}
 	}
 
+	if sq.Phase == SquadPhaseStalledRecovery {
+		if cleared := sq.clearStalledPathDebt(); cleared > 0 && sq.Leader != nil {
+			sq.Leader.think(fmt.Sprintf("recovery: cleared %d stalled paths", cleared))
+		}
+	}
+
 	// --- Buddy bounding (fire and movement) ---
-	// Active when squad has contact and at least 2 alive members.
+	// Active only in attack-oriented intents while contact exists and at least 2
+	// members are alive. During regroup/hold, disable bounding so everyone can
+	// move to restore cohesion instead of half the squad idling as overwatch.
 	// Groups alternate: one moves while the other overwatches.
-	if hasContact && len(alive) >= 2 {
+	boundingAllowed := (sq.Intent == IntentAdvance || sq.Intent == IntentEngage) && sq.Phase != SquadPhaseStalledRecovery
+	if hasContact && len(alive) >= 2 && boundingAllowed {
 		if !sq.boundCycleActive {
 			// Start bounding: assign groups and kick off first cycle.
 			sq.boundCycleActive = true
@@ -520,9 +821,13 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 				break
 			}
 		}
-		// Minimum cycle time: don't swap faster than 2 seconds.
+		// Swap cadence:
+		// - don't swap faster than 2 seconds (lets movers make progress),
+		// - but force a swap after a hard cap to prevent one group starving.
 		cycleMinTicks := 120
-		if allMoversSettled && tick-sq.boundCycleTick >= cycleMinTicks {
+		cycleMaxTicks := 180
+		elapsed := tick - sq.boundCycleTick
+		if (allMoversSettled && elapsed >= cycleMinTicks) || elapsed >= cycleMaxTicks {
 			sq.BoundMovingGroup = 1 - sq.BoundMovingGroup
 			sq.boundCycleTick = tick
 		}
@@ -535,15 +840,13 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			m.blackboard.BoundMover = m.blackboard.BoundGroup == sq.BoundMovingGroup
 		}
 	} else {
-		if sq.boundCycleActive {
-			sq.boundCycleActive = false
-			// Clear bound roles — everyone can move freely.
-			for _, m := range sq.Members {
-				if m.state == SoldierStateDead {
-					continue
-				}
-				m.blackboard.BoundMover = true
+		sq.boundCycleActive = false
+		// Clear bound roles — everyone can move freely.
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
 			}
+			m.blackboard.BoundMover = true
 		}
 	}
 

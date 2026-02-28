@@ -202,6 +202,9 @@ type Soldier struct {
 	// --- Stop/start dash movement ---
 	// dashOverwatchTimer: >0 means soldier just dashed and is now overwatch-stopped.
 	dashOverwatchTimer int
+	// boundHoldTicks: consecutive ticks held as non-mover during buddy bounding.
+	// Used to periodically allow micro-reposition so overwatchers don't freeze indefinitely.
+	boundHoldTicks int
 
 	// --- Cover-to-cover bounding ---
 	// boundDestX/Y is the ultimate destination of a multi-bound advance.
@@ -223,7 +226,25 @@ type Soldier struct {
 	// --- Action pacing ---
 	// goalPauseTimer inserts a short pause after a non-critical goal switch.
 	goalPauseTimer int
+
+	// --- Fuzzy path-reacquisition memory ---
+	// These track short-horizon movement confidence and support a human-like
+	// "try another approach" response when direct repath repeatedly fails.
+	recoveryNoPathStreak int
+	recoveryRouteFailEMA float64
+	recoveryStallEMA     float64
+	recoveryCommitTicks  int
+	recoveryAction       RecoveryAction
 }
+
+type RecoveryAction int
+
+const (
+	RecoveryActionDirect RecoveryAction = iota
+	RecoveryActionLateral
+	RecoveryActionAnchor
+	RecoveryActionHold
+)
 
 const (
 	personalSpaceRadius = float64(cellSize) * 1.1
@@ -721,6 +742,9 @@ func (s *Soldier) executeGoal(dt float64) {
 	}
 
 	goal := s.blackboard.CurrentGoal
+	if goal != GoalMoveToContact {
+		s.boundHoldTicks = 0
+	}
 	if s.goalPauseTimer > 0 && bb.IncomingFireCount == 0 &&
 		goal != GoalSurvive && goal != GoalFallback && goal != GoalEngage {
 		s.state = SoldierStateIdle
@@ -787,11 +811,30 @@ func (s *Soldier) executeGoal(dt float64) {
 
 		// --- Buddy bounding: overwatchers hold position, movers advance ---
 		if !bb.BoundMover {
+			s.boundHoldTicks++
+			leaderDist := 0.0
+			if s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
+				leaderDist = math.Hypot(s.squad.Leader.x-s.x, s.squad.Leader.y-s.y)
+			}
+			distToSlot := math.Hypot(s.slotTargetX-s.x, s.slotTargetY-s.y)
+			contactTooFar := bb.VisibleThreatCount() == 0 &&
+				bb.Internal.LastContactRange > float64(maxFireRange)*1.05
+			holdLimit := 60
+			if contactTooFar {
+				holdLimit = 24
+			}
+			if s.boundHoldTicks >= holdLimit && (contactTooFar || distToSlot > 96 || leaderDist > 180) {
+				s.boundHoldTicks = 0
+				s.state = SoldierStateMoving
+				s.moveToContact(dt)
+				break
+			}
 			s.state = SoldierStateIdle
 			s.profile.Physical.AccumulateFatigue(0, dt)
 			s.faceNearestThreatOrContact()
 			break
 		}
+		s.boundHoldTicks = 0
 
 		// Dash overwatch: hold still after a dash until the timer expires.
 		if s.dashOverwatchTimer > 0 {
@@ -915,6 +958,144 @@ const (
 	contactRepathDist = 32.0  // repath when contact position drifts this much
 )
 
+func (s *Soldier) recoveryUrgency() float64 {
+	if s.squad == nil {
+		return 0.5
+	}
+	switch s.squad.Phase {
+	case SquadPhaseAssault:
+		return 0.95
+	case SquadPhaseBound:
+		return 0.85
+	case SquadPhaseFixFire:
+		return 0.70
+	case SquadPhaseStalledRecovery:
+		return 0.90
+	case SquadPhaseConsolidate:
+		return 0.35
+	default:
+		return 0.55
+	}
+}
+
+func (s *Soldier) chooseRecoveryAction() RecoveryAction {
+	if s.recoveryCommitTicks > 0 {
+		return s.recoveryAction
+	}
+	bb := &s.blackboard
+
+	stallSeverity := clamp01(float64(s.recoveryNoPathStreak)/4.0*0.45 + s.recoveryStallEMA*0.55)
+	routeConfidence := 1.0 - clamp01(s.recoveryRouteFailEMA)
+	threatPressure := clamp01(bb.SuppressLevel*0.65 + float64(bb.IncomingFireCount)*0.12)
+	supportConfidence := clamp01(float64(bb.VisibleAllyCount) / 3.0)
+	urgency := s.recoveryUrgency()
+
+	directScore := routeConfidence*0.50 + supportConfidence*0.20 + urgency*0.30 - stallSeverity*0.40
+	lateralScore := stallSeverity*0.45 + urgency*0.25 + (1.0-threatPressure)*0.20 + (1.0-routeConfidence)*0.20
+	anchorScore := supportConfidence*0.45 + threatPressure*0.20 + stallSeverity*0.20 + urgency*0.15
+	holdScore := threatPressure*0.60 + (1.0-supportConfidence)*0.20 + stallSeverity*0.20
+
+	best := RecoveryActionDirect
+	bestScore := directScore
+	if lateralScore > bestScore {
+		best = RecoveryActionLateral
+		bestScore = lateralScore
+	}
+	if anchorScore > bestScore {
+		best = RecoveryActionAnchor
+		bestScore = anchorScore
+	}
+	if holdScore > bestScore {
+		best = RecoveryActionHold
+	}
+
+	s.recoveryAction = best
+	s.recoveryCommitTicks = 45
+	return best
+}
+
+func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
+	bb := &s.blackboard
+	action := s.chooseRecoveryAction()
+	if s.recoveryCommitTicks > 0 {
+		s.recoveryCommitTicks--
+	}
+
+	tryPath := func(tx, ty float64) bool {
+		newPath := s.navGrid.FindPath(s.x, s.y, tx, ty)
+		if newPath == nil {
+			return false
+		}
+		s.path = newPath
+		s.pathIndex = 0
+		s.slotTargetX = tx
+		s.slotTargetY = ty
+		s.recoveryNoPathStreak = 0
+		s.recoveryRouteFailEMA = emaBlend(s.recoveryRouteFailEMA, 0, 0.30)
+		s.recoveryStallEMA = emaBlend(s.recoveryStallEMA, 0.15, 0.20)
+		s.state = SoldierStateMoving
+		s.moveAlongPath(dt)
+		return true
+	}
+
+	baseBearing := math.Atan2(targetY-s.y, targetX-s.x)
+
+	s.recoveryNoPathStreak++
+	s.recoveryRouteFailEMA = emaBlend(s.recoveryRouteFailEMA, 1, 0.30)
+	s.recoveryStallEMA = emaBlend(s.recoveryStallEMA, 1, 0.25)
+
+	switch action {
+	case RecoveryActionDirect:
+		if tryPath(targetX, targetY) {
+			return
+		}
+	case RecoveryActionLateral:
+		side := 1.0
+		if (s.id+max(1, s.recoveryNoPathStreak))%2 == 0 {
+			side = -1.0
+		}
+		lat := float64(cellSize) * (1.8 + 0.25*float64(min(4, s.recoveryNoPathStreak)))
+		ltx := s.x + math.Cos(baseBearing+side*math.Pi/2)*lat
+		lty := s.y + math.Sin(baseBearing+side*math.Pi/2)*lat
+		if tryPath(ltx, lty) {
+			return
+		}
+		if tryPath(targetX, targetY) {
+			return
+		}
+	case RecoveryActionAnchor:
+		ax, ay := targetX, targetY
+		if s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
+			lx, ly := s.squad.Leader.x, s.squad.Leader.y
+			anchorBearing := math.Atan2(targetY-ly, targetX-lx)
+			stand := float64(cellSize) * 2.5
+			ax = lx + math.Cos(anchorBearing)*stand
+			ay = ly + math.Sin(anchorBearing)*stand
+		}
+		if tryPath(ax, ay) {
+			return
+		}
+		if tryPath(targetX, targetY) {
+			return
+		}
+	case RecoveryActionHold:
+		if bb.IncomingFireCount > 0 || bb.IsSuppressed() {
+			s.state = SoldierStateCover
+			s.seekCoverFromThreat(dt)
+		} else {
+			s.state = SoldierStateIdle
+			s.profile.Physical.AccumulateFatigue(0, dt)
+			s.faceNearestThreatOrContact()
+		}
+		return
+	}
+
+	// Last resort if all movement recovery options failed this tick.
+	s.state = SoldierStateIdle
+	s.profile.Physical.AccumulateFatigue(0, dt)
+	s.faceNearestThreatOrContact()
+}
+
 // moveToContact paths the soldier toward their assigned spread position (or the
 // squad contact if no individual order has been issued), within the leash limit.
 // Falls back to heard gunfire direction if no squad contact is available.
@@ -992,13 +1173,36 @@ func (s *Soldier) moveToContact(dt float64) {
 	dx := targetX - s.slotTargetX
 	dy := targetY - s.slotTargetY
 	drift := math.Sqrt(dx*dx + dy*dy)
-	if s.path == nil || s.pathIndex >= len(s.path) || drift > contactRepathDist {
+	shouldRepath := s.path == nil || s.pathIndex >= len(s.path) || drift > contactRepathDist
+	if !shouldRepath && s.path != nil {
+		remaining := len(s.path) - s.pathIndex
+		distToTarget := math.Hypot(targetX-s.x, targetY-s.y)
+		if remaining <= 1 && distToTarget > float64(cellSize)*1.5 {
+			shouldRepath = true
+		}
+	}
+	if shouldRepath {
 		newPath := s.navGrid.FindPath(s.x, s.y, targetX, targetY)
 		if newPath != nil {
 			s.path = newPath
 			s.pathIndex = 0
 			s.slotTargetX = targetX
 			s.slotTargetY = targetY
+			s.recoveryNoPathStreak = 0
+			s.recoveryRouteFailEMA = emaBlend(s.recoveryRouteFailEMA, 0, 0.30)
+			s.recoveryStallEMA = emaBlend(s.recoveryStallEMA, 0.10, 0.20)
+			s.recoveryCommitTicks = 0
+		} else {
+			s.applyRecoveryAction(dt, targetX, targetY)
+			return
+		}
+	}
+
+	if s.path == nil || s.pathIndex >= len(s.path) {
+		distToTarget := math.Hypot(targetX-s.x, targetY-s.y)
+		if distToTarget > float64(cellSize) {
+			s.applyRecoveryAction(dt, targetX, targetY)
+			return
 		}
 	}
 
