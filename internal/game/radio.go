@@ -544,7 +544,7 @@ func (sq *Squad) pushRadioChatLine(msg RadioMessage, outcome radioDeliveryOutcom
 	}
 }
 
-func (sq *Squad) pruneRadioChatLines(tick int) {
+func (sq *Squad) pruneRadioChatLines(tick int) { // nolint:unused
 	if len(sq.radioChatLines) == 0 {
 		return
 	}

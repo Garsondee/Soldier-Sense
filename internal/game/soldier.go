@@ -3132,7 +3132,7 @@ func (s *Soldier) moveCombatDash(dt float64) {
 		lx, ly := s.squad.Leader.x, s.squad.Leader.y
 		dx := s.x - lx
 		dy := s.y - ly
-		if math.Sqrt(dx*dx+dy*dy) > contactLeashBase*contactLeashMul {
+		if !withinRadius(dx, dy, contactLeashBase*contactLeashMul) {
 			destX = lx
 			destY = ly
 		}
@@ -3205,7 +3205,7 @@ func (s *Soldier) moveCombatDash(dt float64) {
 	// Repath if target drifted significantly from where we were heading.
 	dx := targetX - s.slotTargetX
 	dy := targetY - s.slotTargetY
-	if s.path == nil || s.pathIndex >= len(s.path) || math.Sqrt(dx*dx+dy*dy) > contactRepathDist {
+	if s.path == nil || s.pathIndex >= len(s.path) || !withinRadius(dx, dy, contactRepathDist) {
 		newPath := s.navGrid.FindPath(s.x, s.y, targetX, targetY)
 		if newPath != nil {
 			s.path = newPath
