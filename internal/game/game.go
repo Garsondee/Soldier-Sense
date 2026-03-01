@@ -1,6 +1,7 @@
 package game
 
 import (
+	"errors"
 	"fmt"
 	"image/color"
 	"math"
@@ -17,6 +18,19 @@ const borderWidth = 24
 
 // hudScale is the integer upscale factor applied to all HUD text (3 = 3× larger).
 const hudScale = 3
+
+const (
+	menuOptionQuit = iota
+	menuOptionRestart
+	menuOptionCount
+)
+
+var (
+	// ErrQuit cleanly exits the whole program when returned from Game.Update.
+	ErrQuit = errors.New("quit game")
+	// ErrRestart requests a fresh simulation instance with a new seed.
+	ErrRestart = errors.New("restart game")
+)
 
 // overlayColors maps each IntelMapKind to its debug render colour.
 var overlayColors = [intelMapCount]color.RGBA{
@@ -89,6 +103,12 @@ type Game struct {
 	// Simulation speed control.
 	simSpeed  float64 // multiplier: 0=paused, 0.5, 1, 2, 4
 	tickAccum float64 // fractional tick accumulator for sub-1x speeds
+
+	// ESC menu state.
+	menuOpen        bool
+	menuSelection   int
+	menuResumeSpeed float64
+	pendingExit     error
 
 	// Analytics reporter — collects behaviour stats periodically.
 	reporter *SimReporter
@@ -690,6 +710,9 @@ func (g *Game) randomiseProfiles() {
 func (g *Game) Update() error {
 	// Handle input every frame regardless of sim speed.
 	g.handleInput()
+	if g.pendingExit != nil {
+		return g.pendingExit
+	}
 
 	if g.simSpeed <= 0 {
 		// Paused: still update tracers so muzzle flashes fade.
@@ -769,6 +792,50 @@ func (g *Game) simTick() {
 // handleInput processes overlay toggle keypresses (edge-triggered).
 func (g *Game) handleInput() {
 	currentKeys := map[ebiten.Key]bool{}
+	currentKeys[ebiten.KeyEscape] = ebiten.IsKeyPressed(ebiten.KeyEscape)
+	if currentKeys[ebiten.KeyEscape] && !g.prevKeys[ebiten.KeyEscape] {
+		if g.menuOpen {
+			g.menuOpen = false
+			g.simSpeed = g.menuResumeSpeed
+		} else {
+			g.menuOpen = true
+			g.menuSelection = menuOptionQuit
+			g.menuResumeSpeed = g.simSpeed
+			g.simSpeed = 0
+		}
+	}
+
+	if g.menuOpen {
+		currentKeys[ebiten.KeyArrowUp] = ebiten.IsKeyPressed(ebiten.KeyArrowUp)
+		currentKeys[ebiten.KeyArrowDown] = ebiten.IsKeyPressed(ebiten.KeyArrowDown)
+		currentKeys[ebiten.KeyW] = ebiten.IsKeyPressed(ebiten.KeyW)
+		currentKeys[ebiten.KeyS] = ebiten.IsKeyPressed(ebiten.KeyS)
+		currentKeys[ebiten.KeyEnter] = ebiten.IsKeyPressed(ebiten.KeyEnter)
+
+		moveUp := (currentKeys[ebiten.KeyArrowUp] && !g.prevKeys[ebiten.KeyArrowUp]) ||
+			(currentKeys[ebiten.KeyW] && !g.prevKeys[ebiten.KeyW])
+		moveDown := (currentKeys[ebiten.KeyArrowDown] && !g.prevKeys[ebiten.KeyArrowDown]) ||
+			(currentKeys[ebiten.KeyS] && !g.prevKeys[ebiten.KeyS])
+		if moveUp {
+			g.menuSelection = (g.menuSelection + menuOptionCount - 1) % menuOptionCount
+		}
+		if moveDown {
+			g.menuSelection = (g.menuSelection + 1) % menuOptionCount
+		}
+
+		if currentKeys[ebiten.KeyEnter] && !g.prevKeys[ebiten.KeyEnter] {
+			switch g.menuSelection {
+			case menuOptionQuit:
+				g.pendingExit = ErrQuit
+			case menuOptionRestart:
+				g.pendingExit = ErrRestart
+			}
+		}
+
+		g.prevKeys = currentKeys
+		g.prevMouseLeft = ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+		return
+	}
 
 	// Layer toggles for active team: 1-6.
 	layerKeys := [intelMapCount]ebiten.Key{
@@ -954,6 +1021,36 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	// Soldier inspector panel (screen-space, drawn over everything).
 	g.drawInspector(screen)
+
+	if g.menuOpen {
+		g.drawPauseMenu(screen)
+	}
+}
+
+func (g *Game) drawPauseMenu(screen *ebiten.Image) {
+	vector.FillRect(screen, 0, 0, float32(g.width), float32(g.height), color.RGBA{R: 0, G: 0, B: 0, A: 175}, false)
+
+	const menuW = 360
+	const menuH = 170
+	mx := (g.width - menuW) / 2
+	my := (g.height - menuH) / 2
+
+	vector.FillRect(screen, float32(mx), float32(my), menuW, menuH, color.RGBA{R: 12, G: 18, B: 12, A: 245}, false)
+	vector.StrokeRect(screen, float32(mx), float32(my), menuW, menuH, 2, color.RGBA{R: 92, G: 140, B: 92, A: 255}, false)
+
+	ebitenutil.DebugPrintAt(screen, "PAUSED", mx+140, my+18)
+	ebitenutil.DebugPrintAt(screen, "ESC: resume", mx+18, my+44)
+	ebitenutil.DebugPrintAt(screen, "W/S or Up/Down: select", mx+18, my+58)
+	ebitenutil.DebugPrintAt(screen, "Enter: confirm", mx+18, my+72)
+
+	options := []string{"Quit Program", "Restart (New Seed)"}
+	for i, label := range options {
+		prefix := "  "
+		if i == g.menuSelection {
+			prefix = "> "
+		}
+		ebitenutil.DebugPrintAt(screen, prefix+label, mx+90, my+102+i*20)
+	}
 }
 
 func (g *Game) drawWorld(screen *ebiten.Image) {
