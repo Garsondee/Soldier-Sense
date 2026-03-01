@@ -116,10 +116,10 @@ func (g *Game) drawMovementIntentLines(screen *ebiten.Image) {
 		// Skip very short lines.
 		dx := destX - s.x
 		dy := destY - s.y
-		dist := math.Sqrt(dx*dx + dy*dy)
-		if dist < 20 {
+		if withinRadius2(dx, dy, 20*20) {
 			continue
 		}
+		dist := math.Sqrt(dx*dx + dy*dy)
 
 		// Line colour: faint team colour.
 		isSelected := g.inspector.selected == s
