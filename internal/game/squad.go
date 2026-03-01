@@ -1130,25 +1130,71 @@ func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 	// Use the squad-level enemy bearing (from centroid), not the leader alone.
 	bearing := sq.EnemyBearing
 	perpAngle := bearing + math.Pi/2
+	tick := 0
+	if sq.Leader != nil && sq.Leader.currentTick != nil {
+		tick = *sq.Leader.currentTick
+	}
 
-	// Standoff: positions are this far back from the contact, so nobody runs
-	// directly into the enemy's face.
-	const standoff = 180.0
-	// Lateral spacing: members spread wider so they approach from multiple angles.
-	const lateralSpacing = 55.0
+	// Phase-aware standoff/spacing keeps movement expressive while preserving cohesion.
+	standoff := 180.0
+	spacing := 55.0
+	switch sq.Phase {
+	case SquadPhaseAssault:
+		standoff = 150.0
+		spacing = 60.0
+	case SquadPhaseFixFire:
+		standoff = 205.0
+		spacing = 52.0
+	case SquadPhaseConsolidate:
+		standoff = 210.0
+		spacing = 46.0
+	case SquadPhaseBound:
+		standoff = 170.0
+		spacing = 58.0
+	}
+	contactDist := 0.0
+	if sq.Leader != nil {
+		contactDist = math.Hypot(cx-sq.Leader.x, cy-sq.Leader.y)
+	}
+	if contactDist > float64(maxFireRange)*1.25 {
+		standoff += 18.0
+	}
+	if sq.squadSpread() > 220 {
+		spacing *= 0.88
+	}
 
 	// Base point: contact pulled back by standoff along the approach bearing.
 	baseX := cx - math.Cos(bearing)*standoff
 	baseY := cy - math.Sin(bearing)*standoff
 
 	positions := make([][2]float64, n)
-	for i := range alive {
+	for i, m := range alive {
 		// Symmetric lateral offset: centre is at 0, then alternating ±1, ±2...
 		halfN := float64(n-1) / 2.0
-		lateral := (float64(i) - halfN) * lateralSpacing
+		lateral := (float64(i) - halfN) * spacing
+
+		// Deterministic tempo/lane dynamics: soldiers do subtle micro-maneuvers
+		// instead of marching on rigid rails.
+		osc := math.Sin(float64(tick+m.id*23) * 0.055)
+		osc2 := math.Cos(float64(tick*2+m.id*13) * 0.031)
+		lateral += osc * 10.0
+
+		depthOffset := osc2 * 12.0
+		if (i % 3) == 0 {
+			depthOffset += 14.0 // periodic "surge" slot
+		} else if (i % 3) == 1 {
+			depthOffset -= 8.0 // trailing support slot
+		}
+
+		// Fearful soldiers naturally lag a bit; experienced/calm soldiers close distance.
+		ef := m.profile.Psych.EffectiveFear()
+		depthOffset -= ef * 14.0
+
+		forwardX := math.Cos(bearing) * depthOffset
+		forwardY := math.Sin(bearing) * depthOffset
 		positions[i] = [2]float64{
-			baseX + math.Cos(perpAngle)*lateral,
-			baseY + math.Sin(perpAngle)*lateral,
+			baseX + math.Cos(perpAngle)*lateral + forwardX,
+			baseY + math.Sin(perpAngle)*lateral + forwardY,
 		}
 	}
 	return positions

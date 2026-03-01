@@ -14,8 +14,8 @@ import (
 
 const (
 	soldierMaxHP      = 100.0 // starting health
-	accurateFireRange = 300.0 // px, reliable engagement envelope
-	maxFireRange      = 450.0 // px, includes low-accuracy long-range fire band (+50%)
+	accurateFireRange = 450.0 // px, reliable engagement envelope (first half of rifle range)
+	maxFireRange      = 900.0 // px, max rifle range (last half is pot-shot territory)
 	tracerLifetime    = 10    // ticks a tracer persists
 	nearMissStress    = 0.08  // fear added to target on miss
 	hitStress         = 0.20  // fear added to target on hit
@@ -51,24 +51,37 @@ const (
 // shotRangePenalty returns accuracy loss for the given shot distance.
 // Short range has a BONUS (negative penalty — closer = easier to hit).
 // Inside CQB range, the shooter simply cannot miss much.
-// Beyond accurateFireRange, penalties ramp hard.
+// Beyond accurateFireRange, penalties ramp hard in the pot-shot band.
 func shotRangePenalty(dist float64) float64 {
 	if dist <= 0 {
-		return -0.30 // point-blank: strong bonus
+		return -0.32 // point-blank: strong bonus
 	}
 	if dist <= cqbRange {
-		// Smooth bonus: 0 at cqbRange, -0.30 at zero.
-		return -0.30 * (1.0 - dist/cqbRange)
+		// Smooth bonus: 0 at cqbRange, -0.32 at zero.
+		return -0.32 * (1.0 - dist/cqbRange)
 	}
 	if dist <= accurateFireRange {
 		// Gentle linear penalty across the accurate band.
-		return 0.10 * ((dist - cqbRange) / (accurateFireRange - cqbRange))
+		return 0.08 * ((dist - cqbRange) / (accurateFireRange - cqbRange))
 	}
 	if dist >= maxFireRange {
-		return 0.45
+		return 0.78
 	}
 	t := (dist - accurateFireRange) / (maxFireRange - accurateFireRange)
-	return 0.10 + 0.35*t
+	return 0.12 + 0.66*math.Pow(t, 1.15)
+}
+
+func potShotFactor(dist float64) float64 {
+	if dist <= accurateFireRange {
+		return 0
+	}
+	return clamp01((dist - accurateFireRange) / (maxFireRange - accurateFireRange))
+}
+
+func shouldDeliberatelyAimLongRange(s *Soldier, dist, pressure float64) bool {
+	pot := potShotFactor(dist)
+	aimPreference := 0.80 - pressure*0.75 + s.profile.Skills.Discipline*0.18 + (1.0-pot)*0.08
+	return aimPreference > 0.50
 }
 
 // fireModeParams bundles per-mode combat parameters.
@@ -368,6 +381,8 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		// Stance multiplier: prone tightens spread, standing widens.
 		stanceMul := 1.0 / math.Max(0.3, s.profile.Stance.Profile().AccuracyMul)
 		baseShooterSpread := (s.aimSpread + suppressSpread + fearSpread) * stanceMul
+		// Distance-dependent spread: pot-shot band becomes substantially inaccurate.
+		baseShooterSpread += shotRangePenalty(dist) * 0.22
 		if queuedBurst && s.burstBaseSpread > 0 {
 			baseShooterSpread = s.burstBaseSpread
 		}
@@ -389,34 +404,46 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		if !queuedBurst {
 			// Long-range fire requires willingness to pull the trigger.
 			if dist > accurateFireRange {
+				pressure := clamp01(
+					s.profile.Psych.EffectiveFear() +
+						s.blackboard.SuppressLevel*0.85 +
+						float64(s.blackboard.IncomingFireCount)*0.12,
+				)
+				pot := potShotFactor(dist)
 				temptation := clamp01(
-					0.25 +
-						s.blackboard.Internal.ShootDesire*0.55 +
-						s.blackboard.Internal.ShotMomentum*0.20 -
-						s.blackboard.Internal.MoveDesire*0.35,
+					0.34 +
+						s.blackboard.Internal.ShootDesire*0.48 +
+						s.blackboard.Internal.ShotMomentum*0.18 -
+						s.blackboard.Internal.MoveDesire*0.20 +
+						pot*0.22 +
+						(1.0-pressure)*0.12,
 				)
 				if cm.rng.Float64() > temptation {
 					resetAimingState(s)
 					continue
 				}
-			}
 
-			if dist > accurateFireRange && s.blackboard.IncomingFireCount == 0 && s.blackboard.SuppressLevel < aimingSuppressionBlock {
-				requiredAimTicks := aimingTicksForDistance(dist)
-				if s.aimingTargetID != target.id {
-					s.aimingTargetID = target.id
-					s.aimingTicks = 0
-					s.think("lining up long-range shot")
+				if shouldDeliberatelyAimLongRange(s, dist, pressure) &&
+					s.blackboard.IncomingFireCount == 0 && s.blackboard.SuppressLevel < aimingSuppressionBlock {
+					requiredAimTicks := aimingTicksForDistance(dist)
+					requiredAimTicks += int(math.Round(float64(aimingBaseTicks) * pot * (1.0 - pressure) * 0.8))
+					if s.aimingTargetID != target.id {
+						s.aimingTargetID = target.id
+						s.aimingTicks = 0
+						s.think("lining up long-range shot")
+					}
+					if s.aimingTicks < requiredAimTicks {
+						s.aimingTicks++
+						continue
+					}
+					aimProgress := 1.0
+					if requiredAimTicks > 0 {
+						aimProgress = clamp01(float64(s.aimingTicks) / float64(requiredAimTicks))
+					}
+					baseShooterSpread *= (1.0 - aimingMaxSpreadBonus*aimProgress)
+				} else {
+					resetAimingState(s)
 				}
-				if s.aimingTicks < requiredAimTicks {
-					s.aimingTicks++
-					continue
-				}
-				aimProgress := 1.0
-				if requiredAimTicks > 0 {
-					aimProgress = clamp01(float64(s.aimingTicks) / float64(requiredAimTicks))
-				}
-				baseShooterSpread *= (1.0 - aimingMaxSpreadBonus*aimProgress)
 			} else {
 				resetAimingState(s)
 			}

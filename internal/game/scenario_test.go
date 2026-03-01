@@ -1,6 +1,9 @@
 package game
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // dumpLog prints the full SimLog to t.Log so it appears in `go test -v` output.
 func dumpLog(t *testing.T, ts *TestSim) {
@@ -557,12 +560,12 @@ func TestCombat_BurstShotsArePaced(t *testing.T) {
 }
 
 func TestCombat_LongRangeAimingDelaysShotWhenCalm(t *testing.T) {
-	ng := NewNavGrid(800, 480, nil, soldierRadius, nil, nil)
+	ng := NewNavGrid(1200, 480, nil, soldierRadius, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
 
-	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{760, 240}, ng, nil, nil, tl, &tick)
-	target := NewSoldier(1, 430, 240, TeamBlue, [2]float64{760, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
+	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{1120, 240}, ng, nil, nil, tl, &tick)
+	target := NewSoldier(1, 620, 240, TeamBlue, [2]float64{1120, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
 	shooter.vision.KnownContacts = []*Soldier{target}
 
 	// Ensure long-range trigger willingness so this test isolates aiming delay only.
@@ -574,7 +577,7 @@ func TestCombat_LongRangeAimingDelaysShotWhenCalm(t *testing.T) {
 
 	cm := NewCombatManager(7)
 	all := []*Soldier{shooter, target}
-	requiredAimTicks := aimingTicksForDistance(330)
+	requiredAimTicks := aimingTicksForDistance(520)
 
 	for i := 0; i < requiredAimTicks; i++ {
 		cm.ResetFireCounts(all)
@@ -592,12 +595,12 @@ func TestCombat_LongRangeAimingDelaysShotWhenCalm(t *testing.T) {
 }
 
 func TestCombat_LongRangeAimingSkippedWhenUnderFire(t *testing.T) {
-	ng := NewNavGrid(800, 480, nil, soldierRadius, nil, nil)
+	ng := NewNavGrid(1200, 480, nil, soldierRadius, nil, nil)
 	tl := NewThoughtLog()
 	tick := 0
 
-	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{760, 240}, ng, nil, nil, tl, &tick)
-	target := NewSoldier(1, 430, 240, TeamBlue, [2]float64{760, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
+	shooter := NewSoldier(0, 100, 240, TeamRed, [2]float64{0, 240}, [2]float64{1120, 240}, ng, nil, nil, tl, &tick)
+	target := NewSoldier(1, 620, 240, TeamBlue, [2]float64{1120, 240}, [2]float64{0, 240}, ng, nil, nil, tl, &tick)
 	shooter.vision.KnownContacts = []*Soldier{target}
 
 	shooter.blackboard.Internal.ShootDesire = 1.0
@@ -616,6 +619,85 @@ func TestCombat_LongRangeAimingSkippedWhenUnderFire(t *testing.T) {
 	}
 	if shooter.aimingTicks != 0 {
 		t.Fatalf("expected aiming state reset while under fire, aimingTicks=%d", shooter.aimingTicks)
+	}
+}
+
+func TestSoldier_MustCrawlWhenSuppressed_UsesSuppressAndFear(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+	s := NewSoldier(0, 100, 100, TeamRed, [2]float64{0, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+
+	s.blackboard.SuppressLevel = pinnedSuppressionLevel + 0.01
+	if !s.mustCrawlWhenSuppressed() {
+		t.Fatal("expected crawl when suppression is at pinned level")
+	}
+
+	s.blackboard.SuppressLevel = SuppressThreshold + 0.02
+	s.profile.Psych.Fear = 0.0
+	if s.mustCrawlWhenSuppressed() {
+		t.Fatal("expected no forced crawl at moderate suppression with low fear")
+	}
+
+	s.profile.Psych.Fear = 1.0
+	s.profile.Psych.Composure = 0.0
+	s.profile.Psych.Experience = 0.0
+	if !s.mustCrawlWhenSuppressed() {
+		t.Fatal("expected forced crawl at suppressed state with extreme fear")
+	}
+}
+
+func TestSoldier_CanSuppressedFallbackRun_RequiresMoraleAndLowerFear(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+	s := NewSoldier(1, 120, 100, TeamRed, [2]float64{0, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+
+	s.blackboard.SuppressLevel = suppressedRunThreshold + 0.05
+	s.profile.Psych.Morale = 0.8
+	s.profile.Psych.Fear = 0.1
+	if !s.canSuppressedFallbackRun() {
+		t.Fatal("expected resilient low-fear soldier to be able to run fallback under heavy suppression")
+	}
+
+	s.profile.Psych.Morale = 0.3
+	if s.canSuppressedFallbackRun() {
+		t.Fatal("expected low-morale soldier to be unable to run fallback under heavy suppression")
+	}
+
+	s.profile.Psych.Morale = 0.8
+	s.profile.Psych.Fear = 1.0
+	s.profile.Psych.Composure = 0.0
+	s.profile.Psych.Experience = 0.0
+	if s.canSuppressedFallbackRun() {
+		t.Fatal("expected extreme fear to block running fallback")
+	}
+}
+
+func TestMoveAlongPath_ProneSuppressedIsPainfullySlow(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	standing := NewSoldier(2, 100, 100, TeamRed, [2]float64{0, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	proneSuppressed := NewSoldier(3, 100, 120, TeamRed, [2]float64{0, 120}, [2]float64{600, 120}, ng, nil, nil, tl, &tick)
+
+	standing.path = [][2]float64{{220, 100}}
+	standing.pathIndex = 0
+	standing.profile.Stance = StanceStanding
+
+	proneSuppressed.path = [][2]float64{{220, 120}}
+	proneSuppressed.pathIndex = 0
+	proneSuppressed.profile.Stance = StanceProne
+	proneSuppressed.blackboard.SuppressLevel = SuppressThreshold + 0.1
+
+	standing.moveAlongPath(1.0)
+	proneSuppressed.moveAlongPath(1.0)
+
+	standingStep := math.Hypot(standing.x-100, standing.y-100)
+	proneStep := math.Hypot(proneSuppressed.x-100, proneSuppressed.y-120)
+	if proneStep >= standingStep*0.35 {
+		t.Fatalf("expected pinned prone crawl to be much slower; standing=%.3f prone=%.3f", standingStep, proneStep)
 	}
 }
 

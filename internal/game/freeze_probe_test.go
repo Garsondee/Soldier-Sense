@@ -280,7 +280,15 @@ func TestScenario_FreezeProbe_MutualAdvance(t *testing.T) {
 
 	recoveryAttempts := 0
 	recoverySuccesses := 0
+	recoveryExploreTriggers := 0
+	recoveryExploreSuccesses := 0
 	recoveryActionMix := map[string]int{
+		"direct":  0,
+		"lateral": 0,
+		"anchor":  0,
+		"hold":    0,
+	}
+	actionSuccessMix := map[string]int{
 		"direct":  0,
 		"lateral": 0,
 		"anchor":  0,
@@ -289,17 +297,30 @@ func TestScenario_FreezeProbe_MutualAdvance(t *testing.T) {
 	for _, s := range ts.Soldiers {
 		recoveryAttempts += s.recoveryAttempts
 		recoverySuccesses += s.recoverySuccesses
+		recoveryExploreTriggers += s.recoveryExploreTriggers
+		recoveryExploreSuccesses += s.recoveryExploreSuccesses
 		recoveryActionMix["direct"] += s.recoveryActionCounts[RecoveryActionDirect]
 		recoveryActionMix["lateral"] += s.recoveryActionCounts[RecoveryActionLateral]
 		recoveryActionMix["anchor"] += s.recoveryActionCounts[RecoveryActionAnchor]
 		recoveryActionMix["hold"] += s.recoveryActionCounts[RecoveryActionHold]
+		actionSuccessMix["direct"] += s.recoveryActionSuccessCounts[RecoveryActionDirect]
+		actionSuccessMix["lateral"] += s.recoveryActionSuccessCounts[RecoveryActionLateral]
+		actionSuccessMix["anchor"] += s.recoveryActionSuccessCounts[RecoveryActionAnchor]
+		actionSuccessMix["hold"] += s.recoveryActionSuccessCounts[RecoveryActionHold]
 	}
 	recoverySuccessRate := 0.0
 	if recoveryAttempts > 0 {
 		recoverySuccessRate = float64(recoverySuccesses) / float64(recoveryAttempts)
 	}
 	t.Logf("recovery telemetry: attempts=%d successes=%d success_rate=%.2f", recoveryAttempts, recoverySuccesses, recoverySuccessRate)
+	if recoveryExploreTriggers > 0 {
+		exploreRate := float64(recoveryExploreSuccesses) / float64(recoveryExploreTriggers)
+		t.Logf("recovery exploration: triggers=%d successes=%d success_rate=%.2f", recoveryExploreTriggers, recoveryExploreSuccesses, exploreRate)
+	}
 	t.Log(formatTopCounts("recovery action mix", recoveryActionMix, 4))
+	if recoverySuccesses > 0 {
+		t.Log(formatTopCounts("recovery action successes", actionSuccessMix, 4))
+	}
 	t.Logf("freeze aggregates: boundMover=false:%d boundMover=true:%d pathRemain<=1:%d noPath:%d spread>250:%d",
 		boundMoverFalseReports, boundMoverTrueReports, pathNearlyDoneReports, noPathReports, highSpreadReports)
 	t.Logf("freeze reports captured: %d", reports)

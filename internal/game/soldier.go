@@ -45,6 +45,14 @@ const (
 	sightlineUpdateRate    = 120   // ticks between sightline score recalcs
 	goalPauseBase          = 10    // base ticks to pause briefly after a non-critical goal switch
 	stressReevalPeriod     = 18    // ticks between stress-jitter re-evaluation probes
+
+	// Pinned-down behaviour thresholds.
+	suppressedRunThreshold = 0.65 // heavy suppression where only resilient soldiers may still run
+	pinnedSuppressionLevel = 0.82 // above this, soldiers are effectively pinned and must crawl/freeze
+	extremeFearProneLevel  = 0.78 // extreme fear while suppressed forces prone crawl behaviour
+
+	// Pinned crawl movement is intentionally very slow.
+	pinnedCrawlSpeedMul = 0.35
 )
 
 // FireMode represents the soldier's current weapon engagement mode.
@@ -282,6 +290,14 @@ type Soldier struct {
 	recoveryAttempts     int
 	recoverySuccesses    int
 	recoveryActionCounts [4]int
+	// recoveryActionSuccessCounts counts successful path acquisitions per action.
+	recoveryActionSuccessCounts [4]int
+	// Exploration telemetry: counts how often we deliberately try a non-direct action
+	// due to repeated failures, and how often that attempt succeeds.
+	recoveryExploreTriggers  int
+	recoveryExploreSuccesses int
+	// Scratch flag set by chooseRecoveryAction, consumed by applyRecoveryAction.
+	recoveryExploreThisTick bool
 }
 
 type RecoveryAction int
@@ -727,6 +743,38 @@ func (s *Soldier) goalSwitchPauseDuration(stress float64, underFire bool) int {
 	return pause
 }
 
+func (s *Soldier) mustCrawlWhenSuppressed() bool {
+	bb := &s.blackboard
+	ef := s.profile.Psych.EffectiveFear()
+	if bb.SuppressLevel >= pinnedSuppressionLevel {
+		return true
+	}
+	return bb.IsSuppressed() && ef >= extremeFearProneLevel
+}
+
+func (s *Soldier) canSuppressedFallbackRun() bool {
+	bb := &s.blackboard
+	if bb.SuppressLevel < suppressedRunThreshold || s.mustCrawlWhenSuppressed() {
+		return false
+	}
+	ef := s.profile.Psych.EffectiveFear()
+	return s.profile.Psych.Morale >= 0.65 && ef < 0.55
+}
+
+func (s *Soldier) pinnedFreezeThisTick() bool {
+	bb := &s.blackboard
+	ef := s.profile.Psych.EffectiveFear()
+	panicDrive := clamp01(
+		ef*0.70 +
+			bb.SuppressLevel*0.40 -
+			s.profile.Psych.Morale*0.35 -
+			s.profile.Skills.Discipline*0.25,
+	)
+	freezeChance := clamp01(0.55 + panicDrive*0.35)
+	roll := math.Abs(math.Sin(float64((s.tickVal() + 1) * (s.id + 13))))
+	return roll < freezeChance
+}
+
 // executeGoal runs the behaviour for the soldier's current goal.
 func (s *Soldier) executeGoal(dt float64) {
 	bb := &s.blackboard
@@ -818,9 +866,30 @@ func (s *Soldier) executeGoal(dt float64) {
 		return
 	}
 
+	forcedCrawl := s.mustCrawlWhenSuppressed()
+	if forcedCrawl {
+		if s.profile.Stance != StanceProne {
+			s.profile.Stance = StanceProne
+			s.think("PINNED DOWN — dropping prone")
+		}
+		if s.pinnedFreezeThisTick() {
+			s.state = SoldierStateCover
+			s.path = nil
+			s.pathIndex = 0
+			s.profile.Physical.AccumulateFatigue(0, dt)
+			s.faceNearestThreatOrContact()
+			return
+		}
+	}
+
 	switch goal {
 	case GoalSurvive:
-		if s.profile.Stance != StanceCrouching {
+		if forcedCrawl {
+			if s.profile.Stance != StanceProne {
+				s.profile.Stance = StanceProne
+				s.think("prone — pinned and seeking cover")
+			}
+		} else if s.profile.Stance != StanceCrouching {
 			s.profile.Stance = StanceCrouching
 			s.think("crouching — seeking cover")
 		}
@@ -851,6 +920,11 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 
 	case GoalMoveToContact:
+		if forcedCrawl {
+			s.state = SoldierStateCover
+			s.seekCoverFromThreat(dt)
+			break
+		}
 		if s.profile.Stance != StanceCrouching {
 			s.profile.Stance = StanceCrouching
 		}
@@ -911,13 +985,29 @@ func (s *Soldier) executeGoal(dt float64) {
 		s.moveCombatDash(dt)
 
 	case GoalFallback:
-		if s.profile.Stance != StanceCrouching {
+		if forcedCrawl {
+			if s.profile.Stance != StanceProne {
+				s.profile.Stance = StanceProne
+			}
+		} else if s.canSuppressedFallbackRun() {
+			if s.profile.Stance != StanceStanding {
+				s.profile.Stance = StanceStanding
+			}
+			// Running under heavy suppression is possible for resilient soldiers,
+			// but it spikes stress and can tip them into pinned crawl state.
+			s.profile.Psych.ApplyStress(0.006 + bb.SuppressLevel*0.004)
+		} else if s.profile.Stance != StanceCrouching {
 			s.profile.Stance = StanceCrouching
 		}
 		s.state = SoldierStateMoving
 		s.moveFallback(dt)
 
 	case GoalFlank:
+		if forcedCrawl {
+			s.state = SoldierStateCover
+			s.seekCoverFromThreat(dt)
+			break
+		}
 		if s.profile.Stance != StanceCrouching {
 			s.profile.Stance = StanceCrouching
 		}
@@ -945,6 +1035,11 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 
 	case GoalRegroup:
+		if forcedCrawl {
+			s.state = SoldierStateCover
+			s.seekCoverFromThreat(dt)
+			break
+		}
 		if s.blackboard.VisibleThreatCount() > 0 {
 			if s.profile.Stance != StanceCrouching {
 				s.profile.Stance = StanceCrouching
@@ -971,6 +1066,11 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 
 	case GoalMaintainFormation:
+		if forcedCrawl {
+			s.state = SoldierStateCover
+			s.seekCoverFromThreat(dt)
+			break
+		}
 		if s.profile.Stance != StanceStanding {
 			s.profile.Stance = StanceStanding
 		}
@@ -978,6 +1078,11 @@ func (s *Soldier) executeGoal(dt float64) {
 		s.moveAlongPath(dt)
 
 	case GoalAdvance:
+		if forcedCrawl {
+			s.state = SoldierStateCover
+			s.seekCoverFromThreat(dt)
+			break
+		}
 		if s.profile.Stance != StanceStanding {
 			s.profile.Stance = StanceStanding
 		}
@@ -1048,14 +1153,23 @@ func (s *Soldier) chooseRecoveryAction() RecoveryAction {
 		return s.recoveryAction
 	}
 	bb := &s.blackboard
+	// Note: recoveryNoPathStreak is incremented in applyRecoveryAction after an
+	// attempt fails. We use a predicted next streak here so exploration triggers
+	// align with the *current* failed attempt.
+	predictedStreak := s.recoveryNoPathStreak + 1
+	squadSpread := 0.0
+	hasLeaderAnchor := s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s
+	if s.squad != nil {
+		squadSpread = s.squad.squadSpread()
+	}
 
-	stallSeverity := clamp01(float64(s.recoveryNoPathStreak)/4.0*0.45 + s.recoveryStallEMA*0.55)
+	stallSeverity := clamp01(float64(predictedStreak)/4.0*0.45 + s.recoveryStallEMA*0.55)
 	routeConfidence := 1.0 - clamp01(s.recoveryRouteFailEMA)
 	threatPressure := clamp01(bb.SuppressLevel*0.65 + float64(bb.IncomingFireCount)*0.12)
 	supportConfidence := clamp01(float64(bb.VisibleAllyCount) / 3.0)
 	urgency := s.recoveryUrgency()
-	stuckHard := s.recoveryNoPathStreak >= 2 || s.recoveryRouteFailEMA > 0.50
-	noise := math.Sin(float64((s.id+1)*17 + s.tickVal()*3 + s.recoveryNoPathStreak*11))
+	stuckHard := predictedStreak >= 2 || s.recoveryRouteFailEMA > 0.50
+	noise := math.Sin(float64((s.id+1)*17 + s.tickVal()*3 + predictedStreak*11))
 	randomTilt := noise * 0.05
 
 	directScore := routeConfidence*0.48 + supportConfidence*0.16 + urgency*0.24 - stallSeverity*0.46
@@ -1074,6 +1188,13 @@ func (s *Soldier) chooseRecoveryAction() RecoveryAction {
 	}
 	if supportConfidence > 0.45 && threatPressure > 0.20 {
 		anchorScore += 0.08
+	}
+	if hasLeaderAnchor && squadSpread > 170 {
+		anchorScore += 0.18
+		directScore -= 0.08
+	}
+	if squadSpread > 240 {
+		lateralScore -= 0.06
 	}
 
 	directScore -= randomTilt * 0.4
@@ -1095,6 +1216,22 @@ func (s *Soldier) chooseRecoveryAction() RecoveryAction {
 		best = RecoveryActionHold
 	}
 
+	// Exploration: if we're stuck hard and have repeatedly failed, force an occasional
+	// non-direct attempt to escape local minima (like a human trying a side route).
+	// This is intentionally low-frequency and short-commit to avoid cohesion blowups.
+	s.recoveryExploreThisTick = false
+	if stuckHard && predictedStreak >= 3 {
+		// Every 3rd failure, try a different approach (prefer anchor when a leader exists).
+		if predictedStreak%3 == 0 {
+			forced := RecoveryActionLateral
+			if hasLeaderAnchor && (predictedStreak%6 == 0 || squadSpread > 170) {
+				forced = RecoveryActionAnchor
+			}
+			best = forced
+			s.recoveryExploreThisTick = true
+		}
+	}
+
 	s.recoveryAction = best
 	s.recoveryCommitTicks = 36
 	if best == RecoveryActionHold {
@@ -1103,18 +1240,26 @@ func (s *Soldier) chooseRecoveryAction() RecoveryAction {
 	if best == RecoveryActionDirect && stuckHard {
 		s.recoveryCommitTicks = 20
 	}
+	if s.recoveryExploreThisTick {
+		s.recoveryCommitTicks = 18
+	}
 	return best
 }
 
 func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
 	bb := &s.blackboard
 	action := s.chooseRecoveryAction()
+	exploring := s.recoveryExploreThisTick
+	s.recoveryExploreThisTick = false
 	if s.recoveryCommitTicks > 0 {
 		s.recoveryCommitTicks--
 	}
 	s.recoveryAttempts++
 	if int(action) >= 0 && int(action) < len(s.recoveryActionCounts) {
 		s.recoveryActionCounts[int(action)]++
+	}
+	if exploring {
+		s.recoveryExploreTriggers++
 	}
 
 	tryPath := func(tx, ty float64) bool {
@@ -1130,6 +1275,12 @@ func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
 		s.recoveryRouteFailEMA = emaBlend(s.recoveryRouteFailEMA, 0, 0.30)
 		s.recoveryStallEMA = emaBlend(s.recoveryStallEMA, 0.15, 0.20)
 		s.recoverySuccesses++
+		if int(action) >= 0 && int(action) < len(s.recoveryActionSuccessCounts) {
+			s.recoveryActionSuccessCounts[int(action)]++
+		}
+		if exploring {
+			s.recoveryExploreSuccesses++
+		}
 		s.state = SoldierStateMoving
 		s.moveAlongPath(dt)
 		return true
@@ -1535,6 +1686,11 @@ func (s *Soldier) moveAlongPath(dt float64) {
 	}
 
 	speed := s.profile.EffectiveSpeed(soldierSpeed)
+	if s.profile.Stance == StanceProne && s.blackboard.IsSuppressed() {
+		// Pinned crawl: prone movement under suppression is painfully slow.
+		crawl := pinnedCrawlSpeedMul * (0.75 + s.profile.Skills.Discipline*0.25)
+		speed *= crawl
+	}
 	// Leader cohesion: slow down when squad is spread out.
 	if s.isLeader && s.squad != nil {
 		speed *= s.squad.LeaderCohesionSlowdown()
@@ -1795,6 +1951,9 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 	if radius < 3 {
 		radius = 3
 	}
+	h := s.vision.Heading
+	isCrawling := s.profile.Stance == StanceProne && s.state == SoldierStateMoving
+	tick := s.tickVal()
 
 	// --- Goal-based fill colour ---
 	// Body colour encodes current goal state for quick readability.
@@ -1829,8 +1988,16 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 	// --- Shadow drop ---
 	vector.FillCircle(screen, sx+1.5, sy+2.0, radius+1.0, color.RGBA{R: 0, G: 0, B: 0, A: 100}, false)
 
-	// --- Outer dark outline ring ---
-	vector.FillCircle(screen, sx, sy, radius+2.0, color.RGBA{R: 0, G: 0, B: 0, A: 200}, false)
+	// --- Outer silhouette by stance ---
+	if s.profile.Stance == StanceProne {
+		span := radius * 2.8
+		hx := float32(math.Cos(h)) * span * 0.5
+		hy := float32(math.Sin(h)) * span * 0.5
+		thickness := radius + 1.3
+		vector.StrokeLine(screen, sx-hx, sy-hy, sx+hx, sy+hy, thickness+2.0, color.RGBA{R: 0, G: 0, B: 0, A: 200}, false)
+	} else {
+		vector.FillCircle(screen, sx, sy, radius+2.0, color.RGBA{R: 0, G: 0, B: 0, A: 200}, false)
+	}
 
 	// --- Team rim ring (bright team colour at edge) ---
 	var rimCol color.RGBA
@@ -1839,26 +2006,108 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 	} else {
 		rimCol = color.RGBA{R: 80, G: 140, B: 255, A: 220}
 	}
-	vector.StrokeCircle(screen, sx, sy, radius+0.8, 2.0, rimCol, false)
+	if s.profile.Stance == StanceProne {
+		span := radius * 2.8
+		hx := float32(math.Cos(h)) * span * 0.5
+		hy := float32(math.Sin(h)) * span * 0.5
+		thickness := radius + 0.4
+		vector.StrokeLine(screen, sx-hx, sy-hy, sx+hx, sy+hy, thickness, rimCol, false)
+	} else {
+		vector.StrokeCircle(screen, sx, sy, radius+0.8, 2.0, rimCol, false)
+	}
 
 	// --- Body fill ---
-	vector.FillCircle(screen, sx, sy, radius, fill, false)
+	switch s.profile.Stance {
+	case StanceStanding:
+		vector.FillCircle(screen, sx, sy, radius, fill, false)
+	case StanceCrouching:
+		vector.FillCircle(screen, sx, sy+radius*0.08, radius*0.90, fill, false)
+		vector.FillRect(screen, sx-radius*0.72, sy+radius*0.05, radius*1.44, radius*0.50, fill, false)
+	case StanceProne:
+		span := radius * 2.8
+		hx := float32(math.Cos(h)) * span * 0.5
+		hy := float32(math.Sin(h)) * span * 0.5
+		thickness := radius + 0.15
+		vector.StrokeLine(screen, sx-hx, sy-hy, sx+hx, sy+hy, thickness, fill, false)
+	}
 
 	// --- Inner highlight (top-left gleam) ---
 	hlR := radius * 0.45
-	vector.FillCircle(screen, sx-radius*0.22, sy-radius*0.22, hlR,
-		color.RGBA{R: 255, G: 255, B: 255, A: 35}, false)
+	if s.profile.Stance == StanceProne {
+		hx := float32(math.Cos(h)) * radius * 0.8
+		hy := float32(math.Sin(h)) * radius * 0.8
+		vector.FillCircle(screen, sx-hx*0.35, sy-hy*0.35, hlR*0.75,
+			color.RGBA{R: 255, G: 255, B: 255, A: 35}, false)
+	} else {
+		vector.FillCircle(screen, sx-radius*0.22, sy-radius*0.22, hlR,
+			color.RGBA{R: 255, G: 255, B: 255, A: 35}, false)
+	}
 
-	// --- Stance indicator ring ---
-	// Prone: inner dot. Crouching: dashed inner ring.
+	// --- Stance indicator overlays ---
+	// Standing: vertical body marker, crouching: tucked "L", prone: crawl bar.
 	switch s.profile.Stance {
 	case StanceProne:
-		// Small central dot — soldier is flat.
-		vector.FillCircle(screen, sx, sy, 2.0, color.RGBA{R: 255, G: 255, B: 255, A: 160}, false)
+		span := radius * 2.4
+		hx := float32(math.Cos(h)) * span * 0.5
+		hy := float32(math.Sin(h)) * span * 0.5
+		vector.StrokeLine(screen, sx-hx, sy-hy, sx+hx, sy+hy, 1.2,
+			color.RGBA{R: 255, G: 255, B: 255, A: 170}, false)
+		if isCrawling {
+			phase := float32(math.Sin(float64(tick)*0.40 + float64(s.id)*0.75))
+			px := float32(-math.Sin(h))
+			py := float32(math.Cos(h))
+			lag := radius * 0.9
+			wiggle := radius * 0.45 * phase
+			vector.StrokeLine(
+				screen,
+				sx-hx*0.7+px*(lag+wiggle),
+				sy-hy*0.7+py*(lag+wiggle),
+				sx-hx*0.35+px*(wiggle*0.25),
+				sy-hy*0.35+py*(wiggle*0.25),
+				1.3,
+				color.RGBA{R: 255, G: 255, B: 255, A: 130},
+				false,
+			)
+			vector.StrokeLine(
+				screen,
+				sx-hx*0.7-px*(lag-wiggle),
+				sy-hy*0.7-py*(lag-wiggle),
+				sx-hx*0.35-px*(wiggle*0.25),
+				sy-hy*0.35-py*(wiggle*0.25),
+				1.3,
+				color.RGBA{R: 255, G: 255, B: 255, A: 130},
+				false,
+			)
+		}
 	case StanceCrouching:
-		// Subtle inner ring.
-		vector.StrokeCircle(screen, sx, sy, radius*0.55, 1.0,
-			color.RGBA{R: 255, G: 255, B: 255, A: 60}, false)
+		kneeY := sy + radius*0.25
+		vector.StrokeLine(screen, sx-radius*0.40, sy-radius*0.30, sx-radius*0.08, kneeY,
+			1.2, color.RGBA{R: 255, G: 255, B: 255, A: 160}, false)
+		vector.StrokeLine(screen, sx-radius*0.08, kneeY, sx+radius*0.42, kneeY,
+			1.2, color.RGBA{R: 255, G: 255, B: 255, A: 160}, false)
+	case StanceStanding:
+		vector.StrokeLine(screen, sx, sy-radius*0.65, sx, sy+radius*0.60,
+			1.3, color.RGBA{R: 255, G: 255, B: 255, A: 170}, false)
+		vector.StrokeLine(screen, sx-radius*0.30, sy-radius*0.25, sx+radius*0.30, sy-radius*0.25,
+			1.1, color.RGBA{R: 255, G: 255, B: 255, A: 140}, false)
+	}
+
+	// Clear top marker for posture readability at zoomed-out scale.
+	markerY := sy - radius - 4
+	switch s.profile.Stance {
+	case StanceStanding:
+		vector.StrokeLine(screen, sx-2.5, markerY-1.5, sx-2.5, markerY+1.5, 1.2,
+			color.RGBA{R: 255, G: 255, B: 255, A: 180}, false)
+		vector.StrokeLine(screen, sx+2.5, markerY-1.5, sx+2.5, markerY+1.5, 1.2,
+			color.RGBA{R: 255, G: 255, B: 255, A: 180}, false)
+	case StanceCrouching:
+		vector.StrokeLine(screen, sx-3.0, markerY+1.0, sx, markerY-1.8, 1.3,
+			color.RGBA{R: 255, G: 255, B: 255, A: 180}, false)
+		vector.StrokeLine(screen, sx, markerY-1.8, sx+3.0, markerY+1.0, 1.3,
+			color.RGBA{R: 255, G: 255, B: 255, A: 180}, false)
+	case StanceProne:
+		vector.StrokeLine(screen, sx-3.6, markerY, sx+3.6, markerY, 1.4,
+			color.RGBA{R: 255, G: 255, B: 255, A: 185}, false)
 	}
 
 	// --- Leader marker: gold double ring ---
@@ -1871,8 +2120,10 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 
 	// --- Directional chevron instead of a plain line ---
 	// Points in heading direction; length scales with radius.
-	h := s.vision.Heading
 	tipDist := radius + 6.0
+	if s.profile.Stance == StanceProne {
+		tipDist = radius + 4.5
+	}
 	wingBack := radius * 0.5
 	wingSpread := radius * 0.55
 
@@ -1906,10 +2157,6 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 
 	// --- Panic indicator: pulsing ring ---
 	if s.blackboard.PanicLocked {
-		tick := 0
-		if s.currentTick != nil {
-			tick = *s.currentTick
-		}
 		pulseAlpha := uint8(100 + 80*math.Abs(math.Sin(float64(tick)*0.15)))
 		vector.StrokeCircle(screen, sx, sy, radius+8.0, 2.0,
 			color.RGBA{R: 255, G: 220, B: 0, A: pulseAlpha}, false)
