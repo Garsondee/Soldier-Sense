@@ -13,10 +13,13 @@ type runStats struct {
 	runIndex int
 	seed     int64
 
-	firstContactTick int
-	firstEngageTick  int
-	firstRegroupTick int
-	firstDeathTick   int
+	firstContactTick   int
+	firstEngageTick    int
+	firstRegroupTick   int
+	firstDeathTick     int
+	firstPanicTick     int
+	firstSurrenderTick int
+	firstBreakTick     int
 
 	intentChanges int
 	goalChanges   int
@@ -24,9 +27,14 @@ type runStats struct {
 	contactNew    int
 	contactLost   int
 
-	stalledEvents  int
-	detachedEvents int
-	affected       map[string]struct{}
+	stalledEvents        int
+	detachedEvents       int
+	disobeyEvents        int
+	panicEvents          int
+	surrenderEvents      int
+	cohesionBreakEvents  int
+	cohesionReformEvents int
+	affected             map[string]struct{}
 
 	windowSummary *game.WindowReport
 	grades        []game.SoldierGrade
@@ -98,37 +106,70 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 	affected := map[string]struct{}{}
 	stalledEvents := 0
 	detachedEvents := 0
+	disobeyEvents := 0
+	panicEvents := 0
+	surrenderEvents := 0
+	cohesionBreakEvents := 0
+	cohesionReformEvents := 0
 	for _, e := range entries {
-		if e.Category != "effectiveness" {
-			continue
-		}
-		switch e.Key {
-		case "stalled_in_combat":
-			stalledEvents++
-			affected[e.Soldier] = struct{}{}
-		case "detached_from_engagement":
-			detachedEvents++
-			affected[e.Soldier] = struct{}{}
+		switch e.Category {
+		case "effectiveness":
+			switch e.Key {
+			case "stalled_in_combat":
+				stalledEvents++
+				affected[e.Soldier] = struct{}{}
+			case "detached_from_engagement":
+				detachedEvents++
+				affected[e.Soldier] = struct{}{}
+			}
+		case "psych":
+			switch e.Key {
+			case "disobedience":
+				disobeyEvents++
+				affected[e.Soldier] = struct{}{}
+			case "panic_retreat":
+				panicEvents++
+				affected[e.Soldier] = struct{}{}
+			case "surrender":
+				surrenderEvents++
+				affected[e.Soldier] = struct{}{}
+			}
+		case "squad":
+			if e.Key == "cohesion" {
+				if strings.Contains(e.Value, "broken") {
+					cohesionBreakEvents++
+				} else if strings.Contains(e.Value, "reformed") {
+					cohesionReformEvents++
+				}
+			}
 		}
 	}
 
 	return runStats{
-		runIndex:         runIndex,
-		seed:             seed,
-		firstContactTick: firstTick(entries, "vision", "contact_new", ""),
-		firstEngageTick:  firstTick(entries, "squad", "intent_change", "engage"),
-		firstRegroupTick: firstTick(entries, "squad", "intent_change", "regroup"),
-		firstDeathTick:   firstTick(entries, "state", "change", "→ dead"),
-		intentChanges:    ts.SimLog.CountCategory("squad", "intent_change"),
-		goalChanges:      ts.SimLog.CountCategory("goal", "change"),
-		stateChanges:     ts.SimLog.CountCategory("state", "change"),
-		contactNew:       ts.SimLog.CountCategory("vision", "contact_new"),
-		contactLost:      ts.SimLog.CountCategory("vision", "contact_lost"),
-		stalledEvents:    stalledEvents,
-		detachedEvents:   detachedEvents,
-		affected:         affected,
-		windowSummary:    ts.Reporter.WindowSummary(),
-		grades:           ts.SoldierGrades(),
+		runIndex:             runIndex,
+		seed:                 seed,
+		firstContactTick:     firstTick(entries, "vision", "contact_new", ""),
+		firstEngageTick:      firstTick(entries, "squad", "intent_change", "engage"),
+		firstRegroupTick:     firstTick(entries, "squad", "intent_change", "regroup"),
+		firstDeathTick:       firstTick(entries, "state", "change", "→ dead"),
+		firstPanicTick:       firstTick(entries, "psych", "panic_retreat", "panic_retreat_on"),
+		firstSurrenderTick:   firstTick(entries, "psych", "surrender", "surrender_on"),
+		firstBreakTick:       firstTick(entries, "squad", "cohesion", "broken"),
+		intentChanges:        ts.SimLog.CountCategory("squad", "intent_change"),
+		goalChanges:          ts.SimLog.CountCategory("goal", "change"),
+		stateChanges:         ts.SimLog.CountCategory("state", "change"),
+		contactNew:           ts.SimLog.CountCategory("vision", "contact_new"),
+		contactLost:          ts.SimLog.CountCategory("vision", "contact_lost"),
+		stalledEvents:        stalledEvents,
+		detachedEvents:       detachedEvents,
+		disobeyEvents:        disobeyEvents,
+		panicEvents:          panicEvents,
+		surrenderEvents:      surrenderEvents,
+		cohesionBreakEvents:  cohesionBreakEvents,
+		cohesionReformEvents: cohesionReformEvents,
+		affected:             affected,
+		windowSummary:        ts.Reporter.WindowSummary(),
+		grades:               ts.SoldierGrades(),
 	}
 }
 
@@ -146,12 +187,14 @@ func firstTick(entries []game.SimLogEntry, category, key, contains string) int {
 
 func printRun(rs runStats) {
 	fmt.Printf("--- Run %d (seed=%d) ---\n", rs.runIndex, rs.seed)
-	fmt.Printf("phase_markers: contact=%d engage=%d regroup=%d first_death=%d\n",
-		rs.firstContactTick, rs.firstEngageTick, rs.firstRegroupTick, rs.firstDeathTick)
+	fmt.Printf("phase_markers: contact=%d engage=%d regroup=%d first_death=%d first_panic=%d first_surrender=%d first_break=%d\n",
+		rs.firstContactTick, rs.firstEngageTick, rs.firstRegroupTick, rs.firstDeathTick, rs.firstPanicTick, rs.firstSurrenderTick, rs.firstBreakTick)
 	fmt.Printf("event_totals: intent_change=%d goal_change=%d state_change=%d contact_new=%d contact_lost=%d\n",
 		rs.intentChanges, rs.goalChanges, rs.stateChanges, rs.contactNew, rs.contactLost)
 	fmt.Printf("effectiveness_events: stalled_in_combat=%d detached_from_engagement=%d affected_soldiers=%d\n",
 		rs.stalledEvents, rs.detachedEvents, len(rs.affected))
+	fmt.Printf("psych_events: disobedience=%d panic_retreat=%d surrender=%d squad_break=%d squad_reform=%d\n",
+		rs.disobeyEvents, rs.panicEvents, rs.surrenderEvents, rs.cohesionBreakEvents, rs.cohesionReformEvents)
 	fmt.Printf("affected_labels: %s\n", joinSet(rs.affected))
 	if rs.windowSummary != nil {
 		fmt.Printf("window_samples=%d window_tick_range=%d..%d\n",
@@ -162,6 +205,22 @@ func printRun(rs runStats) {
 			rs.windowSummary.AvgBlueStalledInCombat,
 			rs.windowSummary.AvgBlueDetached,
 		)
+		fmt.Printf("window_psych_avg: red_disobey=%.1f red_panic=%.1f red_surrender=%.1f red_broken=%.1f red_stress=%.2f red_casualty=%.2f\n",
+			rs.windowSummary.AvgRedDisobeying,
+			rs.windowSummary.AvgRedPanicRetreat,
+			rs.windowSummary.AvgRedSurrendered,
+			rs.windowSummary.AvgRedSquadBrokenMembers,
+			rs.windowSummary.AvgRedSquadStress,
+			rs.windowSummary.AvgRedCasualtyRate,
+		)
+		fmt.Printf("window_psych_avg_blue: blue_disobey=%.1f blue_panic=%.1f blue_surrender=%.1f blue_broken=%.1f blue_stress=%.2f blue_casualty=%.2f\n",
+			rs.windowSummary.AvgBlueDisobeying,
+			rs.windowSummary.AvgBluePanicRetreat,
+			rs.windowSummary.AvgBlueSurrendered,
+			rs.windowSummary.AvgBlueSquadBrokenMembers,
+			rs.windowSummary.AvgBlueSquadStress,
+			rs.windowSummary.AvgBlueCasualtyRate,
+		)
 	}
 	fmt.Print(game.FormatGrades(rs.grades))
 	fmt.Println()
@@ -170,6 +229,11 @@ func printRun(rs runStats) {
 func printAggregate(all []runStats) {
 	totalStalled := 0
 	totalDetached := 0
+	totalDisobey := 0
+	totalPanic := 0
+	totalSurrender := 0
+	totalBreak := 0
+	totalReform := 0
 	totalIntent := 0
 	totalGoal := 0
 	totalState := 0
@@ -179,6 +243,9 @@ func printAggregate(all []runStats) {
 	contactTicks := make([]int, 0, len(all))
 	engageTicks := make([]int, 0, len(all))
 	deathTicks := make([]int, 0, len(all))
+	panicTicks := make([]int, 0, len(all))
+	surrenderTicks := make([]int, 0, len(all))
+	breakTicks := make([]int, 0, len(all))
 	affectedGlobal := map[string]struct{}{}
 
 	// Aggregate per-soldier scores across runs.
@@ -194,6 +261,11 @@ func printAggregate(all []runStats) {
 	for _, rs := range all {
 		totalStalled += rs.stalledEvents
 		totalDetached += rs.detachedEvents
+		totalDisobey += rs.disobeyEvents
+		totalPanic += rs.panicEvents
+		totalSurrender += rs.surrenderEvents
+		totalBreak += rs.cohesionBreakEvents
+		totalReform += rs.cohesionReformEvents
 		totalIntent += rs.intentChanges
 		totalGoal += rs.goalChanges
 		totalState += rs.stateChanges
@@ -207,6 +279,15 @@ func printAggregate(all []runStats) {
 		}
 		if rs.firstDeathTick >= 0 {
 			deathTicks = append(deathTicks, rs.firstDeathTick)
+		}
+		if rs.firstPanicTick >= 0 {
+			panicTicks = append(panicTicks, rs.firstPanicTick)
+		}
+		if rs.firstSurrenderTick >= 0 {
+			surrenderTicks = append(surrenderTicks, rs.firstSurrenderTick)
+		}
+		if rs.firstBreakTick >= 0 {
+			breakTicks = append(breakTicks, rs.firstBreakTick)
 		}
 		for label := range rs.affected {
 			affectedGlobal[label] = struct{}{}
@@ -237,8 +318,10 @@ func printAggregate(all []runStats) {
 		avg(totalIntent, len(all)), avg(totalGoal, len(all)), avg(totalState, len(all)), avg(totalContactNew, len(all)), avg(totalContactLost, len(all)))
 	fmt.Printf("avg_effectiveness_per_run: stalled_in_combat=%.1f detached_from_engagement=%.1f\n",
 		avg(totalStalled, len(all)), avg(totalDetached, len(all)))
-	fmt.Printf("phase_marker_avg_ticks: first_contact=%s first_engage=%s first_death=%s\n",
-		avgTickString(contactTicks), avgTickString(engageTicks), avgTickString(deathTicks))
+	fmt.Printf("avg_psych_events_per_run: disobedience=%.1f panic_retreat=%.1f surrender=%.1f squad_break=%.1f squad_reform=%.1f\n",
+		avg(totalDisobey, len(all)), avg(totalPanic, len(all)), avg(totalSurrender, len(all)), avg(totalBreak, len(all)), avg(totalReform, len(all)))
+	fmt.Printf("phase_marker_avg_ticks: first_contact=%s first_engage=%s first_death=%s first_panic=%s first_surrender=%s first_break=%s\n",
+		avgTickString(contactTicks), avgTickString(engageTicks), avgTickString(deathTicks), avgTickString(panicTicks), avgTickString(surrenderTicks), avgTickString(breakTicks))
 	fmt.Printf("unique_affected_labels=%d [%s]\n", len(affectedGlobal), joinSet(affectedGlobal))
 
 	// Per-soldier aggregate performance.

@@ -91,6 +91,24 @@ type PsychState struct {
 	Composure  float64 // 0-1, innate ability to manage fear (trait)
 }
 
+// MoraleContext captures the social and tactical conditions that shape morale.
+type MoraleContext struct {
+	UnderFire         bool
+	IncomingFireCount int
+	SuppressLevel     float64
+	VisibleThreats    int
+	VisibleAllies     int
+	IsolatedTicks     int
+	SquadCasualtyRate float64
+	SquadStress       float64
+	SquadAvgFear      float64
+	SquadFearDelta    float64
+	CloseAllyPressure float64
+	ShotMomentum      float64
+	LocalSightline    float64
+	HasContact        bool
+}
+
 // EffectiveFear returns fear modulated by composure and experience.
 // A composed veteran feels fear but acts despite it.
 func (ps *PsychState) EffectiveFear() float64 {
@@ -121,6 +139,74 @@ func (ps *PsychState) RecoverMorale(dt float64) {
 	if ps.Fear < 0.2 {
 		rate := 0.005
 		ps.Morale = math.Min(1.0, ps.Morale+rate*dt)
+	}
+}
+
+// UpdateMorale applies a richer morale model that accounts for combat pressure,
+// social context, confidence feedback, and recovery conditions.
+func (ps *PsychState) UpdateMorale(dt, discipline float64, ctx MoraleContext) {
+	if dt <= 0 {
+		return
+	}
+
+	ef := clamp01(ps.EffectiveFear())
+
+	threatLoad := 0.0
+	if ctx.UnderFire {
+		incoming := math.Min(3.0, float64(ctx.IncomingFireCount))
+		threatLoad += 0.035 + incoming*0.020
+	}
+	threatLoad += clamp01(ctx.SuppressLevel) * 0.030
+	threatLoad += ef * 0.018
+	if ctx.VisibleThreats > 0 && ctx.VisibleAllies == 0 {
+		threatLoad += 0.012
+	}
+	if ctx.VisibleThreats == 0 && ctx.IsolatedTicks > 0 {
+		threatLoad += clamp01(float64(ctx.IsolatedTicks)/180.0) * 0.010
+	}
+	if ctx.SquadFearDelta > 0.01 {
+		threatLoad += clamp01(ctx.SquadFearDelta*8.0) * 0.012
+	}
+	threatLoad += clamp01(ctx.CloseAllyPressure) * 0.008
+	if ctx.ShotMomentum < 0 {
+		threatLoad += clamp01(-ctx.ShotMomentum) * 0.006
+	}
+	threatLoad += clamp01(ctx.SquadCasualtyRate) * 0.020
+	threatLoad += clamp01(ctx.SquadStress) * 0.016
+
+	supportGain := 0.0
+	if ctx.VisibleAllies > 0 {
+		allySupport := clamp01(float64(ctx.VisibleAllies) / 4.0)
+		calmSquad := clamp01(1.0 - ctx.SquadAvgFear)
+		supportGain += allySupport * (0.010 + calmSquad*0.010)
+	}
+	if !ctx.UnderFire && ctx.SuppressLevel < 0.2 && ctx.VisibleThreats == 0 {
+		calmness := clamp01((0.35 - ps.Fear) / 0.35)
+		recoveryGain := 0.006 + calmness*0.008
+		if ctx.HasContact {
+			recoveryGain *= 0.80
+		}
+		supportGain += recoveryGain
+	}
+	if ctx.ShotMomentum > 0 {
+		supportGain += clamp01(ctx.ShotMomentum) * 0.009
+	}
+	if ctx.LocalSightline > 0.55 && !ctx.UnderFire {
+		supportGain += (ctx.LocalSightline - 0.55) * 0.008
+	}
+
+	resilience := 0.55 + discipline*0.25 + ps.Composure*0.20 + ps.Experience*0.15
+	threatLoad *= clamp01(1.35-resilience) + 0.45
+	supportGain *= 0.70 + clamp01(resilience)*0.55
+
+	delta := (supportGain - threatLoad) * dt
+	ps.Morale = clamp01(ps.Morale + delta)
+
+	if ps.Morale < 0.25 && (ctx.UnderFire || ctx.SuppressLevel > 0.4) {
+		ps.ApplyStress((0.25 - ps.Morale) * 0.020 * dt)
+	}
+	if ps.Morale > 0.75 && !ctx.UnderFire && ctx.VisibleThreats == 0 {
+		ps.RecoverFear(0.20 * dt)
 	}
 }
 

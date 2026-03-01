@@ -209,6 +209,12 @@ type Blackboard struct {
 	SquadContactX   float64
 	SquadContactY   float64
 	SquadHasContact bool // true when the squad has an active known contact
+	// SquadBroken indicates cohesion collapse (members act more autonomously).
+	SquadBroken bool
+	// SquadCasualtyRate is dead_members / total_members.
+	SquadCasualtyRate float64
+	// SquadStress is a 0..1 aggregate stress pressure for the squad.
+	SquadStress float64
 
 	// Per-member move order: leader assigns each member a spread position to
 	// advance toward during IntentEngage, rather than all converging on one point.
@@ -218,6 +224,20 @@ type Blackboard struct {
 
 	// --- Decision pacing ---
 	PanicLocked bool // true when fear is so high the soldier can't decide effectively
+	// DisobeyingOrders indicates the soldier is currently resisting squad orders.
+	DisobeyingOrders bool
+	// PanicRetreatActive indicates the soldier is in full panic retreat mode.
+	PanicRetreatActive bool
+	// Surrendered indicates the soldier has ceased fighting and movement.
+	Surrendered bool
+	// Retreat style and state (used when PanicRetreatActive=true).
+	RetreatToOwnLines     bool
+	RetreatTargetX        float64
+	RetreatTargetY        float64
+	HasRetreatTarget      bool
+	RetreatDecisionCount  int
+	RetreatRecoveries     int
+	RetreatReconsiderTick int
 
 	// --- Commitment-based decision architecture ---
 	// ShatterPressure accumulates from incoming fire, suppression spikes, etc.
@@ -936,9 +956,18 @@ func officerOrderBias(goal GoalKind, bb *Blackboard, profile *SoldierProfile) fl
 	if !bb.OfficerOrderActive || bb.OfficerOrderKind == CmdNone {
 		return 0
 	}
+	if bb.Surrendered || bb.PanicRetreatActive {
+		return 0
+	}
 
 	ef := profile.Psych.EffectiveFear()
 	compliance := (0.45 + profile.Skills.Discipline*0.55) * (1.0 - ef*0.45)
+	if bb.DisobeyingOrders {
+		compliance *= 0.30
+	}
+	if bb.SquadBroken {
+		compliance *= 0.65
+	}
 	if compliance < 0.1 {
 		compliance = 0.1
 	}
@@ -1092,6 +1121,15 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		if posture < 0 {
 			fallbackUtil += (-posture) * 0.10
 		}
+		if bb.SquadIntent == IntentWithdraw {
+			fallbackUtil += 0.22
+		}
+		if bb.SquadBroken {
+			fallbackUtil += 0.18 + bb.SquadStress*0.30
+		}
+		if bb.DisobeyingOrders {
+			fallbackUtil += 0.12
+		}
 	}
 
 	// --- Survive: panic / freeze / seek cover — last resort. ---
@@ -1154,6 +1192,12 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		// closing distance to support, rather than staying static in overwatch.
 		if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
 			moveToContactUtil += 0.35
+		}
+		if bb.SquadIntent == IntentWithdraw {
+			moveToContactUtil -= 0.35
+		}
+		if bb.SquadBroken {
+			moveToContactUtil -= 0.22
 		}
 	}
 
@@ -1253,6 +1297,9 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 			holdUtil -= 0.15
 		}
 	}
+	if bb.DisobeyingOrders {
+		holdUtil -= 0.08
+	}
 
 	// --- Formation: follow slot when advancing without contact.
 	formationUtil := 0.0
@@ -1280,13 +1327,21 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		case IntentEngage:
 			// In a firefight, formation is irrelevant — don't pull people back to slots.
 			formationUtil = 0.1
+		case IntentWithdraw:
+			formationUtil = 0.15
 		}
+	}
+	if bb.SquadBroken {
+		formationUtil *= 0.20
 	}
 
 	// --- Advance: baseline objective drive.
 	advanceUtil := 0.3
 	if bb.SquadIntent == IntentAdvance {
 		advanceUtil = 0.5
+	}
+	if bb.SquadIntent == IntentWithdraw {
+		advanceUtil *= 0.25
 	}
 	if visibleThreats > 0 {
 		advanceUtil *= 0.05
@@ -1450,6 +1505,7 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 	}
 	clumpPush := bb.CloseAllyPressure
 	orderBias := officerOrderBias(goal, bb, profile)
+	withdrawIntent := bb.SquadIntent == IntentWithdraw
 
 	switch goal {
 	case GoalEngage:
@@ -1474,6 +1530,12 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				u += posture * 0.15
 			}
 		}
+		if withdrawIntent {
+			u -= 0.20
+		}
+		if bb.DisobeyingOrders {
+			u -= 0.08
+		}
 		return u + orderBias
 
 	case GoalFallback:
@@ -1495,6 +1557,15 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		}
 		if posture < 0 {
 			u += (-posture) * 0.10
+		}
+		if withdrawIntent {
+			u += 0.22
+		}
+		if bb.SquadBroken {
+			u += 0.18 + bb.SquadStress*0.30
+		}
+		if bb.DisobeyingOrders {
+			u += 0.12
 		}
 		return u + orderBias
 
@@ -1552,6 +1623,12 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 			u += combatCohesionPush * 0.35
 		}
 		u += clumpPush * 0.25
+		if withdrawIntent {
+			u -= 0.35
+		}
+		if bb.SquadBroken {
+			u -= 0.22
+		}
 		return u
 
 	case GoalFlank:
@@ -1654,6 +1731,9 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		u -= supportPush * 0.30
 		u -= combatCohesionPush * 0.50
 		u -= clumpPush * 0.55
+		if bb.DisobeyingOrders {
+			u -= 0.08
+		}
 		return u
 
 	case GoalMaintainFormation:
@@ -1680,17 +1760,25 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				}
 			case IntentEngage:
 				u = 0.1
+			case IntentWithdraw:
+				u = 0.15
 			}
 		}
 		u += isolationPush * 0.85
 		u += combatCohesionPush * 1.10
 		u -= clumpPush * 0.25
+		if bb.SquadBroken {
+			u *= 0.20
+		}
 		return u
 
 	case GoalAdvance:
 		u := 0.3
 		if bb.SquadIntent == IntentAdvance {
 			u = 0.5
+		}
+		if withdrawIntent {
+			u *= 0.25
 		}
 		if visibleThreats > 0 {
 			u *= 0.05

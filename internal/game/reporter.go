@@ -18,6 +18,9 @@ type SquadReport struct {
 	Alive              int
 	Dead               int
 	Intent             SquadIntentKind
+	Broken             bool
+	Stress             float64
+	CasualtyRate       float64
 	OutnumberedFactor  float64
 	Posture            float64 // -1 defensive .. +1 offensive
 	MembersWithContact int
@@ -36,6 +39,10 @@ type SoldierReport struct {
 	Health                      float64
 	Fear                        float64
 	Morale                      float64
+	DisobeyingOrders            bool
+	PanicRetreatActive          bool
+	Surrendered                 bool
+	SquadBroken                 bool
 	AtCorner                    bool
 	AtWall                      bool
 	AtDoor                      bool
@@ -67,6 +74,18 @@ type SimReport struct {
 	BlueStalledInCombat    int
 	RedDetached            int
 	BlueDetached           int
+	RedDisobeying          int
+	BlueDisobeying         int
+	RedPanicRetreat        int
+	BluePanicRetreat       int
+	RedSurrendered         int
+	BlueSurrendered        int
+	RedSquadBrokenMembers  int
+	BlueSquadBrokenMembers int
+	RedAvgSquadStress      float64
+	BlueAvgSquadStress     float64
+	RedAvgCasualtyRate     float64
+	BlueAvgCasualtyRate    float64
 
 	// Squad-level summaries.
 	Squads []SquadReport
@@ -120,9 +139,12 @@ func (r *SimReporter) Collect(tick int, soldiers []*Soldier, opfor []*Soldier, s
 	// Squads.
 	for _, sq := range squads {
 		sr := SquadReport{
-			Team:    sq.Team,
-			SquadID: sq.ID,
-			Intent:  sq.Intent,
+			Team:         sq.Team,
+			SquadID:      sq.ID,
+			Intent:       sq.Intent,
+			Broken:       sq.Broken,
+			Stress:       sq.Stress,
+			CasualtyRate: sq.CasualtyRate,
 		}
 		for _, m := range sq.Members {
 			if m.state == SoldierStateDead {
@@ -147,8 +169,12 @@ func (r *SimReporter) Collect(tick int, soldiers []*Soldier, opfor []*Soldier, s
 
 		if sq.Team == TeamRed {
 			report.RedAvgPosture += sr.Posture
+			report.RedAvgSquadStress += sr.Stress
+			report.RedAvgCasualtyRate += sr.CasualtyRate
 		} else {
 			report.BlueAvgPosture += sr.Posture
+			report.BlueAvgSquadStress += sr.Stress
+			report.BlueAvgCasualtyRate += sr.CasualtyRate
 		}
 	}
 
@@ -163,9 +189,13 @@ func (r *SimReporter) Collect(tick int, soldiers []*Soldier, opfor []*Soldier, s
 	}
 	if redSquads > 0 {
 		report.RedAvgPosture /= float64(redSquads)
+		report.RedAvgSquadStress /= float64(redSquads)
+		report.RedAvgCasualtyRate /= float64(redSquads)
 	}
 	if blueSquads > 0 {
 		report.BlueAvgPosture /= float64(blueSquads)
+		report.BlueAvgSquadStress /= float64(blueSquads)
+		report.BlueAvgCasualtyRate /= float64(blueSquads)
 	}
 
 	r.history = append(r.history, report)
@@ -245,6 +275,34 @@ func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) {
 			report.BlueDetached++
 		}
 	}
+	if s.blackboard.DisobeyingOrders {
+		if team == TeamRed {
+			report.RedDisobeying++
+		} else {
+			report.BlueDisobeying++
+		}
+	}
+	if s.blackboard.PanicRetreatActive {
+		if team == TeamRed {
+			report.RedPanicRetreat++
+		} else {
+			report.BluePanicRetreat++
+		}
+	}
+	if s.blackboard.Surrendered {
+		if team == TeamRed {
+			report.RedSurrendered++
+		} else {
+			report.BlueSurrendered++
+		}
+	}
+	if s.blackboard.SquadBroken {
+		if team == TeamRed {
+			report.RedSquadBrokenMembers++
+		} else {
+			report.BlueSquadBrokenMembers++
+		}
+	}
 
 	if r.verbose {
 		report.Soldiers = append(report.Soldiers, SoldierReport{
@@ -256,6 +314,10 @@ func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) {
 			Health:                      s.health,
 			Fear:                        s.profile.Psych.EffectiveFear(),
 			Morale:                      s.profile.Psych.Morale,
+			DisobeyingOrders:            s.blackboard.DisobeyingOrders,
+			PanicRetreatActive:          s.blackboard.PanicRetreatActive,
+			Surrendered:                 s.blackboard.Surrendered,
+			SquadBroken:                 s.blackboard.SquadBroken,
 			AtCorner:                    s.blackboard.AtCorner,
 			AtWall:                      s.blackboard.AtWall,
 			AtDoor:                      s.blackboard.AtDoorway,
@@ -343,6 +405,18 @@ func (r *SimReporter) WindowSummary() *WindowReport {
 		wr.AvgBlueStalledInCombat += float64(rpt.BlueStalledInCombat)
 		wr.AvgRedDetached += float64(rpt.RedDetached)
 		wr.AvgBlueDetached += float64(rpt.BlueDetached)
+		wr.AvgRedDisobeying += float64(rpt.RedDisobeying)
+		wr.AvgBlueDisobeying += float64(rpt.BlueDisobeying)
+		wr.AvgRedPanicRetreat += float64(rpt.RedPanicRetreat)
+		wr.AvgBluePanicRetreat += float64(rpt.BluePanicRetreat)
+		wr.AvgRedSurrendered += float64(rpt.RedSurrendered)
+		wr.AvgBlueSurrendered += float64(rpt.BlueSurrendered)
+		wr.AvgRedSquadBrokenMembers += float64(rpt.RedSquadBrokenMembers)
+		wr.AvgBlueSquadBrokenMembers += float64(rpt.BlueSquadBrokenMembers)
+		wr.AvgRedSquadStress += rpt.RedAvgSquadStress
+		wr.AvgBlueSquadStress += rpt.BlueAvgSquadStress
+		wr.AvgRedCasualtyRate += rpt.RedAvgCasualtyRate
+		wr.AvgBlueCasualtyRate += rpt.BlueAvgCasualtyRate
 		wr.TotalRedDead += rpt.RedDead
 		wr.TotalBlueDead += rpt.BlueDead
 	}
@@ -374,6 +448,18 @@ func (r *SimReporter) WindowSummary() *WindowReport {
 	wr.AvgBlueStalledInCombat /= n
 	wr.AvgRedDetached /= n
 	wr.AvgBlueDetached /= n
+	wr.AvgRedDisobeying /= n
+	wr.AvgBlueDisobeying /= n
+	wr.AvgRedPanicRetreat /= n
+	wr.AvgBluePanicRetreat /= n
+	wr.AvgRedSurrendered /= n
+	wr.AvgBlueSurrendered /= n
+	wr.AvgRedSquadBrokenMembers /= n
+	wr.AvgBlueSquadBrokenMembers /= n
+	wr.AvgRedSquadStress /= n
+	wr.AvgBlueSquadStress /= n
+	wr.AvgRedCasualtyRate /= n
+	wr.AvgBlueCasualtyRate /= n
 
 	return wr
 }
@@ -388,13 +474,19 @@ type WindowReport struct {
 	BlueGoalPct map[GoalKind]float64
 
 	// Averages over the window.
-	AvgRedAlive, AvgBlueAlive                     float64
-	AvgRedInjured, AvgBlueInjured                 float64
-	AvgRedWithContact, AvgBlueWithContact         float64
-	AvgRedEnemiesSeen, AvgBlueEnemiesSeen         float64
-	AvgRedPosture, AvgBluePosture                 float64
-	AvgRedStalledInCombat, AvgBlueStalledInCombat float64
-	AvgRedDetached, AvgBlueDetached               float64
+	AvgRedAlive, AvgBlueAlive                           float64
+	AvgRedInjured, AvgBlueInjured                       float64
+	AvgRedWithContact, AvgBlueWithContact               float64
+	AvgRedEnemiesSeen, AvgBlueEnemiesSeen               float64
+	AvgRedPosture, AvgBluePosture                       float64
+	AvgRedStalledInCombat, AvgBlueStalledInCombat       float64
+	AvgRedDetached, AvgBlueDetached                     float64
+	AvgRedDisobeying, AvgBlueDisobeying                 float64
+	AvgRedPanicRetreat, AvgBluePanicRetreat             float64
+	AvgRedSurrendered, AvgBlueSurrendered               float64
+	AvgRedSquadBrokenMembers, AvgBlueSquadBrokenMembers float64
+	AvgRedSquadStress, AvgBlueSquadStress               float64
+	AvgRedCasualtyRate, AvgBlueCasualtyRate             float64
 
 	// Cumulative.
 	TotalRedDead, TotalBlueDead int
@@ -455,6 +547,25 @@ func (wr *WindowReport) Format() string {
 	fmt.Fprintf(&sb, "  Blue: stalled_in_combat=%.1f  detached_from_engagement=%.1f\n",
 		wr.AvgBlueStalledInCombat, wr.AvgBlueDetached)
 
+	// Psychological collapse / cohesion.
+	sb.WriteString("\n--- Psychological Collapse & Cohesion ---\n")
+	fmt.Fprintf(&sb, "  Red:  disobeying=%.1f panic_retreat=%.1f surrendered=%.1f squad_broken_members=%.1f stress=%.2f casualty_rate=%.2f\n",
+		wr.AvgRedDisobeying,
+		wr.AvgRedPanicRetreat,
+		wr.AvgRedSurrendered,
+		wr.AvgRedSquadBrokenMembers,
+		wr.AvgRedSquadStress,
+		wr.AvgRedCasualtyRate,
+	)
+	fmt.Fprintf(&sb, "  Blue: disobeying=%.1f panic_retreat=%.1f surrendered=%.1f squad_broken_members=%.1f stress=%.2f casualty_rate=%.2f\n",
+		wr.AvgBlueDisobeying,
+		wr.AvgBluePanicRetreat,
+		wr.AvgBlueSurrendered,
+		wr.AvgBlueSquadBrokenMembers,
+		wr.AvgBlueSquadStress,
+		wr.AvgBlueCasualtyRate,
+	)
+
 	return sb.String()
 }
 
@@ -485,10 +596,14 @@ func (r *SimReporter) FormatLatest() string {
 		rpt.RedAlive, rpt.RedDead, rpt.RedInjured,
 		rpt.RedMembersWithContact, rpt.RedTotalEnemiesSeen, rpt.RedAvgPosture)
 	fmt.Fprintf(&sb, "      stalled_in_combat=%d detached=%d\n", rpt.RedStalledInCombat, rpt.RedDetached)
+	fmt.Fprintf(&sb, "      disobeying=%d panic_retreat=%d surrendered=%d broken_members=%d stress=%.2f casualty_rate=%.2f\n",
+		rpt.RedDisobeying, rpt.RedPanicRetreat, rpt.RedSurrendered, rpt.RedSquadBrokenMembers, rpt.RedAvgSquadStress, rpt.RedAvgCasualtyRate)
 	fmt.Fprintf(&sb, "Blue: alive=%d dead=%d injured=%d  contact=%d enemies_seen=%d  posture=%+.2f\n",
 		rpt.BlueAlive, rpt.BlueDead, rpt.BlueInjured,
 		rpt.BlueMembersWithContact, rpt.BlueTotalEnemiesSeen, rpt.BlueAvgPosture)
 	fmt.Fprintf(&sb, "      stalled_in_combat=%d detached=%d\n", rpt.BlueStalledInCombat, rpt.BlueDetached)
+	fmt.Fprintf(&sb, "      disobeying=%d panic_retreat=%d surrendered=%d broken_members=%d stress=%.2f casualty_rate=%.2f\n",
+		rpt.BlueDisobeying, rpt.BluePanicRetreat, rpt.BlueSurrendered, rpt.BlueSquadBrokenMembers, rpt.BlueAvgSquadStress, rpt.BlueAvgCasualtyRate)
 
 	sb.WriteString("Red goals:  ")
 	for g, c := range rpt.RedGoals {

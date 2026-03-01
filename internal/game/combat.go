@@ -360,6 +360,11 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 			resetAimingState(s)
 			continue
 		}
+		if s.blackboard.Surrendered || s.blackboard.PanicRetreatActive {
+			resetBurstState(s)
+			resetAimingState(s)
+			continue
+		}
 
 		// Need a visible target.
 		if len(s.vision.KnownContacts) == 0 {

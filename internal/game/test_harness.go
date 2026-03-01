@@ -311,9 +311,21 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 	for _, s := range ts.Soldiers {
 		prevStates[s.id] = s.state
 	}
+	prevDisobeying := make(map[int]bool, len(ts.Soldiers))
+	prevPanicRetreat := make(map[int]bool, len(ts.Soldiers))
+	prevSurrendered := make(map[int]bool, len(ts.Soldiers))
+	for _, s := range ts.Soldiers {
+		prevDisobeying[s.id] = s.blackboard.DisobeyingOrders
+		prevPanicRetreat[s.id] = s.blackboard.PanicRetreatActive
+		prevSurrendered[s.id] = s.blackboard.Surrendered
+	}
 	prevContacts := make(map[int]int, len(ts.Soldiers))
 	for _, s := range ts.Soldiers {
 		prevContacts[s.id] = len(s.vision.KnownContacts)
+	}
+	prevSquadBroken := make(map[int]bool, len(ts.Squads))
+	for _, sq := range ts.Squads {
+		prevSquadBroken[sq.ID] = sq.Broken
 	}
 
 	// 1. SENSE
@@ -363,11 +375,29 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 			ts.SimLog.Add(tick, label, teamStr, "squad", "intent_change",
 				fmt.Sprintf("%s → %s", prevIntents[sq.ID], sq.Intent), 0)
 		}
+		if sq.Broken != prevSquadBroken[sq.ID] {
+			label := "--"
+			teamStr := "red"
+			if sq.Leader != nil {
+				label = sq.Leader.label
+				if sq.Team == TeamBlue {
+					teamStr = "blue"
+				}
+			}
+			state := "reformed"
+			if sq.Broken {
+				state = "broken"
+			}
+			ts.SimLog.Add(tick, label, teamStr, "squad", "cohesion",
+				fmt.Sprintf("%s stress=%.2f casualty_rate=%.2f", state, sq.Stress, sq.CasualtyRate), sq.Stress)
+		}
 		// Verbose: log squad spread every tick.
 		if sq.Leader != nil {
 			spread := sq.squadSpread()
 			ts.SimLog.AddVerbose(tick, sq.Leader.label, teamLabel(sq.Team),
 				"squad", "spread", fmt.Sprintf("%.1fpx", spread), spread)
+			ts.SimLog.AddVerbose(tick, sq.Leader.label, teamLabel(sq.Team),
+				"squad", "stress", fmt.Sprintf("stress=%.3f casualty_rate=%.3f broken=%t", sq.Stress, sq.CasualtyRate, sq.Broken), sq.Stress)
 		}
 	}
 
@@ -405,6 +435,34 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 		} else if nowContacts < prevContacts[s.id] {
 			ts.SimLog.Add(tick, s.label, tStr, "vision", "contact_lost",
 				fmt.Sprintf("%d → %d contacts", prevContacts[s.id], nowContacts), 0)
+		}
+
+		if s.blackboard.DisobeyingOrders != prevDisobeying[s.id] {
+			state := "obeying"
+			if s.blackboard.DisobeyingOrders {
+				state = "disobeying"
+			}
+			ts.SimLog.Add(tick, s.label, tStr, "psych", "disobedience",
+				fmt.Sprintf("%s fear=%.2f morale=%.2f stress=%.2f", state, s.profile.Psych.EffectiveFear(), s.profile.Psych.Morale, s.blackboard.SquadStress),
+				s.profile.Psych.EffectiveFear())
+		}
+		if s.blackboard.PanicRetreatActive != prevPanicRetreat[s.id] {
+			state := "panic_retreat_off"
+			if s.blackboard.PanicRetreatActive {
+				state = "panic_retreat_on"
+			}
+			ts.SimLog.Add(tick, s.label, tStr, "psych", "panic_retreat",
+				fmt.Sprintf("%s target=(%.0f,%.0f) own_lines=%t", state, s.blackboard.RetreatTargetX, s.blackboard.RetreatTargetY, s.blackboard.RetreatToOwnLines),
+				s.profile.Psych.EffectiveFear())
+		}
+		if s.blackboard.Surrendered != prevSurrendered[s.id] {
+			state := "surrender_off"
+			if s.blackboard.Surrendered {
+				state = "surrender_on"
+			}
+			ts.SimLog.Add(tick, s.label, tStr, "psych", "surrender",
+				fmt.Sprintf("%s fear=%.2f morale=%.2f", state, s.profile.Psych.EffectiveFear(), s.profile.Psych.Morale),
+				s.profile.Psych.EffectiveFear())
 		}
 
 		// Verbose: position.

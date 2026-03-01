@@ -798,3 +798,164 @@ func TestScenario_CloseEngagement(t *testing.T) {
 		t.Log("NOTE: GoalFallback did not trigger (may need more sustained fire or longer run)")
 	}
 }
+
+func TestScenario_PsychCollapseAndCohesionTelemetry(t *testing.T) {
+	ts := NewTestSim(
+		WithMapSize(1280, 720),
+		WithSeed(1337),
+		WithRedSoldier(0, 360, 330, 1200, 330),
+		WithRedSoldier(1, 360, 360, 1200, 360),
+		WithRedSoldier(2, 360, 390, 1200, 390),
+		WithRedSoldier(3, 360, 420, 1200, 420),
+		WithBlueSoldier(4, 520, 330, 50, 330),
+		WithBlueSoldier(5, 520, 360, 50, 360),
+		WithBlueSoldier(6, 520, 390, 50, 390),
+		WithBlueSoldier(7, 520, 420, 50, 420),
+		WithBlueSoldier(8, 560, 345, 50, 345),
+		WithBlueSoldier(9, 560, 405, 50, 405),
+		WithRedSquad(0, 1, 2, 3),
+		WithBlueSquad(4, 5, 6, 7, 8, 9),
+	)
+
+	reds := ts.AllByTeam(TeamRed)
+	for _, s := range reds {
+		s.profile.Skills.Discipline = 0.05
+		s.profile.Psych.Morale = 0.08
+		s.profile.Psych.Fear = 0.95
+		s.profile.Psych.Composure = 0.02
+		s.profile.Psych.Experience = 0.0
+	}
+	// Force immediate casualty pressure so cohesion collapse logic has a strong signal.
+	if len(reds) >= 4 {
+		reds[2].state = SoldierStateDead
+		reds[2].health = 0
+		reds[3].state = SoldierStateDead
+		reds[3].health = 0
+	}
+
+	ts.RunTicks(240)
+
+	hasPsych := ts.SimLog.HasEntry("psych", "disobedience", "disobeying") ||
+		ts.SimLog.HasEntry("psych", "panic_retreat", "panic_retreat_on") ||
+		ts.SimLog.HasEntry("psych", "surrender", "surrender_on")
+	if !hasPsych {
+		t.Fatal("expected psych collapse events (disobedience/panic/surrender) in log")
+	}
+	if !ts.SimLog.HasEntry("squad", "cohesion", "broken") {
+		t.Fatal("expected squad cohesion break event in log")
+	}
+
+	if wr := ts.Reporter.WindowSummary(); wr != nil {
+		if wr.AvgRedDisobeying <= 0 && wr.AvgRedPanicRetreat <= 0 && wr.AvgRedSurrendered <= 0 {
+			t.Fatal("expected psych metrics in reporter window summary")
+		}
+		if wr.AvgRedSquadBrokenMembers <= 0 {
+			t.Fatal("expected broken-squad member metric in reporter window summary")
+		}
+	}
+}
+
+func TestSoldier_PanicRetreat_ReconsidersAndCanRecover(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tick := 0
+	s := NewSoldier(99, 200, 200, TeamRed, [2]float64{50, 200}, [2]float64{600, 200}, ng, nil, nil, nil, &tick)
+
+	s.profile.Skills.Discipline = 0.95
+	s.profile.Psych.Composure = 0.95
+	s.profile.Psych.Morale = 0.95
+	s.profile.Psych.Fear = 0.05
+	s.blackboard.VisibleAllyCount = 3
+	s.blackboard.PanicRetreatActive = true
+	s.blackboard.RetreatReconsiderTick = 0
+
+	for i := 0; i < 360; i++ {
+		tick++
+		s.updatePsychCrisis(tick)
+		if !s.blackboard.PanicRetreatActive {
+			break
+		}
+	}
+
+	if s.blackboard.RetreatDecisionCount == 0 {
+		t.Fatal("expected at least one retreat reconsideration decision")
+	}
+	if s.blackboard.PanicRetreatActive {
+		t.Fatal("expected high-discipline calm soldier to eventually recover from panic retreat")
+	}
+	if s.blackboard.RetreatRecoveries == 0 {
+		t.Fatal("expected retreat recovery counter to increment")
+	}
+}
+
+func TestSquad_LeaderObservedPhaseSteer_PinnedForcesFixFire(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tick := 0
+	l := NewSoldier(0, 120, 220, TeamRed, [2]float64{120, 220}, [2]float64{520, 220}, ng, nil, nil, nil, &tick)
+	m1 := NewSoldier(1, 90, 220, TeamRed, [2]float64{90, 220}, [2]float64{520, 220}, ng, nil, nil, nil, &tick)
+	m2 := NewSoldier(2, 90, 250, TeamRed, [2]float64{90, 250}, [2]float64{520, 250}, ng, nil, nil, nil, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{l, m1, m2})
+	sq.Phase = SquadPhaseApproach
+
+	l.blackboard.IncomingFireCount = 3
+	l.blackboard.SuppressLevel = 0.65
+
+	next, ok := sq.leaderObservedPhaseSteer(true, 220, 2)
+	if !ok {
+		t.Fatal("expected leader-observed steering trigger when leader is pinned")
+	}
+	if next != SquadPhaseFixFire {
+		t.Fatalf("expected pinned leader to force fix_fire, got %s", next)
+	}
+}
+
+func TestSoldier_MoveToClaimedBuilding_UnderFireOutsideBuildsPath(t *testing.T) {
+	const mapW, mapH = 640, 480
+	footprint := rect{x: 220, y: 180, w: 96, h: 96}
+	windows := []rect{{x: 220 + 2*cellSize, y: 180 - cellSize, w: cellSize, h: cellSize}}
+	tm := NewTacticalMap(mapW, mapH, nil, windows, []rect{footprint})
+	ng := NewNavGrid(mapW, mapH, nil, soldierRadius, nil, nil)
+	tick := 0
+	s := NewSoldier(7, 120, 220, TeamRed, [2]float64{120, 220}, [2]float64{560, 220}, ng, nil, nil, nil, &tick, tm)
+	s.buildingFootprints = []rect{footprint}
+
+	s.blackboard.ClaimedBuildingIdx = 0
+	s.blackboard.ClaimedBuildingX = float64(footprint.x) + float64(footprint.w)/2
+	s.blackboard.ClaimedBuildingY = float64(footprint.y) + float64(footprint.h)/2
+	s.blackboard.IncomingFireCount = 2
+	s.blackboard.SuppressLevel = 0.45
+	s.blackboard.SquadHasContact = true
+
+	if !s.shouldSeekClaimedBuilding(GoalMoveToContact) {
+		t.Fatal("expected exposed soldier under fire to seek claimed building")
+	}
+	if !s.moveToClaimedBuilding(1.0) {
+		t.Fatal("expected moveToClaimedBuilding to produce movement/path")
+	}
+	if len(s.path) == 0 {
+		t.Fatal("expected non-empty path into claimed building")
+	}
+}
+
+func TestTacticalMap_ScanBestNearby_PrioritizesWindowFacingDirection(t *testing.T) {
+	const mapW, mapH = 320, 320
+	fp := rect{x: 160, y: 160, w: 32, h: 32}
+	// North and east windows around the footprint.
+	windows := []rect{
+		{x: 160, y: 144, w: cellSize, h: cellSize},
+		{x: 192, y: 160, w: cellSize, h: cellSize},
+	}
+	tm := NewTacticalMap(mapW, mapH, nil, windows, []rect{fp})
+
+	startX := float64(fp.x) + float64(fp.w)/2
+	startY := float64(fp.y) + float64(fp.h)/2
+
+	nX, nY, _ := tm.ScanBestNearby(startX, startY, 8, -math.Pi/2, true, 0, []rect{fp})
+	eX, eY, _ := tm.ScanBestNearby(startX, startY, 8, 0, true, 0, []rect{fp})
+
+	if math.Abs(nX-eX) < 1e-6 && math.Abs(nY-eY) < 1e-6 {
+		t.Fatal("expected different best cells for north-vs-east threat bearings near windows")
+	}
+	if !(nY <= eY || eX >= nX) {
+		t.Fatalf("expected directional window bias in scan results, north=(%.1f,%.1f) east=(%.1f,%.1f)", nX, nY, eX, eY)
+	}
+}

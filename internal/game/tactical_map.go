@@ -229,6 +229,30 @@ func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing f
 	cx, cy := WorldToCell(wx, wy)
 	bestScore := -999.0
 	bestX, bestY := wx, wy
+	windowFacingBonus := func(nx, ny int, desiredBearing float64) float64 {
+		idx := ny*tm.cols + nx
+		if tm.traits[idx]&CellTraitWindowAdj == 0 {
+			return 0
+		}
+		best := 0.0
+		for _, off := range [][2]int{{0, -1}, {0, 1}, {-1, 0}, {1, 0}} {
+			wx2, wy2 := nx+off[0], ny+off[1]
+			if wx2 < 0 || wy2 < 0 || wx2 >= tm.cols || wy2 >= tm.rows {
+				continue
+			}
+			wIdx := wy2*tm.cols + wx2
+			if tm.traits[wIdx]&CellTraitWindow == 0 {
+				continue
+			}
+			openAng := math.Atan2(float64(off[1]), float64(off[0]))
+			diff := math.Abs(normalizeAngle(openAng - desiredBearing))
+			align := clamp01(1.0 - diff/(math.Pi/2))
+			if align > best {
+				best = align
+			}
+		}
+		return best
+	}
 
 	for dy := -radius; dy <= radius; dy++ {
 		for dx := -radius; dx <= radius; dx++ {
@@ -263,6 +287,7 @@ func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing f
 				if perpDiff < math.Pi/4 {
 					score += 0.15 * (1.0 - perpDiff/(math.Pi/4))
 				}
+				score += windowFacingBonus(nx, ny, enemyBearing) * 0.55
 			}
 
 			// Bonus for cells inside the claimed building.

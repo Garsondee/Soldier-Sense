@@ -53,6 +53,8 @@ const (
 
 	// Pinned crawl movement is intentionally very slow.
 	pinnedCrawlSpeedMul = 0.35
+
+	retreatReconsiderBaseTicks = 45
 )
 
 // FireMode represents the soldier's current weapon engagement mode.
@@ -75,6 +77,273 @@ func (fm FireMode) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+func (s *Soldier) psychRoll(salt int) float64 {
+	seed := float64((s.tickVal() + 1) * (s.id + 17 + salt*7))
+	return clamp01(math.Abs(math.Sin(seed * 0.0131)))
+}
+
+func (s *Soldier) psychPressure() float64 {
+	bb := &s.blackboard
+	ef := s.profile.Psych.EffectiveFear()
+	pressure := ef*0.45 +
+		(1.0-s.profile.Psych.Morale)*0.35 +
+		bb.SuppressLevel*0.25 +
+		clamp01(float64(bb.IncomingFireCount)/3.0)*0.12 +
+		bb.SquadCasualtyRate*0.22 +
+		bb.SquadStress*0.18
+	if bb.SquadBroken {
+		pressure += 0.08
+	}
+	if bb.VisibleThreatCount() > 0 {
+		pressure += 0.05
+	}
+	if bb.VisibleAllyCount == 0 {
+		pressure += 0.05
+	}
+	return clamp01(pressure)
+}
+
+func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) {
+	bb := &s.blackboard
+	targetX, targetY := s.startTarget[0], s.startTarget[1]
+	if retreatToOwnLines {
+		jitter := (s.psychRoll(bb.RetreatDecisionCount+3) - 0.5) * float64(cellSize) * 6.0
+		targetY += jitter
+	} else {
+		var cX, cY float64
+		hasContact := false
+		if bb.VisibleThreatCount() > 0 {
+			best := math.MaxFloat64
+			for _, t := range bb.Threats {
+				if !t.IsVisible {
+					continue
+				}
+				d := math.Hypot(t.X-s.x, t.Y-s.y)
+				if d < best {
+					best = d
+					cX, cY = t.X, t.Y
+					hasContact = true
+				}
+			}
+		} else if bb.SquadHasContact {
+			cX, cY = bb.SquadContactX, bb.SquadContactY
+			hasContact = true
+		} else if bb.HeardGunfire {
+			cX, cY = bb.HeardGunfireX, bb.HeardGunfireY
+			hasContact = true
+		}
+		retreatDist := 170.0 + s.psychRoll(bb.RetreatDecisionCount+11)*130.0
+		if hasContact {
+			dx := s.x - cX
+			dy := s.y - cY
+			d := math.Hypot(dx, dy)
+			if d < 1e-6 {
+				dx, dy, d = -1, 0, 1
+			}
+			bend := (s.psychRoll(bb.RetreatDecisionCount+19) - 0.5) * 0.9
+			base := math.Atan2(dy, dx) + bend
+			targetX = s.x + math.Cos(base)*retreatDist
+			targetY = s.y + math.Sin(base)*retreatDist
+		} else {
+			base := s.vision.Heading + math.Pi + (s.psychRoll(bb.RetreatDecisionCount+23)-0.5)*1.2
+			targetX = s.x + math.Cos(base)*retreatDist
+			targetY = s.y + math.Sin(base)*retreatDist
+		}
+	}
+
+	if s.navGrid != nil {
+		w := float64(s.navGrid.cols * cellSize)
+		h := float64(s.navGrid.rows * cellSize)
+		if targetX < 16 {
+			targetX = 16
+		}
+		if targetX > w-16 {
+			targetX = w - 16
+		}
+		if targetY < 16 {
+			targetY = 16
+		}
+		if targetY > h-16 {
+			targetY = h - 16
+		}
+	}
+
+	bb.RetreatTargetX = targetX
+	bb.RetreatTargetY = targetY
+	bb.HasRetreatTarget = true
+	s.path = nil
+	s.pathIndex = 0
+}
+
+func (s *Soldier) updatePsychCrisis(tick int) {
+	bb := &s.blackboard
+	pressure := s.psychPressure()
+
+	if bb.Surrendered {
+		if bb.RetreatReconsiderTick == 0 {
+			bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks
+		}
+		if tick >= bb.RetreatReconsiderTick {
+			recoverChance := clamp01(
+				s.profile.Skills.Discipline*0.20 +
+					s.profile.Psych.Composure*0.30 +
+					s.profile.Psych.Morale*0.35 +
+					(1.0-pressure)*0.35 +
+					clamp01(float64(bb.VisibleAllyCount)/3.0)*0.20,
+			)
+			if s.psychRoll(bb.RetreatDecisionCount+31) < recoverChance*0.40 {
+				bb.Surrendered = false
+				bb.DisobeyingOrders = false
+				bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks
+				s.think("coming back to senses — rejoining fight")
+			} else {
+				bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks + int(pressure*30)
+			}
+		}
+		return
+	}
+
+	if bb.PanicRetreatActive {
+		if bb.RetreatReconsiderTick == 0 {
+			bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks
+		}
+		if tick < bb.RetreatReconsiderTick {
+			return
+		}
+
+		bb.RetreatDecisionCount++
+		recoverChance := clamp01(
+			s.profile.Skills.Discipline*0.28 +
+				s.profile.Psych.Composure*0.24 +
+				s.profile.Psych.Morale*0.22 +
+				(1.0-pressure)*0.32 +
+				clamp01(float64(bb.VisibleAllyCount)/3.0)*0.18,
+		)
+		if s.psychRoll(bb.RetreatDecisionCount+37) < recoverChance*0.50 {
+			bb.PanicRetreatActive = false
+			bb.DisobeyingOrders = false
+			bb.HasRetreatTarget = false
+			bb.RetreatRecoveries++
+			s.path = nil
+			s.pathIndex = 0
+			s.think("panic easing — stopping retreat")
+			bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks
+			return
+		}
+
+		surrenderChance := clamp01(
+			pressure*0.55 +
+				(1.0-clamp01(s.health/soldierMaxHP))*0.25 +
+				bb.SquadCasualtyRate*0.35,
+		)
+		if s.psychRoll(bb.RetreatDecisionCount+41) < surrenderChance*0.28 {
+			bb.PanicRetreatActive = false
+			bb.Surrendered = true
+			bb.HasRetreatTarget = false
+			s.path = nil
+			s.pathIndex = 0
+			s.think("breaking — surrendering")
+			bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks + 30
+			return
+		}
+
+		flipChance := clamp01(0.20 + pressure*0.30)
+		if s.psychRoll(bb.RetreatDecisionCount+43) < flipChance {
+			bb.RetreatToOwnLines = !bb.RetreatToOwnLines
+			bb.HasRetreatTarget = false
+			s.think("panic retreat wavering — changing direction")
+		}
+
+		bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks + int(pressure*40)
+		return
+	}
+
+	disobeyDrive := pressure - (s.profile.Skills.Discipline*0.42 + s.profile.Psych.Morale*0.22 + s.profile.Psych.Composure*0.18)
+	if bb.DisobeyingOrders {
+		if disobeyDrive < 0.10 {
+			bb.DisobeyingOrders = false
+		}
+	} else if disobeyDrive > 0.23 {
+		bb.DisobeyingOrders = true
+	}
+
+	panicDrive := pressure + bb.SquadStress*0.15 + bb.SquadCasualtyRate*0.20 - s.profile.Skills.Discipline*0.20
+	if panicDrive > 0.90 || (panicDrive > 0.82 && s.psychRoll(53) < panicDrive-0.75) {
+		retreatToOwn := s.psychRoll(59) < (0.45 + s.profile.Skills.Discipline*0.35)
+		bb.PanicRetreatActive = true
+		bb.DisobeyingOrders = true
+		bb.RetreatToOwnLines = retreatToOwn
+		bb.HasRetreatTarget = false
+		bb.RetreatDecisionCount = 0
+		bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks + int(pressure*20)
+		s.path = nil
+		s.pathIndex = 0
+		s.think("full panic retreat")
+	}
+
+	surrenderNow := pressure > 0.98 && (s.health < soldierMaxHP*0.45 || bb.SquadCasualtyRate > 0.55)
+	if surrenderNow {
+		bb.Surrendered = true
+		bb.PanicRetreatActive = false
+		bb.DisobeyingOrders = true
+		bb.HasRetreatTarget = false
+		s.path = nil
+		s.pathIndex = 0
+		bb.RetreatReconsiderTick = tick + retreatReconsiderBaseTicks + 20
+		s.think("overwhelmed — surrendering")
+	}
+}
+
+func (s *Soldier) executeSurrender(dt float64) {
+	s.state = SoldierStateCover
+	s.path = nil
+	s.pathIndex = 0
+	if s.profile.Stance != StanceProne {
+		s.profile.Stance = StanceProne
+	}
+	s.profile.Physical.AccumulateFatigue(0, dt)
+}
+
+func (s *Soldier) movePanicRetreat(dt float64) {
+	bb := &s.blackboard
+	if !bb.HasRetreatTarget || math.Hypot(bb.RetreatTargetX-s.x, bb.RetreatTargetY-s.y) < float64(cellSize)*1.5 {
+		s.chooseRetreatTarget(bb.RetreatToOwnLines)
+	}
+	if !bb.HasRetreatTarget {
+		s.state = SoldierStateIdle
+		return
+	}
+
+	drift := math.Hypot(bb.RetreatTargetX-s.slotTargetX, bb.RetreatTargetY-s.slotTargetY)
+	if s.path == nil || s.pathIndex >= len(s.path) || drift > contactRepathDist {
+		newPath := s.navGrid.FindPath(s.x, s.y, bb.RetreatTargetX, bb.RetreatTargetY)
+		if newPath != nil {
+			s.path = newPath
+			s.pathIndex = 0
+			s.slotTargetX = bb.RetreatTargetX
+			s.slotTargetY = bb.RetreatTargetY
+		} else {
+			bb.HasRetreatTarget = false
+		}
+	}
+
+	if s.path == nil || s.pathIndex >= len(s.path) {
+		s.state = SoldierStateIdle
+		s.profile.Physical.AccumulateFatigue(0, dt)
+		return
+	}
+
+	s.moveAlongPath(dt)
+}
+
+func (s *Soldier) executePanicRetreat(dt float64) {
+	if s.profile.Stance != StanceStanding {
+		s.profile.Stance = StanceStanding
+	}
+	s.state = SoldierStateMoving
+	s.movePanicRetreat(dt)
 }
 
 func isCombatMobilityGoal(g GoalKind) bool {
@@ -476,11 +745,25 @@ func (s *Soldier) Update() {
 		_ = s.decisionInterval()
 	}
 
+	bb := &s.blackboard
 	dt := 1.0
 	s.profile.Psych.RecoverFear(dt)
-	s.profile.Psych.RecoverMorale(dt)
-
-	bb := &s.blackboard
+	s.profile.Psych.UpdateMorale(dt, s.profile.Skills.Discipline, MoraleContext{
+		UnderFire:         bb.IncomingFireCount > 0 || bb.IsSuppressed(),
+		IncomingFireCount: bb.IncomingFireCount,
+		SuppressLevel:     bb.SuppressLevel,
+		VisibleThreats:    bb.VisibleThreatCount(),
+		VisibleAllies:     bb.VisibleAllyCount,
+		IsolatedTicks:     bb.IsolatedTicks,
+		SquadCasualtyRate: bb.SquadCasualtyRate,
+		SquadStress:       bb.SquadStress,
+		SquadAvgFear:      bb.SquadAvgFear,
+		SquadFearDelta:    bb.SquadFearDelta,
+		CloseAllyPressure: bb.CloseAllyPressure,
+		ShotMomentum:      bb.Internal.ShotMomentum,
+		LocalSightline:    bb.LocalSightlineScore,
+		HasContact:        bb.SquadHasContact || bb.HeardGunfire || bb.IsActivated(),
+	})
 
 	// --- Fuzzy aim spread: grows when moving, decays when still ---
 	baseSpread := aimSpreadBase * (1.0 + (1.0 - s.profile.Skills.Marksmanship))
@@ -532,6 +815,20 @@ func (s *Soldier) Update() {
 	tick := s.tickVal()
 	bb.UpdateThreats(s.vision.KnownContacts, tick)
 	bb.RefreshInternalGoals(&s.profile, s.x, s.y)
+	s.updatePsychCrisis(tick)
+	if bb.Surrendered {
+		s.executeSurrender(dt)
+		return
+	}
+	if bb.PanicRetreatActive {
+		if bb.CurrentGoal != GoalFallback {
+			s.think(fmt.Sprintf("goal: %s → %s (panic retreat)", bb.CurrentGoal, GoalFallback))
+			bb.CurrentGoal = GoalFallback
+			s.prevGoal = GoalFallback
+		}
+		s.executePanicRetreat(dt)
+		return
+	}
 
 	// Incoming fire adds shatter pressure proportional to volume.
 	// Passive goals receive more pressure (easy to interrupt).
@@ -599,8 +896,23 @@ func (s *Soldier) Update() {
 			}
 
 			// Position scan: find best nearby tile considering enemy direction and claimed building.
-			hasEnemy := bb.SquadHasContact
+			hasEnemy := bb.SquadHasContact || bb.VisibleThreatCount() > 0 || bb.HeardGunfire
 			bearing := bb.SquadEnemyBearing
+			if bb.VisibleThreatCount() > 0 {
+				bestThreat := math.MaxFloat64
+				for _, t := range bb.Threats {
+					if !t.IsVisible {
+						continue
+					}
+					d := math.Hypot(t.X-s.x, t.Y-s.y)
+					if d < bestThreat {
+						bestThreat = d
+						bearing = math.Atan2(t.Y-s.y, t.X-s.x)
+					}
+				}
+			} else if bb.HeardGunfire {
+				bearing = math.Atan2(bb.HeardGunfireY-s.y, bb.HeardGunfireX-s.x)
+			}
 			claimedIdx := bb.ClaimedBuildingIdx
 			var footprints []rect
 			// footprints are passed via the game — store reference on soldier.
@@ -762,6 +1074,94 @@ func (s *Soldier) canSuppressedFallbackRun() bool {
 	return s.profile.Psych.Morale >= 0.65 && ef < 0.55
 }
 
+func (s *Soldier) shouldSeekClaimedBuilding(goal GoalKind) bool {
+	bb := &s.blackboard
+	if bb.ClaimedBuildingIdx < 0 || bb.AtInterior {
+		return false
+	}
+	if s.tacticalMap == nil || len(s.buildingFootprints) == 0 {
+		return false
+	}
+	if bb.ClaimedBuildingIdx >= len(s.buildingFootprints) {
+		return false
+	}
+
+	underFire := bb.IncomingFireCount > 0 || bb.IsSuppressed()
+	if !underFire && bb.VisibleThreatCount() == 0 {
+		return false
+	}
+
+	if goal == GoalSurvive {
+		return true
+	}
+
+	dist := math.Hypot(bb.ClaimedBuildingX-s.x, bb.ClaimedBuildingY-s.y)
+	if dist > 360 {
+		return false
+	}
+	speed := math.Max(0.35, s.profile.EffectiveSpeed(soldierSpeed))
+	etaTicks := dist / speed
+	if underFire {
+		return etaTicks <= 260
+	}
+	return bb.VisibleThreatCount() > 0 && etaTicks <= 180
+}
+
+func (s *Soldier) moveToClaimedBuilding(dt float64) bool {
+	bb := &s.blackboard
+	if bb.ClaimedBuildingIdx < 0 || bb.ClaimedBuildingIdx >= len(s.buildingFootprints) {
+		return false
+	}
+
+	bearing := bb.SquadEnemyBearing
+	hasEnemy := bb.SquadHasContact || bb.VisibleThreatCount() > 0 || bb.HeardGunfire
+	if bb.VisibleThreatCount() > 0 {
+		best := math.MaxFloat64
+		for _, t := range bb.Threats {
+			if !t.IsVisible {
+				continue
+			}
+			d := math.Hypot(t.X-s.x, t.Y-s.y)
+			if d < best {
+				best = d
+				bearing = math.Atan2(t.Y-s.y, t.X-s.x)
+			}
+		}
+	} else if bb.HeardGunfire {
+		bearing = math.Atan2(bb.HeardGunfireY-s.y, bb.HeardGunfireX-s.x)
+	}
+
+	targetX, targetY := bb.ClaimedBuildingX, bb.ClaimedBuildingY
+	if s.tacticalMap != nil {
+		bx, by, bscore := s.tacticalMap.ScanBestNearby(
+			s.x, s.y, 14, bearing, hasEnemy,
+			bb.ClaimedBuildingIdx, s.buildingFootprints,
+		)
+		if bscore > -0.30 {
+			targetX, targetY = bx, by
+		}
+	}
+
+	drift := math.Hypot(targetX-s.slotTargetX, targetY-s.slotTargetY)
+	if s.path == nil || s.pathIndex >= len(s.path) || drift > contactRepathDist {
+		newPath := s.navGrid.FindPath(s.x, s.y, targetX, targetY)
+		if newPath == nil {
+			return false
+		}
+		s.path = newPath
+		s.pathIndex = 0
+		s.slotTargetX = targetX
+		s.slotTargetY = targetY
+	}
+
+	if s.profile.Stance != StanceCrouching {
+		s.profile.Stance = StanceCrouching
+	}
+	s.state = SoldierStateMoving
+	s.moveAlongPath(dt)
+	return true
+}
+
 func (s *Soldier) pinnedFreezeThisTick() bool {
 	bb := &s.blackboard
 	ef := s.profile.Psych.EffectiveFear()
@@ -779,6 +1179,14 @@ func (s *Soldier) pinnedFreezeThisTick() bool {
 // executeGoal runs the behaviour for the soldier's current goal.
 func (s *Soldier) executeGoal(dt float64) {
 	bb := &s.blackboard
+	if bb.Surrendered {
+		s.executeSurrender(dt)
+		return
+	}
+	if bb.PanicRetreatActive {
+		s.executePanicRetreat(dt)
+		return
+	}
 
 	// Malingerer override: soldier has been idle too long while contact is known.
 	// Force them toward the squad contact or combat memory position.
@@ -838,6 +1246,12 @@ func (s *Soldier) executeGoal(dt float64) {
 	}
 
 	goal := s.blackboard.CurrentGoal
+	if s.shouldSeekClaimedBuilding(goal) {
+		if s.moveToClaimedBuilding(dt) {
+			s.think("under fire outside — pushing into claimed building")
+			return
+		}
+	}
 	if isCombatMobilityGoal(goal) {
 		terminal := s.path == nil || s.pathIndex >= len(s.path)
 		combatContext := bb.SquadHasContact || bb.VisibleThreatCount() > 0 || bb.IsActivated()
@@ -986,6 +1400,10 @@ func (s *Soldier) executeGoal(dt float64) {
 		s.moveCombatDash(dt)
 
 	case GoalFallback:
+		if bb.PanicRetreatActive {
+			s.executePanicRetreat(dt)
+			break
+		}
 		if forcedCrawl {
 			if s.profile.Stance != StanceProne {
 				s.profile.Stance = StanceProne

@@ -141,6 +141,102 @@ func TestRecoverMorale_NoRiseUnderFear(t *testing.T) {
 	}
 }
 
+func TestUpdateMorale_DropsUnderFireAndIsolation(t *testing.T) {
+	ps := PsychState{Fear: 0.5, Morale: 0.6, Composure: 0.2, Experience: 0.1}
+	before := ps.Morale
+
+	ps.UpdateMorale(1.0, 0.2, MoraleContext{
+		UnderFire:         true,
+		IncomingFireCount: 3,
+		SuppressLevel:     0.8,
+		VisibleThreats:    2,
+		VisibleAllies:     0,
+		IsolatedTicks:     120,
+		SquadAvgFear:      0.6,
+		SquadFearDelta:    0.08,
+		CloseAllyPressure: 0.4,
+		ShotMomentum:      -0.5,
+		LocalSightline:    0.2,
+		HasContact:        true,
+	})
+
+	if ps.Morale >= before {
+		t.Fatalf("morale should drop under heavy fire pressure and isolation: before=%.4f after=%.4f", before, ps.Morale)
+	}
+}
+
+func TestUpdateMorale_RisesWhenSupportedAndCalm(t *testing.T) {
+	ps := PsychState{Fear: 0.1, Morale: 0.4, Composure: 0.7, Experience: 0.6}
+	before := ps.Morale
+
+	ps.UpdateMorale(1.0, 0.8, MoraleContext{
+		UnderFire:         false,
+		IncomingFireCount: 0,
+		SuppressLevel:     0.0,
+		VisibleThreats:    0,
+		VisibleAllies:     3,
+		IsolatedTicks:     0,
+		SquadAvgFear:      0.2,
+		SquadFearDelta:    -0.02,
+		CloseAllyPressure: 0.1,
+		ShotMomentum:      0.6,
+		LocalSightline:    0.8,
+		HasContact:        false,
+	})
+
+	if ps.Morale <= before {
+		t.Fatalf("morale should rise in calm supported conditions: before=%.4f after=%.4f", before, ps.Morale)
+	}
+}
+
+func TestUpdateMorale_LowMoraleUnderFireAddsStress(t *testing.T) {
+	ps := PsychState{Fear: 0.2, Morale: 0.1, Composure: 0.1, Experience: 0.1}
+	beforeFear := ps.Fear
+
+	ps.UpdateMorale(1.0, 0.1, MoraleContext{
+		UnderFire:         true,
+		IncomingFireCount: 2,
+		SuppressLevel:     0.6,
+		VisibleThreats:    1,
+		VisibleAllies:     0,
+		IsolatedTicks:     80,
+		SquadAvgFear:      0.7,
+		SquadFearDelta:    0.03,
+		CloseAllyPressure: 0.0,
+		ShotMomentum:      -0.4,
+		LocalSightline:    0.3,
+		HasContact:        true,
+	})
+
+	if ps.Fear <= beforeFear {
+		t.Fatalf("fear should increase when morale is critically low under fire: before=%.4f after=%.4f", beforeFear, ps.Fear)
+	}
+}
+
+func TestUpdateMorale_HighMoraleCalmRecoversFear(t *testing.T) {
+	ps := PsychState{Fear: 0.4, Morale: 0.9, Composure: 0.5, Experience: 0.5}
+	beforeFear := ps.Fear
+
+	ps.UpdateMorale(1.0, 0.7, MoraleContext{
+		UnderFire:         false,
+		IncomingFireCount: 0,
+		SuppressLevel:     0.0,
+		VisibleThreats:    0,
+		VisibleAllies:     2,
+		IsolatedTicks:     0,
+		SquadAvgFear:      0.2,
+		SquadFearDelta:    -0.01,
+		CloseAllyPressure: 0.1,
+		ShotMomentum:      0.2,
+		LocalSightline:    0.7,
+		HasContact:        false,
+	})
+
+	if ps.Fear >= beforeFear {
+		t.Fatalf("fear should recover when morale is high in calm conditions: before=%.4f after=%.4f", beforeFear, ps.Fear)
+	}
+}
+
 func TestWillComply_HighDiscipline(t *testing.T) {
 	ps := PsychState{Fear: 0.0, Morale: 0.7}
 	if !ps.WillComply(0.8, 0.0) {

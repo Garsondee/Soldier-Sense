@@ -65,6 +65,12 @@ type Squad struct {
 	boundCycleTick int
 	// boundCycleActive: true when buddy bounding is in effect (contact + MoveToContact).
 	boundCycleActive bool
+
+	// Cohesion collapse telemetry.
+	CasualtyRate float64
+	Stress       float64
+	Broken       bool
+	breakLockEnd int
 }
 
 const stalledOrderCooldownTicks = 90
@@ -208,7 +214,57 @@ const (
 	phaseStallTicks      = 240
 	phaseProgressEpsilon = 12.0
 	phaseRecoveryTicks   = 120
+
+	squadBreakPressureThreshold = 0.82
+	squadBreakRecoverThreshold  = 0.42
+	squadBreakLockTicks         = 180
+
+	phaseEventSteerMinHoldTicks = 36
 )
+
+func (sq *Squad) leaderObservedPhaseSteer(hasContact bool, closestDist float64, anyVisibleThreats int) (SquadPhase, bool) {
+	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
+		return sq.Phase, false
+	}
+	bb := &sq.Leader.blackboard
+
+	leaderPinned := bb.IncomingFireCount >= 2 || bb.SuppressLevel > 0.58
+	leaderCloseThreat := bb.VisibleThreatCount() > 0 && closestDist > 0 && closestDist < engageEnterDist*0.85
+	leaderBlindInFight := bb.SquadHasContact && bb.VisibleThreatCount() == 0 && bb.HeardGunfire && bb.LocalSightlineScore < 0.32
+	leaderOpportunity := hasContact && anyVisibleThreats > 0 && closestDist > 0 &&
+		closestDist < engageEnterDist*0.90 && bb.IncomingFireCount == 0 && bb.SuppressLevel < 0.25 && bb.LocalSightlineScore > 0.34
+
+	switch {
+	case leaderPinned:
+		if hasContact {
+			return SquadPhaseFixFire, true
+		}
+		return SquadPhaseConsolidate, true
+	case leaderBlindInFight:
+		return SquadPhaseFixFire, true
+	case leaderOpportunity:
+		if closestDist < engageEnterDist*0.70 {
+			return SquadPhaseAssault, true
+		}
+		return SquadPhaseBound, true
+	case leaderCloseThreat && sq.Phase == SquadPhaseApproach:
+		return SquadPhaseFixFire, true
+	default:
+		return sq.Phase, false
+	}
+}
+
+func (sq *Squad) applyLeaderPhaseSteering(tick int, hasContact bool, closestDist float64, anyVisibleThreats int) {
+	next, ok := sq.leaderObservedPhaseSteer(hasContact, closestDist, anyVisibleThreats)
+	if !ok || next == sq.Phase {
+		return
+	}
+	elapsed := tick - sq.phaseEnteredTick
+	if elapsed < phaseEventSteerMinHoldTicks && next != SquadPhaseConsolidate {
+		return
+	}
+	sq.advancePhase(tick, next)
+}
 
 func (sq *Squad) phaseProgressMetric(hasContact bool, contactX, contactY float64) float64 {
 	if sq.Leader == nil {
@@ -537,11 +593,13 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 
 	aliveCount := 0
 	terminalStalledCount := 0
+	fearSum := 0.0
 	for _, m := range sq.Members {
 		if m.state == SoldierStateDead {
 			continue
 		}
 		aliveCount++
+		fearSum += m.profile.Psych.EffectiveFear()
 		if m.blackboard.CurrentGoal != GoalMoveToContact && m.blackboard.CurrentGoal != GoalEngage {
 			continue
 		}
@@ -560,7 +618,44 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	if sq.Leader != nil && sq.Leader.currentTick != nil {
 		tick = *sq.Leader.currentTick
 	}
+
+	avgFear := 0.0
+	if aliveCount > 0 {
+		avgFear = fearSum / float64(aliveCount)
+	}
+	casualties := sq.CasualtyCount()
+	casualtyRate := 0.0
+	if len(sq.Members) > 0 {
+		casualtyRate = float64(casualties) / float64(len(sq.Members))
+	}
+	stallPressure := 0.0
+	if aliveCount > 0 {
+		stallPressure = clamp01(float64(terminalStalledCount) / float64(aliveCount))
+	}
+	spreadPressure := 0.0
+	if spread > 160 {
+		spreadPressure = clamp01((spread - 160) / 220.0)
+	}
+	sq.CasualtyRate = casualtyRate
+	sq.Stress = clamp01(avgFear*0.55 + casualtyRate*0.75 + stallPressure*0.20)
+	breakPressure := clamp01(sq.Stress + spreadPressure*0.35)
+	if sq.Broken {
+		if breakPressure <= squadBreakRecoverThreshold && tick >= sq.breakLockEnd {
+			sq.Broken = false
+			if sq.Leader != nil {
+				sq.Leader.think("squad reforming — regaining cohesion")
+			}
+		}
+	} else if breakPressure >= squadBreakPressureThreshold || (casualtyRate > 0.45 && avgFear > 0.55) {
+		sq.Broken = true
+		sq.breakLockEnd = tick + squadBreakLockTicks
+		if sq.Leader != nil {
+			sq.Leader.think("squad cohesion collapsing — break apart")
+		}
+	}
+
 	phaseStalled := sq.updatePhaseWithGuards(tick, hasContact, anyVisibleThreats, closestDist, spread, contactX, contactY, terminalStalledCount, aliveCount)
+	sq.applyLeaderPhaseSteering(tick, hasContact, closestDist, anyVisibleThreats)
 
 	// --- Intel map queries (augment blackboard counts with spatial data) ---
 	// dangerAtPos: how much danger heat is around the leader's current position.
@@ -641,12 +736,18 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	if phaseStalled && hasContact && candidateIntent != IntentRegroup {
 		candidateIntent = IntentEngage
 	}
+	if sq.Broken {
+		candidateIntent = IntentWithdraw
+	}
 	criticalIntent := spread > 250 || (anyVisibleThreats > 0 && closestDist < engageEnterDist)
 	if candidateIntent != sq.Intent {
 		if !criticalIntent && tick < sq.intentLockUntil {
 			candidateIntent = sq.Intent
 		} else {
 			leaderFear := sq.Leader.profile.Psych.EffectiveFear()
+			if sq.Broken {
+				leaderFear = 1.0
+			}
 			fuzzy := int(math.Abs(math.Sin(float64(tick+sq.ID*17))) * 18)
 			sq.intentLockUntil = tick + 30 + int(leaderFear*70) + fuzzy
 		}
@@ -773,8 +874,8 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		posture -= 0.2
 	}
 	// Casualty pressure: more dead = more desperate = more aggressive.
-	casualtyRate := 1.0 - float64(len(alive))/float64(len(sq.Members))
-	posture += casualtyRate * 0.4
+	casualtyPressure := 1.0 - float64(len(alive))/float64(len(sq.Members))
+	posture += casualtyPressure * 0.4
 	if posture > 1.0 {
 		posture = 1.0
 	}
@@ -789,7 +890,13 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			continue
 		}
 		m.blackboard.SquadIntent = sq.Intent
+		if sq.Broken {
+			m.blackboard.SquadIntent = IntentWithdraw
+		}
 		m.blackboard.OrderReceived = true
+		m.blackboard.SquadBroken = sq.Broken
+		m.blackboard.SquadCasualtyRate = sq.CasualtyRate
+		m.blackboard.SquadStress = sq.Stress
 		if sq.ActiveOrder.IsActiveAt(tick) {
 			m.blackboard.OfficerOrderKind = sq.ActiveOrder.Kind
 			m.blackboard.OfficerOrderTargetX = sq.ActiveOrder.TargetX
@@ -804,6 +911,12 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			m.blackboard.OfficerOrderPriority = 0
 			m.blackboard.OfficerOrderStrength = 0
 		}
+		if sq.Broken {
+			m.blackboard.OfficerOrderKind = CmdNone
+			m.blackboard.OfficerOrderActive = false
+			m.blackboard.OfficerOrderPriority = 0
+			m.blackboard.OfficerOrderStrength = 0
+		}
 		m.blackboard.SquadHasContact = hasContact
 		m.blackboard.OutnumberedFactor = outnumberedFactor
 		m.blackboard.SquadPosture = posture
@@ -812,7 +925,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			m.blackboard.SquadContactY = contactY
 		}
 		// Assign a unique spread position for engage orders.
-		if len(moveOrders) > 0 && orderIdx < len(moveOrders) {
+		if !sq.Broken && len(moveOrders) > 0 && orderIdx < len(moveOrders) {
 			m.blackboard.OrderMoveX = moveOrders[orderIdx][0]
 			m.blackboard.OrderMoveY = moveOrders[orderIdx][1]
 			m.blackboard.HasMoveOrder = true
@@ -820,7 +933,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		} else {
 			m.blackboard.HasMoveOrder = false
 		}
-		if stalledPriorityMember == m {
+		if !sq.Broken && stalledPriorityMember == m {
 			m.blackboard.HasMoveOrder = true
 			m.blackboard.OrderMoveX = stalledPriorityX
 			m.blackboard.OrderMoveY = stalledPriorityY
@@ -859,7 +972,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	// members are alive. During regroup/hold, disable bounding so everyone can
 	// move to restore cohesion instead of half the squad idling as overwatch.
 	// Groups alternate: one moves while the other overwatches.
-	boundingAllowed := (sq.Intent == IntentAdvance || sq.Intent == IntentEngage) && sq.Phase != SquadPhaseStalledRecovery
+	boundingAllowed := (sq.Intent == IntentAdvance || sq.Intent == IntentEngage) && sq.Phase != SquadPhaseStalledRecovery && !sq.Broken
 	if hasContact && len(alive) >= 2 && boundingAllowed {
 		if !sq.boundCycleActive {
 			// Start bounding: assign groups and kick off first cycle.
@@ -1065,7 +1178,12 @@ func (sq *Squad) evaluateBuildings() {
 	if sq.Leader.currentTick != nil {
 		tick = *sq.Leader.currentTick
 	}
-	if tick-sq.claimEvalTick < buildingClaimInterval {
+	b := &sq.Leader.blackboard
+	claimInterval := buildingClaimInterval
+	if b.IncomingFireCount > 0 || b.IsSuppressed() || b.SquadHasContact || b.HeardGunfire {
+		claimInterval = 60
+	}
+	if tick-sq.claimEvalTick < claimInterval {
 		return
 	}
 	sq.claimEvalTick = tick
@@ -1080,6 +1198,29 @@ func (sq *Squad) evaluateBuildings() {
 	}
 	advX /= advLen
 	advY /= advLen
+
+	obsContactX, obsContactY := 0.0, 0.0
+	obsHasContact := false
+	if b.VisibleThreatCount() > 0 {
+		best := math.MaxFloat64
+		for _, t := range b.Threats {
+			if !t.IsVisible {
+				continue
+			}
+			d := math.Hypot(t.X-lx, t.Y-ly)
+			if d < best {
+				best = d
+				obsContactX, obsContactY = t.X, t.Y
+				obsHasContact = true
+			}
+		}
+	} else if b.SquadHasContact {
+		obsContactX, obsContactY = b.SquadContactX, b.SquadContactY
+		obsHasContact = true
+	} else if b.HeardGunfire {
+		obsContactX, obsContactY = b.HeardGunfireX, b.HeardGunfireY
+		obsHasContact = true
+	}
 
 	bestIdx := -1
 	bestScore := -999.0
@@ -1102,9 +1243,26 @@ func (sq *Squad) evaluateBuildings() {
 		}
 		// Score: prefer ahead and close.
 		score := dot*0.6 - dist/maxDist*0.4
+
+		if obsHasContact {
+			cdx := obsContactX - lx
+			cdy := obsContactY - ly
+			cd := math.Hypot(cdx, cdy)
+			if cd > 1 {
+				cDot := (dx*cdx + dy*cdy) / (dist * cd)
+				score += cDot * 0.45
+				if cDot < -0.05 {
+					score -= 0.35
+				}
+			}
+		}
 		// Bigger buildings are more valuable (more cover).
 		area := float64(fp.w * fp.h)
 		score += math.Min(0.3, area/50000.0)
+
+		if b.IncomingFireCount > 0 || b.IsSuppressed() {
+			score += math.Max(0, 0.30-dist/maxDist*0.25)
+		}
 
 		if score > bestScore {
 			bestScore = score
