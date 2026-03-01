@@ -23,7 +23,7 @@ const (
 	aimSpreadDecayRate = 0.014 // spread decrease per tick while still
 
 	// Dash-overwatch constants.
-	dashOverwatchBase = 120 // base ticks soldier pauses after a dash (~2s at 60TPS)
+	dashOverwatchBase = 72 // base ticks soldier pauses after a dash (~1.2s at 60TPS)
 
 	// Post-arrival pause: ticks a soldier waits after reaching a destination
 	// before re-evaluating their goal (assess → perceive → decide cadence).
@@ -843,7 +843,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		combatContext := bb.SquadHasContact || bb.VisibleThreatCount() > 0 || bb.IsActivated()
 		if combatContext && s.state == SoldierStateIdle && terminal {
 			s.mobilityStallTicks++
-			if s.mobilityStallTicks >= 45 {
+			if s.mobilityStallTicks >= 30 {
 				s.mobilityStallTicks = 0
 				tx, ty := s.recoveryTargetHint()
 				bb.ShatterEvent = true
@@ -959,9 +959,9 @@ func (s *Soldier) executeGoal(dt float64) {
 			distToSlot := math.Hypot(s.slotTargetX-s.x, s.slotTargetY-s.y)
 			contactTooFar := bb.VisibleThreatCount() == 0 &&
 				bb.Internal.LastContactRange > float64(maxFireRange)*1.05
-			holdLimit := 60
+			holdLimit := 40
 			if contactTooFar {
-				holdLimit = 24
+				holdLimit = 18
 			}
 			if s.boundHoldTicks >= holdLimit && (contactTooFar || distToSlot > 96 || leaderDist > 180) {
 				s.boundHoldTicks = 0
@@ -969,7 +969,7 @@ func (s *Soldier) executeGoal(dt float64) {
 				s.moveToContact(dt)
 				break
 			}
-			s.state = SoldierStateIdle
+			s.state = SoldierStateCover
 			s.profile.Physical.AccumulateFatigue(0, dt)
 			s.faceNearestThreatOrContact()
 			break
@@ -978,7 +978,7 @@ func (s *Soldier) executeGoal(dt float64) {
 
 		// Dash overwatch: hold still after a dash until the timer expires.
 		if s.dashOverwatchTimer > 0 {
-			s.state = SoldierStateIdle
+			s.state = SoldierStateCover
 			s.faceNearestThreatOrContact()
 			break
 		}
@@ -1014,7 +1014,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 		// Dash overwatch: hold still after a dash until the timer expires.
 		if s.dashOverwatchTimer > 0 {
-			s.state = SoldierStateIdle
+			s.state = SoldierStateCover
 			s.faceNearestThreatOrContact()
 			break
 		}
@@ -1127,6 +1127,9 @@ const (
 	contactLeashMul   = 2.0
 	contactLeashBase  = 240.0 // px, fallback when no squad slot info
 	contactRepathDist = 32.0  // repath when contact position drifts this much
+	// Preferred move orders are soft endpoints from the squad leader.
+	// Once close enough, soldiers can resume autonomous tactical repositioning.
+	preferredOrderArriveDist = float64(cellSize) * 2.5
 )
 
 func (s *Soldier) recoveryUrgency() float64 {
@@ -1391,8 +1394,20 @@ func (s *Soldier) moveToContact(dt float64) {
 		targetX = nearestTX - math.Cos(bearing)*stopDist
 		targetY = nearestTY - math.Sin(bearing)*stopDist
 	} else if bb.HasMoveOrder {
-		targetX = bb.OrderMoveX
-		targetY = bb.OrderMoveY
+		orderDist := math.Hypot(bb.OrderMoveX-s.x, bb.OrderMoveY-s.y)
+		if orderDist > preferredOrderArriveDist {
+			targetX = bb.OrderMoveX
+			targetY = bb.OrderMoveY
+		} else if bb.SquadHasContact {
+			targetX = bb.SquadContactX
+			targetY = bb.SquadContactY
+		} else if bb.HeardGunfire {
+			targetX = bb.HeardGunfireX
+			targetY = bb.HeardGunfireY
+		} else {
+			targetX = bb.CombatMemoryX
+			targetY = bb.CombatMemoryY
+		}
 	} else if bb.SquadHasContact {
 		targetX = bb.SquadContactX
 		targetY = bb.SquadContactY
@@ -2448,8 +2463,28 @@ func (s *Soldier) moveCombatDash(dt float64) {
 	// --- Step 1: Resolve ultimate destination ---
 	var destX, destY float64
 	if bb.HasMoveOrder {
-		destX = bb.OrderMoveX
-		destY = bb.OrderMoveY
+		orderDist := math.Hypot(bb.OrderMoveX-s.x, bb.OrderMoveY-s.y)
+		if orderDist > preferredOrderArriveDist {
+			destX = bb.OrderMoveX
+			destY = bb.OrderMoveY
+		} else if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
+			destX = bb.BestNearbyX
+			destY = bb.BestNearbyY
+		} else if bb.SquadHasContact {
+			cBearing := math.Atan2(bb.SquadContactY-s.y, bb.SquadContactX-s.x)
+			stopDist := float64(burstRange) * 0.75
+			destX = bb.SquadContactX - math.Cos(cBearing)*stopDist
+			destY = bb.SquadContactY - math.Sin(cBearing)*stopDist
+		} else if bb.HeardGunfire {
+			destX = bb.HeardGunfireX
+			destY = bb.HeardGunfireY
+		} else if bb.IsActivated() {
+			destX = bb.CombatMemoryX
+			destY = bb.CombatMemoryY
+		} else {
+			s.state = SoldierStateIdle
+			return
+		}
 	} else if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
 		destX = bb.BestNearbyX
 		destY = bb.BestNearbyY

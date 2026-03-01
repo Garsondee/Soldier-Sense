@@ -200,6 +200,10 @@ const (
 	engageEnterDist = 300.0 // must be this close to enter engage
 	engageExitDist  = 360.0 // can stay engaged until this distance
 
+	leaderPreferredForwardMin = 72.0
+	leaderPreferredForwardMax = 170.0
+	leaderPreferredFlankBase  = 64.0
+
 	phaseMinHoldTicks    = 90
 	phaseStallTicks      = 240
 	phaseProgressEpsilon = 12.0
@@ -662,10 +666,11 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		sq.EnemyBearing = math.Atan2(contactY-cy, contactX-cx)
 	}
 
-	// Build per-member spread positions when engaging.
+	// Build per-member preferred positions for movement intents.
 	var moveOrders [][2]float64
-	if hasContact && sq.Intent == IntentEngage {
-		moveOrders = sq.spreadPositions(contactX, contactY)
+	switch sq.Intent {
+	case IntentEngage, IntentAdvance:
+		moveOrders = sq.preferredOrderPositions(hasContact, contactX, contactY)
 	}
 
 	// Officer intervention: if one mobility soldier is clearly stalled, prioritize
@@ -1196,6 +1201,99 @@ func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 			baseX + math.Cos(perpAngle)*lateral + forwardX,
 			baseY + math.Sin(perpAngle)*lateral + forwardY,
 		}
+	}
+	return positions
+}
+
+// preferredOrderPositions returns leader-directed preferred endpoints that place
+// troops slightly ahead and on both flanks of the squad axis.
+//
+// These are soft targets (HasMoveOrder), not hard lock positions: once soldiers
+// arrive, their own utility/cover logic can pull them into better overwatch,
+// cover, or direct engagement positions.
+func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY float64) [][2]float64 {
+	alive := sq.Alive()
+	n := len(alive)
+	if n == 0 || sq.Leader == nil {
+		return nil
+	}
+
+	tick := 0
+	if sq.Leader.currentTick != nil {
+		tick = *sq.Leader.currentTick
+	}
+
+	leaderX, leaderY := sq.Leader.x, sq.Leader.y
+	anchorX, anchorY := sq.Leader.endTarget[0], sq.Leader.endTarget[1]
+	if sq.ActiveOrder.IsActiveAt(tick) {
+		anchorX, anchorY = sq.ActiveOrder.TargetX, sq.ActiveOrder.TargetY
+	}
+	if hasContact {
+		anchorX, anchorY = contactX, contactY
+	}
+
+	bearing := sq.Leader.vision.Heading
+	if hasContact {
+		bearing = sq.EnemyBearing
+	} else {
+		dx := anchorX - leaderX
+		dy := anchorY - leaderY
+		if math.Hypot(dx, dy) > 1e-6 {
+			bearing = math.Atan2(dy, dx)
+		}
+	}
+	perp := bearing + math.Pi/2
+
+	anchorDist := math.Hypot(anchorX-leaderX, anchorY-leaderY)
+	forward := math.Max(leaderPreferredForwardMin, math.Min(leaderPreferredForwardMax, anchorDist*0.42))
+	flankSpacing := leaderPreferredFlankBase
+	if hasContact {
+		flankSpacing += 8
+	}
+	switch sq.Phase {
+	case SquadPhaseFixFire:
+		forward *= 0.85
+		flankSpacing += 10
+	case SquadPhaseBound:
+		forward *= 1.05
+		flankSpacing += 6
+	case SquadPhaseAssault:
+		forward *= 1.12
+		flankSpacing += 4
+	case SquadPhaseConsolidate:
+		forward *= 0.90
+		flankSpacing -= 8
+	}
+
+	assigned := make(map[int][2]float64, n)
+	positions := make([][2]float64, n)
+	for i, m := range alive {
+		flankRank := (i + 1) / 2
+		lateral := 0.0
+		if i > 0 {
+			side := 1.0
+			if i%2 == 1 {
+				side = -1.0
+			}
+			lateral = side * flankSpacing * float64(flankRank)
+		}
+
+		depth := forward
+		if i == 0 {
+			depth += 14
+		} else if flankRank > 1 {
+			depth -= float64(flankRank-1) * 14
+		}
+
+		osc := math.Sin(float64(tick+m.id*19) * 0.07)
+		depth += osc * 7
+
+		wx := leaderX + math.Cos(bearing)*depth + math.Cos(perp)*lateral
+		wy := leaderY + math.Sin(bearing)*depth + math.Sin(perp)*lateral
+		wx, wy = adjustFormationTarget(m.navGrid, wx, wy, sq.Leader, sq.Members, assigned)
+
+		positions[i] = [2]float64{wx, wy}
+		assigned[m.id] = [2]float64{wx, wy}
 	}
 	return positions
 }
