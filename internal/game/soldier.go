@@ -264,7 +264,8 @@ func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) {
 			dy := s.y - cY
 			d := math.Hypot(dx, dy)
 			if d < 1e-6 {
-				dx, dy, d = -1, 0, 1
+				// d no longer matters since we're jittering the angle, but avoid NaNs from zero division.
+				dx, dy = -1, 0
 			}
 			bend := (s.psychRoll(bb.RetreatDecisionCount+19) - 0.5) * 0.9
 			base := math.Atan2(dy, dx) + bend

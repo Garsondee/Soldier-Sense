@@ -154,7 +154,7 @@ func terrainHash(x, y int) uint32 {
 	ux := uint64(x) // #nosec G115 -- x is non-negative and bounded (cell coords)
 	uy := uint64(y) // #nosec G115 -- y is non-negative and bounded (cell coords)
 	v64 := (ux * 73856093) ^ (uy * 19349663)
-	v := uint32(v64 & 0xffffffff)
+	v := uint32(v64 & 0xffffffff) // #nosec G115 -- masked to 32 bits before cast; no overflow possible
 	v ^= v >> 13
 	v *= 1274126177
 	v ^= v >> 16

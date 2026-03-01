@@ -24,7 +24,6 @@ type Squad struct {
 	// used to prevent formation thrash on minor direction changes.
 	smoothedHeading float64
 	headingInit     bool
-	prevIntent      SquadIntentKind //nolint:unused
 
 	// EnemyBearing is the squad-level bearing from centroid toward the enemy.
 	// Updated each SquadThink when contact exists. Used to assign flank sides.
@@ -1417,6 +1416,8 @@ func (sq *Squad) evaluateBuildings() {
 // Soldiers are placed in a lateral line perpendicular to the enemy bearing,
 // at a standoff distance from the contact point. This prevents the joust pattern
 // (running straight at the enemy) by ensuring everyone approaches from a flank angle.
+//
+//nolint:unused
 func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 	alive := sq.Alive()
 	n := len(alive)
