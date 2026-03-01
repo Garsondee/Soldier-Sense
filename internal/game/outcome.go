@@ -176,7 +176,13 @@ func DetermineBattleOutcome(redSoldiers, blueSoldiers []*Soldier, redSquads, blu
 	}
 
 	casualtyDiff := blueCasualtyRate - redCasualtyRate
-	if casualtyDiff > 0.30 && redCasualtyRate < 0.50 {
+	// Marginal victory: only declare off casualty advantage when the losing side is
+	// meaningfully combat-ineffective. This avoids calling victory while the opponent
+	// still has intact squads.
+	redCombatIneffective := redCasualtyRate >= 0.55 || redSurvivors <= max(1, redTotal/3)
+	blueCombatIneffective := blueCasualtyRate >= 0.55 || blueSurvivors <= max(1, blueTotal/3)
+
+	if casualtyDiff > 0.30 && redCasualtyRate < 0.50 && blueCombatIneffective {
 		return BattleOutcomeReason{
 			Outcome:          OutcomeRedVictory,
 			RedSurvivors:     redSurvivors,
@@ -192,7 +198,7 @@ func DetermineBattleOutcome(redSoldiers, blueSoldiers []*Soldier, redSquads, blu
 			Description:      "marginal_red_victory_casualty_advantage",
 		}
 	}
-	if casualtyDiff < -0.30 && blueCasualtyRate < 0.50 {
+	if casualtyDiff < -0.30 && blueCasualtyRate < 0.50 && redCombatIneffective {
 		return BattleOutcomeReason{
 			Outcome:          OutcomeBlueVictory,
 			RedSurvivors:     redSurvivors,
