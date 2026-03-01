@@ -1616,19 +1616,18 @@ func (sq *Squad) squadSpread() float64 {
 	if sq.Leader == nil {
 		return 0
 	}
-	max := 0.0
+	max2 := 0.0
 	for _, m := range sq.Members {
 		if m == sq.Leader || m.state == SoldierStateDead {
 			continue
 		}
 		dx := m.x - sq.Leader.x
 		dy := m.y - sq.Leader.y
-		d := math.Sqrt(dx*dx + dy*dy)
-		if d > max {
-			max = d
+		if d2 := dx*dx + dy*dy; d2 > max2 {
+			max2 = d2
 		}
 	}
-	return max
+	return math.Sqrt(max2)
 }
 
 // LeaderCohesionSlowdown adjusts the leader's effective speed based on
