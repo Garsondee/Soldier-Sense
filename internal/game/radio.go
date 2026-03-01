@@ -281,6 +281,7 @@ func (sq *Squad) ResolveComms(tick int, tl *ThoughtLog) {
 		return
 	}
 	sq.ensureRadioState()
+	sq.pruneRadioChatLines(tick)
 
 	sq.resolveStatusTimeouts(tick, tl)
 	sq.resolveInFlightTransmission(tick, tl)

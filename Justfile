@@ -19,11 +19,7 @@ lint:
     @just lint-{{os()}}
 
 lint-windows:
-    @Write-Output "Running linter..."
-    @if (Get-Command "golangci-lint" -ErrorAction SilentlyContinue) { golangci-lint run; exit $LASTEXITCODE }
-    @Write-Output "golangci-lint not found, falling back to go vet"
-    @Write-Output "To install golangci-lint locally, run: just install-golangci-lint"
-    @go vet ./...
+    @& { Write-Output "Running linter..."; $userHome = [Environment]::GetFolderPath('UserProfile'); $toolDirs = @((Join-Path $userHome "tools/ext/bin"), (Join-Path $userHome "go/bin")); foreach ($dir in ($toolDirs | Select-Object -Unique)) { if (Test-Path $dir) { $env:PATH = "$dir;$env:PATH" } }; $cmd = Get-Command "golangci-lint" -ErrorAction SilentlyContinue; if ($cmd) { & $cmd.Source run; exit $LASTEXITCODE }; Write-Output "golangci-lint not found, falling back to go vet"; Write-Output "To install golangci-lint locally, run: just install-golangci-lint"; go vet ./...; exit $LASTEXITCODE }
 
 lint-linux:
     #!/usr/bin/env sh
@@ -55,10 +51,7 @@ gosec:
     @just gosec-{{os()}}
 
 gosec-windows:
-    @Write-Output "Running security scanner..."
-    @if (Get-Command "gosec" -ErrorAction SilentlyContinue) { gosec -quiet -fmt=text ./...; exit $LASTEXITCODE }
-    @Write-Output "gosec not found, skipping security scan"
-    @Write-Output "To install gosec, run: go install github.com/securego/gosec/v2/cmd/gosec@latest"
+    @& { Write-Output "Running security scanner..."; $userHome = [Environment]::GetFolderPath('UserProfile'); $toolDirs = @((Join-Path $userHome "tools/ext/bin"), (Join-Path $userHome "go/bin")); foreach ($dir in ($toolDirs | Select-Object -Unique)) { if (Test-Path $dir) { $env:PATH = "$dir;$env:PATH" } }; $cmd = Get-Command "gosec" -ErrorAction SilentlyContinue; if ($cmd) { & $cmd.Source -quiet -fmt=text ./...; exit $LASTEXITCODE }; Write-Output "gosec not found, skipping security scan"; Write-Output "To install gosec, run: go install github.com/securego/gosec/v2/cmd/gosec@latest" }
 
 gosec-linux:
     #!/usr/bin/env sh
@@ -86,10 +79,26 @@ gosec-macos:
 
 # Install golangci-lint to ~/tools/ext/bin
 install-golangci-lint:
-    @mkdir -p ~/tools/ext/bin
-    GOBIN=~/tools/ext/bin go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-    @echo "golangci-lint installed locally to this project in ~/tools/ext/bin/"
-    @echo "Note that ~/tools/ext/bin is not assumed to be in your PATH"
+    @just install-golangci-lint-{{os()}}
+
+install-golangci-lint-windows:
+    @$gobin = Join-Path ([Environment]::GetFolderPath('UserProfile')) "tools/ext/bin"; New-Item -ItemType Directory -Force -Path $gobin | Out-Null; $env:GOBIN = $gobin; go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+    @Write-Output "golangci-lint installed locally to this project in ~/tools/ext/bin/"
+    @Write-Output "Note that ~/tools/ext/bin is not assumed to be in your PATH"
+
+install-golangci-lint-linux:
+    #!/usr/bin/env sh
+    mkdir -p "$HOME/tools/ext/bin"
+    GOBIN="$HOME/tools/ext/bin" go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+    echo "golangci-lint installed locally to this project in ~/tools/ext/bin/"
+    echo "Note that ~/tools/ext/bin is not assumed to be in your PATH"
+
+install-golangci-lint-macos:
+    #!/usr/bin/env sh
+    mkdir -p "$HOME/tools/ext/bin"
+    GOBIN="$HOME/tools/ext/bin" go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+    echo "golangci-lint installed locally to this project in ~/tools/ext/bin/"
+    echo "Note that ~/tools/ext/bin is not assumed to be in your PATH"
 
 fmt:
     go fmt ./cmd/... ./internal/...
