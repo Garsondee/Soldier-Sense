@@ -226,6 +226,56 @@ func TestNewSquad_InitialCohesionIsFull(t *testing.T) {
 	}
 }
 
+func TestSquadThink_CohesionDoesNotDropFromContactAlone(t *testing.T) {
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 120, 360, TeamRed, [2]float64{120, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
+	member := NewSoldier(1, 140, 360, TeamRed, [2]float64{140, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
+
+	// Two visible enemies for two friendlies: contact present, but not significantly outnumbered.
+	e0 := NewSoldier(100, 500, 340, TeamBlue, [2]float64{500, 340}, [2]float64{60, 340}, ng, nil, nil, tl, &tick)
+	e1 := NewSoldier(101, 520, 380, TeamBlue, [2]float64{520, 380}, [2]float64{60, 380}, ng, nil, nil, tl, &tick)
+	leader.blackboard.Threats = []ThreatFact{{Source: e0, X: e0.x, Y: e0.y, Confidence: 1.0, IsVisible: true}, {Source: e1, X: e1.x, Y: e1.y, Confidence: 1.0, IsVisible: true}}
+	member.blackboard.Threats = []ThreatFact{{Source: e0, X: e0.x, Y: e0.y, Confidence: 1.0, IsVisible: true}, {Source: e1, X: e1.x, Y: e1.y, Confidence: 1.0, IsVisible: true}}
+
+	before := 0.72
+	sq.Cohesion = before
+	sq.SquadThink(nil)
+
+	if sq.Cohesion < before-1e-6 {
+		t.Fatalf("cohesion should not drop from enemy contact alone: before=%.4f after=%.4f", before, sq.Cohesion)
+	}
+}
+
+func TestSquadThink_CohesionDropsWhenSignificantlyOutnumbered(t *testing.T) {
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 120, 360, TeamRed, [2]float64{120, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
+	member := NewSoldier(1, 140, 360, TeamRed, [2]float64{140, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
+
+	threats := make([]ThreatFact, 0, 5)
+	for i := 0; i < 5; i++ {
+		en := NewSoldier(200+i, 520+float64(i*8), 330+float64(i*6), TeamBlue, [2]float64{520 + float64(i*8), 330 + float64(i*6)}, [2]float64{60, 330}, ng, nil, nil, tl, &tick)
+		threats = append(threats, ThreatFact{Source: en, X: en.x, Y: en.y, Confidence: 1.0, IsVisible: true})
+	}
+	leader.blackboard.Threats = threats
+	member.blackboard.Threats = append([]ThreatFact(nil), threats...)
+
+	before := 0.72
+	sq.Cohesion = before
+	sq.SquadThink(nil)
+
+	if sq.Cohesion >= before {
+		t.Fatalf("cohesion should drop when significantly outnumbered: before=%.4f after=%.4f", before, sq.Cohesion)
+	}
+}
+
 func TestSquadThink_ImmediateOrderObedienceAtHighCohesion(t *testing.T) {
 	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
 	tl := NewThoughtLog()
@@ -324,6 +374,81 @@ func TestSquadThink_AbandonsClaimedBuildingAfterNoContactOccupancy(t *testing.T)
 
 	if sq.ClaimedBuildingIdx != -1 {
 		t.Fatalf("expected claimed building to be abandoned after no-contact occupancy, got %d", sq.ClaimedBuildingIdx)
+	}
+}
+
+func TestSquadThink_DangerHeatWithoutCurrentPressureDoesNotHold(t *testing.T) {
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 220, 360, TeamRed, [2]float64{220, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
+	member := NewSoldier(1, 180, 380, TeamRed, [2]float64{180, 380}, [2]float64{1100, 380}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
+
+	intel := NewIntelStore(1280, 720)
+	im := intel.For(TeamRed)
+	if im == nil {
+		t.Fatal("expected intel map for red team")
+	}
+	// Simulate stale danger heat around the leader without active incoming fire/contact.
+	im.WriteDangerZone(leader.x, leader.y, 6)
+
+	sq.SquadThink(intel)
+
+	if sq.Intent == IntentHold {
+		t.Fatalf("expected stale heat alone to avoid IntentHold, got %s", sq.Intent)
+	}
+	if sq.Intent != IntentAdvance {
+		t.Fatalf("expected proactive advance in absence of current combat pressure, got %s", sq.Intent)
+	}
+}
+
+func TestSquadThink_StalemateForcesProactiveBuildingPush(t *testing.T) {
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 140, 360, TeamRed, [2]float64{140, 360}, [2]float64{1180, 360}, ng, nil, nil, tl, &tick)
+	member := NewSoldier(1, 140, 390, TeamRed, [2]float64{140, 390}, [2]float64{1180, 390}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
+	claimed := rect{x: 520, y: 300, w: 96, h: 96}
+	sq.buildingFootprints = []rect{claimed}
+	sq.ClaimedBuildingIdx = 0
+
+	for i := 0; i < stalemateTriggerTicks+8; i++ {
+		tick++
+		leader.blackboard.Threats = []ThreatFact{{
+			X:          980,
+			Y:          360,
+			Confidence: 0.9,
+			IsVisible:  false,
+			LastTick:   tick,
+		}}
+		leader.blackboard.IncomingFireCount = 0
+		leader.blackboard.SuppressLevel = 0
+		sq.SquadThink(nil)
+	}
+
+	if sq.stalemateTicks < stalemateTriggerTicks {
+		t.Fatalf("expected stalemate detector to trip, got ticks=%d", sq.stalemateTicks)
+	}
+	if sq.Intent != IntentEngage {
+		t.Fatalf("expected proactive stalemate response to force engage intent, got %s", sq.Intent)
+	}
+	if !sq.ActiveOrder.IsActiveAt(tick) {
+		t.Fatal("expected active officer order during proactive push")
+	}
+	if sq.ActiveOrder.Kind != CmdAssault && sq.ActiveOrder.Kind != CmdBoundForward && sq.ActiveOrder.Kind != CmdMoveTo {
+		t.Fatalf("expected proactive movement/combat order, got %s", sq.ActiveOrder.Kind)
+	}
+	wantX := float64(claimed.x) + float64(claimed.w)/2
+	wantY := float64(claimed.y) + float64(claimed.h)/2
+	if math.Hypot(sq.ActiveOrder.TargetX-wantX, sq.ActiveOrder.TargetY-wantY) > 1.0 {
+		t.Fatalf("expected proactive order to target claimed building centroid (%.1f,%.1f), got (%.1f,%.1f)", wantX, wantY, sq.ActiveOrder.TargetX, sq.ActiveOrder.TargetY)
+	}
+	if sq.ActiveOrder.Priority < 0.88 {
+		t.Fatalf("expected elevated proactive order priority, got %.2f", sq.ActiveOrder.Priority)
 	}
 }
 
