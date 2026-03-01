@@ -206,13 +206,14 @@ func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 type Game struct {
 	width              int
 	height             int
-	gameWidth          int    // playfield width (log panel takes the rest)
-	gameHeight         int    // playfield height (inside border)
-	offX               int    // pixel offset from window left to battlefield left
-	offY               int    // pixel offset from window top to battlefield top
-	buildings          []rect // individual wall segments (1-cell wide), used for LOS/nav
-	windows            []rect // window segments: block movement, transparent to LOS
-	buildingFootprints []rect // overall floor area of each structure, used for rendering
+	gameWidth          int               // playfield width (log panel takes the rest)
+	gameHeight         int               // playfield height (inside border)
+	offX               int               // pixel offset from window left to battlefield left
+	offY               int               // pixel offset from window top to battlefield top
+	buildings          []rect            // individual wall segments (1-cell wide), used for LOS/nav
+	windows            []rect            // window segments: block movement, transparent to LOS
+	buildingFootprints []rect            // overall floor area of each structure, used for rendering
+	buildingQualities  []BuildingQuality // pre-computed tactical metrics per footprint
 	covers             []*CoverObject
 	navGrid            *NavGrid
 	soldiers           []*Soldier // red friendlies
@@ -261,8 +262,13 @@ type Game struct {
 	speechRng     *rand.Rand
 
 	// Soldier inspector (click-to-select panel).
-	inspector     Inspector
-	prevMouseLeft bool // for edge-triggered click detection
+	inspector Inspector
+
+	// Cached maps for rendering (avoid per-frame allocations).
+	cachedClaimedTeam map[int]Team
+	cachedSolidSet    map[[2]int]bool
+	cachedChestSet    map[[2]int]bool
+	prevMouseLeft     bool // for edge-triggered click detection
 
 	// Simulation speed control.
 	simSpeed  float64 // multiplier: 0=paused, 0.5, 1, 2, 4
@@ -360,6 +366,7 @@ func New() *Game {
 	generateFortifications(g.tileMap, mapRng, defaultFortConfig)
 	g.navGrid = NewNavGrid(g.gameWidth, g.gameHeight, g.buildings, soldierRadius, g.covers, g.windows)
 	g.tacticalMap = NewTacticalMap(g.gameWidth, g.gameHeight, g.buildings, g.windows, g.buildingFootprints)
+	g.buildingQualities = ComputeBuildingQualities(g.buildingFootprints, g.buildings, g.windows, g.gameWidth, g.gameHeight, g.navGrid)
 	g.initSoldiers()
 	g.initOpFor()
 	g.initSquads()
@@ -382,6 +389,10 @@ func New() *Game {
 	g.camY = float64(battleH) / 2
 	g.camZoom = 0.5
 	g.simSpeed = 1.0
+	// Initialize cached maps for rendering.
+	g.cachedClaimedTeam = make(map[int]Team)
+	g.cachedSolidSet = make(map[[2]int]bool, len(g.buildings)+len(g.windows))
+	g.cachedChestSet = make(map[[2]int]bool)
 	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999)) // #nosec G404 -- non-crypto RNG for local flavor text
 	g.reporter = NewSimReporter(reportWindowTicks, false)
 	return g
@@ -956,6 +967,7 @@ func (g *Game) initSquads() {
 		}
 		sq := NewSquad(len(g.squads), TeamRed, g.soldiers[i:end])
 		sq.buildingFootprints = g.buildingFootprints
+		sq.buildingQualities = g.buildingQualities
 		g.squads = append(g.squads, sq)
 	}
 	for i := 0; i < len(g.opfor); i += sqSz {
@@ -965,6 +977,7 @@ func (g *Game) initSquads() {
 		}
 		sq := NewSquad(len(g.squads), TeamBlue, g.opfor[i:end])
 		sq.buildingFootprints = g.buildingFootprints
+		sq.buildingQualities = g.buildingQualities
 		g.squads = append(g.squads, sq)
 	}
 }
@@ -1624,12 +1637,16 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	}
 
 	// Build a set of claimed building indices → team for tinting.
-	claimedTeam := make(map[int]Team)
+	// Clear and reuse cached map to avoid per-frame allocation.
+	for k := range g.cachedClaimedTeam {
+		delete(g.cachedClaimedTeam, k)
+	}
 	for _, sq := range g.squads {
 		if sq.ClaimedBuildingIdx >= 0 {
-			claimedTeam[sq.ClaimedBuildingIdx] = sq.Team
+			g.cachedClaimedTeam[sq.ClaimedBuildingIdx] = sq.Team
 		}
 	}
+	claimedTeam := g.cachedClaimedTeam
 
 	// Building interiors: floor first, then walls on top.
 	// Floor areas (from footprints) — dark interior.
@@ -1674,13 +1691,17 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 		}
 	}
 	// Build occupancy sets for orientation-aware wall/window rendering.
-	solidSet := make(map[[2]int]bool, len(g.buildings)+len(g.windows))
+	// Clear and reuse cached map to avoid per-frame allocation.
+	for k := range g.cachedSolidSet {
+		delete(g.cachedSolidSet, k)
+	}
 	for _, b := range g.buildings {
-		solidSet[[2]int{b.x / cellSize, b.y / cellSize}] = true
+		g.cachedSolidSet[[2]int{b.x / cellSize, b.y / cellSize}] = true
 	}
 	for _, w := range g.windows {
-		solidSet[[2]int{w.x / cellSize, w.y / cellSize}] = true
+		g.cachedSolidSet[[2]int{w.x / cellSize, w.y / cellSize}] = true
 	}
+	solidSet := g.cachedSolidSet
 
 	// Wall segments — neighbour-aware lighting so edges/corners read correctly.
 	wallFill := color.RGBA{R: 86, G: 80, B: 66, A: 255}

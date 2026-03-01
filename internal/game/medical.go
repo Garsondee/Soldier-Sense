@@ -34,11 +34,11 @@ func (ta TreatmentAction) String() string {
 // TreatmentAttempt tracks an ongoing medical action.
 type TreatmentAttempt struct {
 	Action      TreatmentAction
-	TargetWound *Wound  // which wound is being addressed
+	TargetWound *Wound   // which wound is being addressed
 	Provider    *Soldier // who is performing the treatment
-	TicksLeft   int     // countdown to completion
-	Interrupted bool    // set true if fire forces pause
-	SkillLevel  float64 // provider's FirstAid skill
+	TicksLeft   int      // countdown to completion
+	Interrupted bool     // set true if fire forces pause
+	SkillLevel  float64  // provider's FirstAid skill
 }
 
 // TCCCPhase represents the tactical medical response phase.
@@ -46,8 +46,8 @@ type TCCCPhase int
 
 const (
 	PhaseCUF     TCCCPhase = iota // Care Under Fire
-	PhaseTFC                       // Tactical Field Care
-	PhaseTACEVAC                   // Tactical Evacuation Care
+	PhaseTFC                      // Tactical Field Care
+	PhaseTACEVAC                  // Tactical Evacuation Care
 )
 
 func (p TCCCPhase) String() string {
@@ -65,17 +65,23 @@ func (p TCCCPhase) String() string {
 
 // CasualtyState tracks the medical-response status for one wounded soldier.
 type CasualtyState struct {
-	Phase          TCCCPhase
-	PhaseTick      int              // tick when current phase began
-	SelfAidActive  bool             // casualty is treating themselves
-	CurrentTreat   *TreatmentAttempt
-	Providers      []*Soldier       // soldiers currently rendering aid (max 2)
+	Phase         TCCCPhase
+	PhaseTick     int  // tick when current phase began
+	SelfAidActive bool // casualty is treating themselves
+	CurrentTreat  *TreatmentAttempt
+	Providers     []*Soldier // soldiers currently rendering aid (max 2)
+
+	BuddyAidAttempts int
+	BuddyAidSuccess  int
+	MedicAidAttempts int
+	MedicAidSuccess  int
+
 	BeingDragged   bool
-	Dragger        *Soldier         // soldier dragging this casualty
+	Dragger        *Soldier // soldier dragging this casualty
 	DragTargetX    float64
 	DragTargetY    float64
-	ReportSent     bool             // casualty report transmitted to leader
-	StabilizedTick int              // tick when all critical bleeds controlled (0 = not yet)
+	ReportSent     bool // casualty report transmitted to leader
+	StabilizedTick int  // tick when all critical bleeds controlled (0 = not yet)
 }
 
 // NewCasualtyState initializes casualty state in Care Under Fire phase.
@@ -92,9 +98,9 @@ func NewCasualtyState(tick int) CasualtyState {
 
 // Treatment base durations in ticks (at 60 ticks/sec).
 const (
-	tourniquetBaseTicks       = 30  // ~0.5s
-	pressureDressingBaseTicks = 60  // ~1.0s
-	packWoundBaseTicks        = 90  // ~1.5s
+	tourniquetBaseTicks       = 30 // ~0.5s
+	pressureDressingBaseTicks = 60 // ~1.0s
+	packWoundBaseTicks        = 90 // ~1.5s
 )
 
 // treatmentDuration returns the actual ticks needed for a treatment action,
@@ -190,7 +196,7 @@ func (s *Soldier) tickSelfAid(tick int) {
 		// Treatment complete — check success.
 		pain := s.body.TotalPain()
 		successChance := treatmentSuccessChance(s, pain)
-		
+
 		if rand.Float64() < successChance {
 			// Success: mark wound as treated.
 			treat.TargetWound.Treated = true
@@ -235,12 +241,12 @@ func (s *Soldier) findNearestCasualty() *Soldier {
 		if !m.body.IsInjured() {
 			continue
 		}
-		// Skip if already being treated by someone else.
+		// Skip if already being treated by 2 providers.
 		if len(m.casualty.Providers) >= 2 {
 			continue
 		}
-		// Skip if all wounds are treated.
-		if !m.body.HasUntreatedWounds() {
+		// Skip if all wounds are treated (unless unconscious - they need monitoring).
+		if !m.body.HasUntreatedWounds() && m.state != SoldierStateUnconscious {
 			continue
 		}
 
@@ -258,12 +264,27 @@ func (s *Soldier) findNearestCasualty() *Soldier {
 
 // startProvidingAid begins rendering aid to a casualty.
 func (s *Soldier) startProvidingAid(casualty *Soldier, tick int) {
-	if len(casualty.casualty.Providers) >= 2 {
+	// Allow retries by an existing provider even if max providers already present.
+	alreadyProvider := false
+	for _, p := range casualty.casualty.Providers {
+		if p == s {
+			alreadyProvider = true
+			break
+		}
+	}
+	if len(casualty.casualty.Providers) >= 2 && !alreadyProvider {
 		return // already has max providers
 	}
 
-	// Add self as provider.
-	casualty.casualty.Providers = append(casualty.casualty.Providers, s)
+	// Add self as provider (no duplicates).
+	if !alreadyProvider {
+		casualty.casualty.Providers = append(casualty.casualty.Providers, s)
+	}
+	if s.isMedic {
+		casualty.casualty.MedicAidAttempts++
+	} else {
+		casualty.casualty.BuddyAidAttempts++
+	}
 
 	// Find worst untreated wound.
 	worst := casualty.body.WorstUntreatedWound()
@@ -328,6 +349,13 @@ func tickProvidedAid(casualty *Soldier, tick int) {
 				treat.TargetWound.TreatedTick = tick
 				treat.TargetWound.BleedRate *= 0.1 // wound packing nearly stops bleed
 			}
+			if treat.Provider != nil {
+				if treat.Provider.isMedic {
+					casualty.casualty.MedicAidSuccess++
+				} else {
+					casualty.casualty.BuddyAidSuccess++
+				}
+			}
 			treat.Provider.think("treatment successful: " + treat.Action.String())
 		} else {
 			treat.Provider.think("treatment failed — will retry")
@@ -350,132 +378,3 @@ func stopProvidingAid(provider *Soldier, casualty *Soldier) {
 // ---------------------------------------------------------------------------
 // Casualty Drag
 // ---------------------------------------------------------------------------
-
-// startDraggingCasualty begins dragging a non-ambulatory casualty to safety.
-func (s *Soldier) startDraggingCasualty(casualty *Soldier, targetX, targetY float64) {
-	if casualty.casualty.BeingDragged {
-		return // already being dragged
-	}
-
-	casualty.casualty.BeingDragged = true
-	casualty.casualty.Dragger = s
-	casualty.casualty.DragTargetX = targetX
-	casualty.casualty.DragTargetY = targetY
-	s.think("dragging casualty to safety")
-}
-
-// tickCasualtyDrag advances casualty drag movement.
-func (s *Soldier) tickCasualtyDrag(casualty *Soldier) {
-	if !casualty.casualty.BeingDragged || casualty.casualty.Dragger != s {
-		return
-	}
-
-	// Drag speed: 25% of normal movement.
-	dragSpeed := s.profile.EffectiveSpeed(soldierSpeed) * s.body.MobilityMul() * 0.25
-
-	dx := casualty.casualty.DragTargetX - casualty.x
-	dy := casualty.casualty.DragTargetY - casualty.y
-	dist := math.Sqrt(dx*dx + dy*dy)
-
-	if dist < 5.0 {
-		// Reached target.
-		casualty.casualty.BeingDragged = false
-		casualty.casualty.Dragger = nil
-		s.think("casualty dragged to safety")
-		return
-	}
-
-	// Move casualty toward target.
-	moveX := (dx / dist) * dragSpeed
-	moveY := (dy / dist) * dragSpeed
-	casualty.x += moveX
-	casualty.y += moveY
-
-	// Dragger moves with casualty.
-	s.x = casualty.x
-	s.y = casualty.y
-}
-
-// stopDraggingCasualty ends the drag operation.
-func (s *Soldier) stopDraggingCasualty(casualty *Soldier) {
-	if casualty.casualty.Dragger == s {
-		casualty.casualty.BeingDragged = false
-		casualty.casualty.Dragger = nil
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Drag Target Selection
-// ---------------------------------------------------------------------------
-
-// findSafeDragTarget finds a safe location to drag a casualty to.
-// Prioritizes: away from gunfire, toward cover, toward buildings.
-func (s *Soldier) findSafeDragTarget(casualty *Soldier) (float64, float64, bool) {
-	bb := &s.blackboard
-
-	// Direction away from gunfire.
-	var awayX, awayY float64
-	if bb.HeardGunfire {
-		dx := casualty.x - bb.HeardGunfireX
-		dy := casualty.y - bb.HeardGunfireY
-		dist := math.Sqrt(dx*dx + dy*dy)
-		if dist > 1 {
-			awayX = dx / dist
-			awayY = dy / dist
-		}
-	} else if bb.VisibleThreatCount() > 0 {
-		// Away from visible threats.
-		for _, t := range bb.Threats {
-			if t.IsVisible {
-				dx := casualty.x - t.X
-				dy := casualty.y - t.Y
-				dist := math.Sqrt(dx*dx + dy*dy)
-				if dist > 1 {
-					awayX += dx / dist
-					awayY += dy / dist
-				}
-			}
-		}
-		mag := math.Sqrt(awayX*awayX + awayY*awayY)
-		if mag > 1 {
-			awayX /= mag
-			awayY /= mag
-		}
-	}
-
-	// If no threat direction, use a default (toward own lines).
-	if awayX == 0 && awayY == 0 {
-		awayX = s.startTarget[0] - casualty.x
-		awayY = s.startTarget[1] - casualty.y
-		mag := math.Sqrt(awayX*awayX + awayY*awayY)
-		if mag > 1 {
-			awayX /= mag
-			awayY /= mag
-		}
-	}
-
-	// Target: 50-100px away from casualty in safe direction.
-	dragDist := 50.0 + rand.Float64()*50.0
-	targetX := casualty.x + awayX*dragDist
-	targetY := casualty.y + awayY*dragDist
-
-	// Clamp to map bounds.
-	if s.navGrid != nil {
-		mapW := float64(s.navGrid.cols * cellSize)
-		mapH := float64(s.navGrid.rows * cellSize)
-		if targetX < 16 {
-			targetX = 16
-		}
-		if targetX > mapW-16 {
-			targetX = mapW - 16
-		}
-		if targetY < 16 {
-			targetY = 16
-		}
-		if targetY > mapH-16 {
-			targetY = mapH - 16
-		}
-	}
-
-	return targetX, targetY, true
-}

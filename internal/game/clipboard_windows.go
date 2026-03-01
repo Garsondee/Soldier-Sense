@@ -8,15 +8,15 @@ import (
 )
 
 var (
-	user32           = syscall.NewLazyDLL("user32.dll")
-	kernel32         = syscall.NewLazyDLL("kernel32.dll")
-	procOpenClipboard  = user32.NewProc("OpenClipboard")
-	procCloseClipboard = user32.NewProc("CloseClipboard")
-	procEmptyClipboard = user32.NewProc("EmptyClipboard")
+	user32               = syscall.NewLazyDLL("user32.dll")
+	kernel32             = syscall.NewLazyDLL("kernel32.dll")
+	procOpenClipboard    = user32.NewProc("OpenClipboard")
+	procCloseClipboard   = user32.NewProc("CloseClipboard")
+	procEmptyClipboard   = user32.NewProc("EmptyClipboard")
 	procSetClipboardData = user32.NewProc("SetClipboardData")
-	procGlobalAlloc   = kernel32.NewProc("GlobalAlloc")
-	procGlobalLock    = kernel32.NewProc("GlobalLock")
-	procGlobalUnlock  = kernel32.NewProc("GlobalUnlock")
+	procGlobalAlloc      = kernel32.NewProc("GlobalAlloc")
+	procGlobalLock       = kernel32.NewProc("GlobalLock")
+	procGlobalUnlock     = kernel32.NewProc("GlobalUnlock")
 )
 
 const (
@@ -39,9 +39,11 @@ func setClipboardText(text string) error {
 	if r1 == 0 {
 		return err
 	}
-	defer procCloseClipboard.Call()
+	defer func() {
+		_, _, _ = procCloseClipboard.Call()
+	}()
 
-	procEmptyClipboard.Call()
+	_, _, _ = procEmptyClipboard.Call()
 
 	h, _, err := procGlobalAlloc.Call(gmEM_MOVEABLE, bytes)
 	if h == 0 {
@@ -56,7 +58,7 @@ func setClipboardText(text string) error {
 	mem := unsafe.Slice((*byte)(unsafe.Pointer(p)), bytes)
 	copy(mem, unsafe.Slice((*byte)(unsafe.Pointer(&u16[0])), bytes))
 
-	procGlobalUnlock.Call(h)
+	_, _, _ = procGlobalUnlock.Call(h)
 
 	r1, _, err = procSetClipboardData.Call(cfUNICODETEXT, h)
 	if r1 == 0 {

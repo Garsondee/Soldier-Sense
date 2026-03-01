@@ -225,7 +225,8 @@ func NewTacticalMap(mapW, mapH int, buildings []rect, windows []rect, footprints
 //	hasEnemy:     true if an enemy direction is known.
 //	claimedIdx:   index of claimed building footprint, or -1.
 //	footprints:   building footprints slice.
-func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing float64, hasEnemy bool, claimedIdx int, footprints []rect) (float64, float64, float64) {
+//	occupiedPositions: list of world positions already occupied by squad members (for deconfliction).
+func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing float64, hasEnemy bool, claimedIdx int, footprints []rect, occupiedPositions [][2]float64) (float64, float64, float64) {
 	cx, cy := WorldToCell(wx, wy)
 	bestScore := -999.0
 	bestX, bestY := wx, wy
@@ -273,6 +274,18 @@ func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing f
 				continue
 			}
 			score -= dist * 0.02
+
+			// Position deconfliction: penalize cells near occupied positions
+			pwx, pwy := CellToWorld(nx, ny)
+			for _, occupied := range occupiedPositions {
+				occDist := math.Hypot(pwx-occupied[0], pwy-occupied[1])
+				deconflictRadius := float64(cellSize) * 2.0 // 2 cells apart minimum
+				if occDist < deconflictRadius {
+					// Strong penalty for being too close to an occupied position
+					penalty := (1.0 - occDist/deconflictRadius) * 0.80
+					score -= penalty
+				}
+			}
 
 			// Directional bias when enemy is known.
 			if hasEnemy && dist > 0 {

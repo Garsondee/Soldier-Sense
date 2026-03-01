@@ -15,6 +15,10 @@ type Squad struct {
 	Intent    SquadIntentKind
 	Phase     SquadPhase
 
+	supportTargetX     float64
+	supportTargetY     float64
+	supportActiveUntil int
+
 	// Active officer command for the squad. Commands are strong signals that
 	// bias individual utility, not hard overrides.
 	ActiveOrder OfficerOrder
@@ -37,16 +41,28 @@ type Squad struct {
 
 	// Building takeover: leader claims a building along the advance route.
 	// Members then prioritize doors/windows of that building.
-	ClaimedBuildingIdx int    // index into buildingFootprints, -1 = none
-	claimEvalTick      int    // tick of last building evaluation
-	buildingFootprints []rect // shared reference to game footprints
+	ClaimedBuildingIdx int               // index into buildingFootprints, -1 = none
+	claimEvalTick      int               // tick of last building evaluation
+	buildingFootprints []rect            // shared reference to game footprints
+	buildingQualities  []BuildingQuality // pre-computed tactical metrics per footprint
 	// Claimed-building lifecycle tracking.
 	claimedNoContactTicks      int
 	claimedOccupiedTicks       int
 	buildingClaimCooldownUntil int
+	// Building state: sector assignments and rotation tracking.
+	buildingState *BuildingState
+	// Building intel: leader's mental map of enemy-occupied buildings.
+	buildingIntel *BuildingIntelMap
 
 	// Intent hysteresis: avoid order thrash at range boundaries.
-	intentLockUntil int // tick until which non-critical intent changes are deferred
+	intentLockUntil      int // tick until which non-critical intent changes are deferred
+	lastIntentChangeTick int // tick when intent last changed
+
+	// Formation stability: avoid micro-recalculations.
+	lastFormationLeaderX float64
+	lastFormationLeaderY float64
+	lastFormationUpdate  int
+	lastFormation        FormationType
 	// Stalemate controller: detects prolonged non-progress contact and forces
 	// proactive pushes to break static long-range deadlocks.
 	stalemateTicks     int
@@ -72,6 +88,9 @@ type Squad struct {
 	boundCycleTick int
 	// boundCycleActive: true when buddy bounding is in effect (contact + MoveToContact).
 	boundCycleActive bool
+
+	// Formation rejoin: track when contact ended to force formation update after delay.
+	lastContactTick int
 
 	// Cohesion collapse telemetry.
 	CasualtyRate       float64
@@ -227,6 +246,7 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 		Phase:              SquadPhaseApproach,
 		Cohesion:           1.0,
 		ClaimedBuildingIdx: -1,
+		buildingIntel:      NewBuildingIntelMap(),
 		radioNet: radioNet{
 			netID: id + 1,
 		},
@@ -502,6 +522,22 @@ func (sq *Squad) issueOfficerOrder(tick int, kind OfficerCommandKind, targetX, t
 		}
 	}
 
+	// Prevent rapid order kind changes (hysteresis).
+	// Orders must persist for minimum duration unless new order is significantly higher priority.
+	if sq.ActiveOrder.State == OfficerOrderActive && sq.ActiveOrder.Kind != kind {
+		ticksSinceIssued := tick - sq.ActiveOrder.IssuedTick
+		minOrderDuration := 60 // 1 second minimum
+		if ticksSinceIssued < minOrderDuration {
+			// Only allow change if new order is much higher priority
+			priorityGap := priority - sq.ActiveOrder.Priority
+			if priorityGap < 0.15 {
+				// Keep current order to prevent thrashing
+				sq.ActiveOrder.ExpiresTick = tick + ttl
+				return
+			}
+		}
+	}
+
 	sq.nextOrderID++
 	sq.ActiveOrder = OfficerOrder{
 		ID:          sq.nextOrderID,
@@ -539,6 +575,11 @@ func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY 
 		sq.Formation = form
 		tx, ty := goalX, goalY
 		priority, strength := 0.65, 0.80
+		if sq.supportActiveUntil > 0 && tick < sq.supportActiveUntil {
+			tx, ty = sq.supportTargetX, sq.supportTargetY
+			priority = math.Max(priority, 0.80)
+			strength = math.Max(strength, 0.90)
+		}
 		if forceProactive {
 			if bx, by, ok := sq.claimedBuildingCentroid(); ok {
 				tx, ty = bx, by
@@ -608,15 +649,27 @@ func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY 
 // It evaluates the leader's blackboard and sets Intent + orders for members.
 // intel is the world IntelStore; may be nil (degrades gracefully to blackboard-only).
 func (sq *Squad) SquadThink(intel *IntelStore) {
-	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
-		alive := sq.Alive()
-		if len(alive) == 0 {
+	leaderIncapacitated := sq.Leader == nil || sq.Leader.state == SoldierStateDead || sq.Leader.state == SoldierStateUnconscious
+	if leaderIncapacitated {
+		// Find capable candidates (alive and not incapacitated)
+		var candidates []*Soldier
+		for _, m := range sq.Members {
+			if m.state != SoldierStateDead && m.state != SoldierStateUnconscious &&
+				m.state != SoldierStateWoundedNonAmbulatory {
+				candidates = append(candidates, m)
+			}
+		}
+
+		if len(candidates) == 0 {
+			// No capable members - squad is combat ineffective
+			sq.Intent = IntentHold
 			return
 		}
-		candidate := alive[0]
+
+		candidate := candidates[0]
 
 		if !sq.leaderSucceeding {
-			// Leader just died — start succession clock.
+			// Leader incapacitated (dead/unconscious) — start succession clock.
 			// Delay is longer if candidate is stressed or inexperienced.
 			ef := candidate.profile.Psych.EffectiveFear()
 			exp := candidate.profile.Psych.Experience
@@ -735,6 +788,16 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		}
 	}
 
+	var tick int
+	if sq.Leader != nil && sq.Leader.currentTick != nil {
+		tick = *sq.Leader.currentTick
+	}
+
+	// Track when contact last occurred for formation rejoin timer.
+	if hasContact {
+		sq.lastContactTick = tick
+	}
+
 	spread := sq.squadSpread()
 
 	aliveCount := 0
@@ -750,7 +813,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		aliveCount++
 		fearSum += m.profile.Psych.EffectiveFear()
 		moraleSum += m.profile.Psych.Morale
-		if m.health() < soldierMaxHP {
+		if m.body.IsInjured() {
 			injuredAliveCount++
 		}
 		if m.blackboard.IncomingFireCount > 0 || m.blackboard.IsSuppressed() {
@@ -768,11 +831,6 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		if m.state == SoldierStateIdle && terminal {
 			terminalStalledCount++
 		}
-	}
-
-	tick := 0
-	if sq.Leader != nil && sq.Leader.currentTick != nil {
-		tick = *sq.Leader.currentTick
 	}
 
 	avgFear := 0.0
@@ -828,6 +886,24 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	newInjuries := max(0, injuredAliveCount-sq.prevInjuredAliveCount)
 	newDeaths := max(0, casualties-sq.prevCasualtyCount)
 	sq.cohesionShock = clamp01(sq.cohesionShock*0.90 + float64(newInjuries)*0.18 + float64(newDeaths)*0.35)
+
+	// Fresh casualty events should prompt an immediate goal re-evaluation.
+	// This is critical for responsive buddy-aid / medic-aid behavior.
+	if (newInjuries > 0 || newDeaths > 0) && sq.Leader != nil {
+		for _, m := range sq.Members {
+			if m == nil || m.state == SoldierStateDead {
+				continue
+			}
+			m.blackboard.ensureInternalDefaults()
+			if m.blackboard.ShatterThreshold <= 0 {
+				m.blackboard.ShatterThreshold = defaultShatterThreshold
+			}
+			// Force immediate re-evaluation: bypass commit-phase scaling by setting
+			// pressure above threshold directly.
+			m.blackboard.ShatterPressure = m.blackboard.ShatterThreshold * 1.25
+			m.blackboard.NextDecisionTick = tick
+		}
+	}
 
 	cohesionPressure := clamp01(outnumberedPressure*0.45 + incomingFirePressure*0.75 + deathPressure*1.10 + sq.cohesionShock*0.85)
 	cohesionDecay := cohesionPressure * 0.0065
@@ -886,6 +962,55 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			lx, ly := sq.Leader.x, sq.Leader.y
 			dangerAtPos = im.Layer(IntelDangerZone).SumInRadius(lx, ly, 120)
 			contactAhead = im.Layer(IntelContact).SumInRadius(lx, ly, 300)
+		}
+	}
+
+	if sq.supportActiveUntil > 0 && tick >= sq.supportActiveUntil {
+		sq.supportActiveUntil = 0
+	}
+	lowPressure := !hasContact && anyVisibleThreats == 0 && !sq.Broken && spread < 200 && underFireCount == 0 && sq.Stress < 0.35 && sq.Leader.profile.Psych.EffectiveFear() < 0.45
+	if lowPressure && intel != nil {
+		im := intel.For(sq.Team)
+		if im != nil {
+			dangerLayer := im.Layer(IntelDangerZone)
+			friendlyLayer := im.Layer(IntelFriendlyPresence)
+			lx, ly := sq.Leader.x, sq.Leader.y
+			bestScore := 0.0
+			bestX, bestY := 0.0, 0.0
+			for row := 0; row < dangerLayer.rows; row++ {
+				for col := 0; col < dangerLayer.cols; col++ {
+					v := dangerLayer.At(row, col)
+					if v <= 0 {
+						continue
+					}
+					wx, wy := CellToWorld(col, row)
+					dx := wx - lx
+					dy := wy - ly
+					d2 := dx*dx + dy*dy
+					if d2 < 220*220 {
+						continue
+					}
+					friendSum := float64(friendlyLayer.SumInRadius(wx, wy, 160))
+					if friendSum < 0.5 {
+						continue
+					}
+					d := math.Sqrt(d2)
+					if d > 1200 {
+						continue
+					}
+					score := float64(v)*1.35 + friendSum*0.25 - d*0.0006
+					if score > bestScore {
+						bestScore = score
+						bestX, bestY = wx, wy
+					}
+				}
+			}
+			if bestScore > 0.95 {
+				sq.supportTargetX = bestX
+				sq.supportTargetY = bestY
+				sq.supportActiveUntil = tick + 240
+				sq.Leader.think("supporting friendlies under fire")
+			}
 		}
 	}
 
@@ -965,11 +1090,44 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	if sq.Broken {
 		candidateIntent = IntentWithdraw
 	}
-	criticalIntent := forceProactive || spread > 250 || (anyVisibleThreats > 0 && closestDist < engageEnterDist)
+	criticalIntent := forceProactive || spread > 250 || (anyVisibleThreats > 0 && closestDist < engageEnterDist) || sq.Broken
+
+	// Intent change hysteresis: prevent rapid intent switching.
+	// Minimum duration per intent (3-5 seconds) unless critical situation.
 	if candidateIntent != sq.Intent {
+		ticksSinceChange := tick - sq.lastIntentChangeTick
+		minIntentDuration := 180 // 3 seconds base
+
+		// Combat lock: prevent intent changes during active combat
+		// This prevents disruption when squad is engaged with visible threats
+		if anyVisibleThreats > 0 && closestDist < engageExitDist {
+			minIntentDuration = 300 // 5 seconds during active combat
+			// Lock current intent unless:
+			// 1. Changing to Withdraw (emergency escape)
+			// 2. Already in Engage and staying there
+			// 3. Critical situation (extreme spread, broken cohesion)
+			if candidateIntent != IntentWithdraw && candidateIntent != IntentEngage && !criticalIntent {
+				if ticksSinceChange < minIntentDuration {
+					candidateIntent = sq.Intent
+				}
+			}
+			// Also prevent changing away from Engage unless critical
+			if sq.Intent == IntentEngage && candidateIntent != IntentWithdraw && candidateIntent != IntentEngage {
+				if !criticalIntent && ticksSinceChange < minIntentDuration {
+					candidateIntent = sq.Intent
+				}
+			}
+		}
+
+		// General intent stability
+		if !criticalIntent && ticksSinceChange < minIntentDuration {
+			candidateIntent = sq.Intent
+		}
+
+		// Legacy lock system (keep for additional stability)
 		if !criticalIntent && tick < sq.intentLockUntil {
 			candidateIntent = sq.Intent
-		} else {
+		} else if candidateIntent != sq.Intent {
 			leaderFear := sq.Leader.profile.Psych.EffectiveFear()
 			if forceProactive && sq.Leader.blackboard.IncomingFireCount == 0 && !sq.Leader.blackboard.IsSuppressed() {
 				leaderFear = math.Min(leaderFear, 0.35)
@@ -980,6 +1138,11 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			fuzzy := int(math.Abs(math.Sin(float64(tick+sq.ID*17))) * 18)
 			sq.intentLockUntil = tick + 30 + int(leaderFear*70) + fuzzy
 		}
+	}
+
+	// Track intent changes
+	if candidateIntent != sq.Intent {
+		sq.lastIntentChangeTick = tick
 	}
 	sq.Intent = candidateIntent
 	sq.syncOfficerOrder(tick, hasContact, contactX, contactY, stalemateActive, forceProactive)
@@ -1127,6 +1290,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		m.blackboard.SquadCasualtyRate = sq.CasualtyRate
 		m.blackboard.SquadStress = sq.Stress
 		m.blackboard.SquadCohesion = sq.Cohesion
+		m.blackboard.SquadHasCasualties = sq.hasCasualtiesNeedingAid()
 		m.blackboard.OfficerOrderImmediate = false
 		m.blackboard.OfficerOrderObedienceChance = 0
 		if sq.ActiveOrder.IsActiveAt(tick) {
@@ -1263,10 +1427,13 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		// Swap cadence:
 		// - don't swap faster than 2 seconds (lets movers make progress),
 		// - but force a swap after a hard cap to prevent one group starving.
+		// - also force swap if movers have been stalled/idle for too long.
 		cycleMinTicks := 120
 		cycleMaxTicks := 180
+		stallForceSwapTicks := 60
 		elapsed := tick - sq.boundCycleTick
-		if (allMoversSettled && elapsed >= cycleMinTicks) || elapsed >= cycleMaxTicks {
+		moverStallDetected := !allMoversSettled && elapsed >= stallForceSwapTicks
+		if (allMoversSettled && elapsed >= cycleMinTicks) || elapsed >= cycleMaxTicks || moverStallDetected {
 			sq.BoundMovingGroup = 1 - sq.BoundMovingGroup
 			sq.boundCycleTick = tick
 		}
@@ -1291,7 +1458,10 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 
 	// --- Building takeover ---
 	// Leader periodically evaluates nearby buildings along the advance route.
-	sq.evaluateBuildings()
+	// Skip evaluation when broken - squad should be withdrawing.
+	if !sq.Broken {
+		sq.evaluateBuildings()
+	}
 	if sq.ClaimedBuildingIdx >= 0 && sq.ClaimedBuildingIdx < len(sq.buildingFootprints) {
 		occupants := 0
 		for _, m := range sq.Members {
@@ -1312,11 +1482,43 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		} else {
 			sq.claimedNoContactTicks++
 		}
+
+		// Update building state and assign sectors
+		if sq.buildingState == nil || sq.buildingState.FootprintIdx != sq.ClaimedBuildingIdx {
+			// New building claimed - initialize state and assign sectors
+			fp := sq.buildingFootprints[sq.ClaimedBuildingIdx]
+			cx := float64(fp.x + fp.w/2)
+			cy := float64(fp.y + fp.h/2)
+
+			sq.buildingState = &BuildingState{
+				FootprintIdx:    sq.ClaimedBuildingIdx,
+				ClaimTick:       tick,
+				AssignedSectors: AssignSectors(cx, cy, sq.Members, sq.EnemyBearing, hasContact),
+				LastRotateTick:  tick,
+				OccupantCount:   occupants,
+				LastContactTick: tick,
+			}
+		} else {
+			// Update existing building state
+			sq.buildingState.OccupantCount = occupants
+			if hasContact {
+				sq.buildingState.LastContactTick = tick
+			}
+
+			// Rotate sectors every 120-180 seconds to avoid predictability
+			rotateInterval := 7200 // 120 seconds at 60 TPS
+			if tick-sq.buildingState.LastRotateTick > rotateInterval {
+				sq.buildingState.AssignedSectors = RotateSectors(sq.buildingState.AssignedSectors)
+				sq.buildingState.LastRotateTick = tick
+			}
+		}
+
 		if !hasContact && sq.claimedNoContactTicks > 420 && sq.claimedOccupiedTicks > 150 {
 			sq.ClaimedBuildingIdx = -1
 			sq.claimedNoContactTicks = 0
 			sq.claimedOccupiedTicks = 0
 			sq.buildingClaimCooldownUntil = tick + 360
+			sq.buildingState = nil
 			if sq.Leader != nil {
 				sq.Leader.think("building low value — abandon and continue search")
 			}
@@ -1326,6 +1528,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		if sq.claimedOccupiedTicks > 0 {
 			sq.claimedOccupiedTicks--
 		}
+		sq.buildingState = nil
 	}
 	// Propagate claim to all alive members.
 	for _, m := range sq.Members {
@@ -1516,6 +1719,7 @@ func (sq *Squad) evaluateBuildings() {
 
 	bestIdx := -1
 	bestScore := -999.0
+	currentScore := -999.0
 	maxDist := 400.0 // only consider buildings within 400px
 
 	for i, fp := range sq.buildingFootprints {
@@ -1546,35 +1750,73 @@ func (sq *Squad) evaluateBuildings() {
 		if dot < 0.1 {
 			continue // building is behind or to the side
 		}
-		// Score: prefer ahead and close.
-		score := dot*0.6 - dist/maxDist*0.4
 
+		// NEW: Multi-factor scoring using building qualities
+		var quality BuildingQuality
+		if i < len(sq.buildingQualities) {
+			quality = sq.buildingQualities[i]
+		}
+
+		// Base tactical value from pre-computed quality
+		score := quality.TacticalValue * 0.35
+
+		// Geometric factors: direction and distance
+		normalizedDist := 1.0 - (dist / maxDist)
+		score += dot*0.25 + normalizedDist*0.20
+
+		// Contact alignment: building between squad and enemy
 		if obsHasContact {
 			cdx := obsContactX - lx
 			cdy := obsContactY - ly
 			cd := math.Hypot(cdx, cdy)
 			if cd > 1 {
-				cDot := (dx*cdx + dy*cdy) / (dist * cd)
-				score += cDot * 0.45
-				if cDot < -0.05 {
+				contactAlignment := (dx*cdx + dy*cdy) / (dist * cd)
+				score += contactAlignment * 0.25
+				// Penalty if building is opposite direction from contact
+				if contactAlignment < -0.05 {
 					score -= 0.35
 				}
 			}
 		}
-		// Bigger buildings are more valuable (more cover).
-		area := float64(fp.w * fp.h)
-		score += math.Min(0.3, area/50000.0)
 
-		if b.IncomingFireCount > 0 || b.IsSuppressed() {
-			score += math.Max(0, 0.30-dist/maxDist*0.25)
-		}
+		// Current occupancy bonus
 		if overlapCount > 0 {
-			score += 0.20
+			score += 0.10
+		}
+
+		// Urgency bonus when under fire: prefer closer, better cover
+		if b.IncomingFireCount > 0 || b.IsSuppressed() {
+			urgencyBonus := quality.CoverQuality*0.15 + normalizedDist*0.15
+			score += urgencyBonus
+		}
+
+		// Squad phase bonus: different phases value different building aspects
+		switch sq.Phase {
+		case SquadPhaseAssault:
+			// Assaulting: value accessibility and forward position
+			score += quality.AccessibilityScore * 0.10
+		case SquadPhaseFixFire:
+			// Fixing: value sightlines and cover
+			score += quality.SightlineScore*0.10 + quality.CoverQuality*0.10
 		}
 
 		if score > bestScore {
 			bestScore = score
 			bestIdx = i
+		}
+
+		// Track current building's score for hysteresis
+		if i == sq.ClaimedBuildingIdx {
+			currentScore = score
+		}
+	}
+
+	// Hysteresis: new building must score significantly higher to trigger switch
+	hysteresisThreshold := 0.25
+	if sq.ClaimedBuildingIdx >= 0 && bestIdx != sq.ClaimedBuildingIdx {
+		if bestScore < currentScore+hysteresisThreshold {
+			// Current building is still good enough, don't switch
+			return
 		}
 	}
 
@@ -1788,9 +2030,27 @@ func (sq *Squad) squadCentroid() (float64, float64) {
 	return sumX / n, sumY / n
 }
 
+// hasCasualtiesNeedingAid returns true if the squad has wounded members requiring medical aid.
+func (sq *Squad) hasCasualtiesNeedingAid() bool {
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			continue
+		}
+		// Unconscious soldiers always need aid (airway management, monitoring).
+		if m.state == SoldierStateUnconscious {
+			return true
+		}
+		// Injured soldiers with untreated wounds need aid.
+		if m.body.IsInjured() && m.body.HasUntreatedWounds() {
+			return true
+		}
+	}
+	return false
+}
+
 // squadSpread returns the max distance of any alive member from the leader.
 func (sq *Squad) squadSpread() float64 {
-	if sq.Leader == nil {
+	if len(sq.Members) < 2 {
 		return 0
 	}
 	max2 := 0.0
@@ -1831,10 +2091,37 @@ func (sq *Squad) LeaderCohesionSlowdown() float64 {
 // UpdateFormation computes world-space slot positions and triggers repath
 // for any member whose slot has drifted beyond the threshold.
 func (sq *Squad) UpdateFormation() {
-	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
+	if sq.Leader == nil {
 		return
 	}
+
+	tick := sq.Leader.tickVal()
 	lx, ly := sq.Leader.x, sq.Leader.y
+
+	// Formation stability: only recalculate if leader moved significantly
+	// or formation type changed. Prevents micro-adjustments every tick.
+	dx := lx - sq.lastFormationLeaderX
+	dy := ly - sq.lastFormationLeaderY
+	distMoved := math.Sqrt(dx*dx + dy*dy)
+
+	timeSinceUpdate := tick - sq.lastFormationUpdate
+	formationChanged := sq.Formation != sq.lastFormation
+
+	// Don't update more than once per second unless formation type changed
+	if !formationChanged && timeSinceUpdate < 60 {
+		return
+	}
+
+	// Don't update unless leader moved at least 3 cells (48 pixels)
+	if !formationChanged && distMoved < 48 {
+		return
+	}
+
+	// Update tracking
+	sq.lastFormationLeaderX = lx
+	sq.lastFormationLeaderY = ly
+	sq.lastFormationUpdate = tick
+	sq.lastFormation = sq.Formation
 
 	// Smooth the leader's heading to dampen formation jitter.
 	leaderH := sq.Leader.vision.Heading
@@ -1842,9 +2129,10 @@ func (sq *Squad) UpdateFormation() {
 		sq.smoothedHeading = leaderH
 		sq.headingInit = true
 	} else {
-		// Exponential moving average — alpha 0.05 ≈ ~20 tick time constant.
+		// Exponential moving average — alpha 0.12 ≈ ~8 tick time constant.
+		// Faster response for sharp turns while still dampening minor jitter.
 		diff := normalizeAngle(leaderH - sq.smoothedHeading)
-		sq.smoothedHeading = normalizeAngle(sq.smoothedHeading + diff*0.05)
+		sq.smoothedHeading = normalizeAngle(sq.smoothedHeading + diff*0.12)
 	}
 
 	offsets := formationOffsets(sq.Formation, len(sq.Members))
@@ -1856,11 +2144,16 @@ func (sq *Squad) UpdateFormation() {
 		}
 		// Don't clobber paths for members who are actively engaging or closing on contact.
 		// Their paths are managed by moveToContact / GoalEngage logic.
+		// However, after contact ends for 5+ seconds, force formation rejoin to prevent scatter.
 		g := m.blackboard.CurrentGoal
-		if g == GoalEngage || g == GoalFallback || g == GoalFlank || g == GoalOverwatch {
+		ticksSinceContact := m.tickVal() - sq.lastContactTick
+		formationRejoinDelay := 300 // 5 seconds at 60 TPS
+		allowRejoin := ticksSinceContact > formationRejoinDelay
+
+		if !allowRejoin && (g == GoalEngage || g == GoalFallback || g == GoalFlank || g == GoalOverwatch) {
 			continue
 		}
-		if g == GoalMoveToContact && (m.blackboard.VisibleThreatCount() > 0 || m.blackboard.SquadHasContact || m.blackboard.HeardGunfire) {
+		if !allowRejoin && g == GoalMoveToContact && (m.blackboard.VisibleThreatCount() > 0 || m.blackboard.SquadHasContact || m.blackboard.HeardGunfire) {
 			continue
 		}
 		// If a member has completed their current path, force a repath to the

@@ -236,6 +236,8 @@ type Blackboard struct {
 	SquadStress float64
 	// SquadCohesion is the 0..1 cohesion signal from squad-level state.
 	SquadCohesion float64
+	// SquadHasCasualties is true when the squad has wounded members needing aid.
+	SquadHasCasualties bool
 
 	// Per-member move order: leader assigns each member a spread position to
 	// advance toward during IntentEngage, rather than all converging on one point.
@@ -307,9 +309,10 @@ type Blackboard struct {
 	CombatMemoryY        float64
 
 	// --- Flanking state ---
-	FlankComplete bool    // true when the perpendicular leg is done
-	FlankTargetX  float64 // world position of flank waypoint
-	FlankTargetY  float64
+	FlankComplete         bool    // true when the perpendicular leg is done
+	FlankCompleteCooldown int     // ticks remaining before flank goal can be selected again
+	FlankTargetX          float64 // world position of flank waypoint
+	FlankTargetY          float64
 
 	// --- Sightline awareness ---
 	LocalSightlineScore float64 // 0-1, how many cells visible from current position
@@ -814,7 +817,7 @@ func (bb *Blackboard) UpdateThreats(contacts []*Soldier, currentTick int) {
 func (bb *Blackboard) VisibleThreatCount() int {
 	n := 0
 	for _, t := range bb.Threats {
-		if t.IsVisible {
+		if t.IsVisible && (t.Source == nil || t.Source.state != SoldierStateDead) {
 			n++
 		}
 	}
@@ -878,11 +881,17 @@ func (bb *Blackboard) RecordGunfireWithStrength(x, y, strength float64) {
 
 // DecayCombatMemory should be called once per tick per soldier.
 // It reduces combat memory toward zero and clears the flag when negligible.
+// Decay is faster when no contact for >10 seconds to prevent prolonged activation.
 func (bb *Blackboard) DecayCombatMemory() {
 	if bb.CombatMemoryStrength <= 0 {
 		return
 	}
-	bb.CombatMemoryStrength -= combatMemoryDecayPerTick
+	decay := combatMemoryDecayPerTick
+	// Faster decay when no contact and not activated by current threats.
+	if !bb.SquadHasContact && bb.VisibleThreatCount() == 0 && !bb.HeardGunfire {
+		decay *= 3.0
+	}
+	bb.CombatMemoryStrength -= decay
 	if bb.CombatMemoryStrength < 0 {
 		bb.CombatMemoryStrength = 0
 	}
@@ -1119,6 +1128,14 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		if internal.LastRange > accurateFireRange && internal.LastEstimatedHitChance < internal.Thresholds.LongRangeShotQuality {
 			engageUtil -= 0.18
 		}
+		// Range band stability: if currently engaging and near threshold, add hysteresis bonus
+		if bb.CurrentGoal == GoalEngage && internal.LastRange > accurateFireRange {
+			// Check if we're near the threshold (within 20% margin)
+			thresholdMargin := math.Abs(internal.LastEstimatedHitChance - internal.Thresholds.LongRangeShotQuality)
+			if thresholdMargin < 0.06 {
+				engageUtil += 0.12 // Stability bonus to prevent flip-flop
+			}
+		}
 		engageUtil -= ef * 0.30 // less fear-suppression of engagement
 		if underFire {
 			engageUtil += 0.03
@@ -1217,6 +1234,13 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 			// Stronger urgency: the further out of range, the more they need to close.
 			rangePressure := clamp01((internal.LastRange - accurateFireRange) / accurateFireRange)
 			moveToContactUtil += 0.20 + rangePressure*0.25
+			// Range band stability: if currently moving and near threshold, add hysteresis bonus
+			if bb.CurrentGoal == GoalMoveToContact {
+				thresholdMargin := math.Abs(internal.LastEstimatedHitChance - internal.Thresholds.LongRangeShotQuality)
+				if thresholdMargin < 0.06 {
+					moveToContactUtil += 0.12 // Stability bonus to prevent flip-flop
+				}
+			}
 		}
 		if hasAudioContact && !bb.SquadHasContact {
 			moveToContactUtil += 0.10
@@ -1256,7 +1280,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	// Available even with visible threats at poor range — flanking is a valid
 	// response to being pinned at long range with no effective shot.
 	flankUtil := 0.0
-	if anyContact && !bb.FlankComplete {
+	if anyContact && !bb.FlankComplete && bb.FlankCompleteCooldown <= 0 {
 		if visibleThreats == 0 {
 			flankUtil = 0.35 + profile.Skills.Fieldcraft*0.35 + internal.MoveDesire*0.20
 			// Memory-only: scale by memory freshness and fieldcraft.
@@ -1422,34 +1446,57 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	helpCasualtyUtil := 0.0
 	// Only consider if soldier can provide care and squad has casualties.
 	// Suppressed soldiers won't expose themselves to help.
-	// High fear reduces willingness unless medic (medics are trained to push through).
-	if !bb.IsSuppressed() && suppress < 0.4 {
-		// Base urgency scales with first aid skill and medic role.
-		baseUrgency := profile.Skills.FirstAid * 0.40
-		if bb.Internal.IsMedic {
-			baseUrgency += 0.35 // medics have strong drive to help
-		}
+	if !bb.IsSuppressed() && suppress < 0.5 {
+		// Check if squad has casualties needing aid (set by squad think).
+		hasCasualties := bb.SquadHasCasualties
 
-		// Reduce if under fire or visible threats.
-		if visibleThreats > 0 {
-			baseUrgency *= 0.15 // combat takes priority
-		} else if underFire {
-			baseUrgency *= 0.30
-		}
+		if hasCasualties {
+			// Base urgency: should beat pure advance in most non-contact situations.
+			baseUrgency := 0.72 + profile.Skills.FirstAid*0.35
+			if bb.Internal.IsMedic {
+				baseUrgency = 1.05 // medics have extremely strong drive to help
+			}
 
-		// Fear penalty (medics resist this better).
-		fearPenalty := ef * 0.35
-		if bb.Internal.IsMedic {
-			fearPenalty *= 0.5 // medics trained to work under stress
-		}
+			// In no-contact/no-fire situations, helping should dominate.
+			if visibleThreats == 0 && !underFire {
+				baseUrgency += 0.18
+			}
 
-		helpCasualtyUtil = baseUrgency - fearPenalty
+			// Reduce if under fire or visible threats.
+			if visibleThreats > 0 {
+				baseUrgency *= 0.55
+			} else if underFire {
+				baseUrgency *= 0.70
+			}
 
-		// Boost if squad has casualties (checked at execution time).
-		// Medics get extra boost.
-		if bb.Internal.IsMedic {
-			helpCasualtyUtil += 0.20
+			// Fear penalty (medics resist this much better).
+			fearPenalty := ef * 0.25
+			if bb.Internal.IsMedic {
+				fearPenalty *= 0.3 // medics trained to work under stress
+			}
+
+			helpCasualtyUtil = baseUrgency - fearPenalty
+
+			// Extra boost for medics and high first aid skill.
+			if bb.Internal.IsMedic {
+				helpCasualtyUtil += 0.25
+			}
+			if profile.Skills.FirstAid > 0.5 {
+				helpCasualtyUtil += 0.15
+			}
+
+			// In a distraction-free environment, we want buddy aid to actually happen.
+			// Give an additional global boost when the squad has casualties.
+			helpCasualtyUtil += 0.18
 		}
+	}
+
+	// When the squad has casualties, strongly discourage pure advance/formation
+	// in no-contact scenarios so that helpers actually peel off to render aid.
+	if bb.SquadHasCasualties && visibleThreats == 0 && !underFire {
+		advanceUtil *= 0.22
+		formationUtil *= 0.22
+		regroupUtil *= 0.55
 	}
 
 	// --- Peek: cautious look around a corner or through a window. ---
@@ -1460,8 +1507,13 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		if bb.AtCorner || bb.AtWindowAdj {
 			peekUtil = 0.60 + profile.Skills.Fieldcraft*0.25
 			// Reduce for each successive empty peek at this spot.
-			noContactPenalty := math.Min(0.45, float64(bb.PeekNoContactCount)*0.15)
+			// Increased penalty to prevent peek loop oscillation.
+			noContactPenalty := math.Min(0.90, float64(bb.PeekNoContactCount)*0.30)
 			peekUtil -= noContactPenalty
+			// Hard suppression after 4 consecutive empty peeks
+			if bb.PeekNoContactCount >= 4 {
+				peekUtil = 0.0
+			}
 			// When visibly engaged, peek is pointless — just fire.
 			if visibleThreats > 0 {
 				peekUtil *= 0.10
@@ -1559,6 +1611,12 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 func SelectGoalWithHysteresis(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath bool) GoalKind {
 	candidate := SelectGoal(bb, profile, isLeader, hasPath)
 	if candidate == bb.CurrentGoal {
+		return candidate
+	}
+
+	// Casualty response is urgent: don't let hysteresis prevent switching
+	// into HelpCasualty when the squad has wounded members needing aid.
+	if bb.SquadHasCasualties && candidate == GoalHelpCasualty {
 		return candidate
 	}
 

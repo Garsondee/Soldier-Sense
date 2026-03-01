@@ -359,6 +359,7 @@ func (sq *Squad) resolveInFlightTransmission(tick int, tl *ThoughtLog) {
 }
 
 func (sq *Squad) resolveStatusTimeouts(tick int, tl *ThoughtLog) {
+	timeoutStressThisTick := 0.0
 	for id, deadline := range sq.radioPendingStatus {
 		if tick <= deadline {
 			continue
@@ -367,14 +368,20 @@ func (sq *Squad) resolveStatusTimeouts(tick int, tl *ThoughtLog) {
 		delete(sq.radioStatusReplyQueued, id)
 		sq.radioUnresponsive[id] = true
 		sq.RadioTimeouts++
-		if sq.Leader != nil {
-			sq.Leader.profile.Psych.ApplyStress(0.02)
-			sq.Leader.blackboard.ShatterEvent = true
-			sq.Leader.blackboard.UnresponsiveMembers = len(sq.radioUnresponsive)
-		}
-		if tl != nil {
+		timeoutStressThisTick += 0.02
+		if tl != nil && sq.Leader != nil {
 			tl.Add(tick, sq.Leader.label, sq.Team, fmt.Sprintf("radio timeout: %s no reply", sq.memberLabelByID(id)), LogCatRadio)
 		}
+	}
+	// Cap stress accumulation from timeouts to prevent cascade when multiple members time out.
+	if timeoutStressThisTick > 0 && sq.Leader != nil {
+		cappedStress := timeoutStressThisTick
+		if cappedStress > 0.05 {
+			cappedStress = 0.05
+		}
+		sq.Leader.profile.Psych.ApplyStress(cappedStress)
+		sq.Leader.blackboard.ShatterEvent = true
+		sq.Leader.blackboard.UnresponsiveMembers = len(sq.radioUnresponsive)
 	}
 }
 
@@ -390,9 +397,26 @@ func (sq *Squad) applyRadioMessage(msg RadioMessage, tick int) {
 	switch msg.Type {
 	case RadioMsgContactReport:
 		bb.RadioHasContact = true
-		bb.RadioContactX = msg.ContactX
-		bb.RadioContactY = msg.ContactY
-		bb.RadioContactTick = msg.TickCreated
+		// Validate garbled reports against visual contact if available.
+		if bb.VisibleThreatCount() > 0 {
+			// Leader has visual - use that instead of potentially garbled radio report.
+			closest := math.MaxFloat64
+			for _, t := range bb.Threats {
+				if t.IsVisible {
+					d := math.Hypot(t.X-sq.Leader.x, t.Y-sq.Leader.y)
+					if d < closest {
+						closest = d
+						bb.RadioContactX = t.X
+						bb.RadioContactY = t.Y
+					}
+				}
+			}
+		} else {
+			// No visual - use radio report but mark as potentially unreliable.
+			bb.RadioContactX = msg.ContactX
+			bb.RadioContactY = msg.ContactY
+		}
+		bb.RadioContactTick = tick
 		bb.SquadHasContact = true
 		bb.SquadContactX = msg.ContactX
 		bb.SquadContactY = msg.ContactY

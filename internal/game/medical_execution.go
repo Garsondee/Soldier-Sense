@@ -24,7 +24,7 @@ func (s *Soldier) executeHelpCasualty(dt float64) {
 	dist := math.Sqrt(dx*dx + dy*dy)
 
 	// If close enough, provide aid.
-	if dist < 20.0 {
+	if dist < 35.0 {
 		s.state = SoldierStateIdle
 		s.requestStance(StanceCrouching, false)
 
@@ -51,36 +51,17 @@ func (s *Soldier) executeHelpCasualty(dt float64) {
 	s.state = SoldierStateMoving
 	s.requestStance(StanceCrouching, false)
 
-	// Check if we need a new path.
-	if s.path == nil || s.pathIndex >= len(s.path) {
-		if s.navGrid != nil {
+	// Ensure we keep redirecting toward the casualty even if we had a prior path
+	// from another goal (advance/formation/etc).
+	if s.navGrid != nil {
+		tick := s.tickVal()
+		if s.path == nil || s.pathIndex >= len(s.path) || tick%15 == 0 {
 			s.path = s.navGrid.FindPath(s.x, s.y, casualty.x, casualty.y)
 			s.pathIndex = 0
 		}
 	}
 
 	s.moveAlongPath(dt)
-}
-
-// executeDragCasualty drags a non-ambulatory casualty to safety.
-func (s *Soldier) executeDragCasualty(casualty *Soldier, dt float64) {
-	if casualty == nil || casualty.state == SoldierStateDead {
-		return
-	}
-
-	// Check if already dragging.
-	if !casualty.casualty.BeingDragged || casualty.casualty.Dragger != s {
-		// Find safe drag target.
-		targetX, targetY, ok := s.findSafeDragTarget(casualty)
-		if !ok {
-			return
-		}
-		s.startDraggingCasualty(casualty, targetX, targetY)
-	}
-
-	// Tick the drag movement.
-	s.tickCasualtyDrag(casualty)
-	s.state = SoldierStateMoving
 }
 
 // integrateWoundedSelfAid runs self-aid attempts for wounded soldiers.

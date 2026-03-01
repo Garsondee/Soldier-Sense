@@ -41,7 +41,7 @@ const (
 	baseDecisionInterval   = 60    // ticks (~1s at 60 TPS) — generous baseline
 	minDecisionInterval    = 30    // floor: never re-evaluate faster than 0.5s
 	panicFearThreshold     = 0.8   // EffectiveFear above this = panic-locked
-	panicRecoveryThreshold = 0.5   // EffectiveFear below this = panic unlocks (hysteresis)
+	panicRecoveryThreshold = 0.55  // EffectiveFear below this = panic unlocks (larger hysteresis gap)
 	flankDistance          = 200.0 // px perpendicular travel during flank
 	sightlineUpdateRate    = 120   // ticks between sightline score recalcs
 	goalPauseBase          = 10    // base ticks to pause briefly after a non-critical goal switch
@@ -504,15 +504,12 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 	// Disobedience is the first stage of refusal, but still shouldn't happen immediately.
 	// Require either meaningful casualties/cohesion break, or very high squad stress
 	// combined with low morale.
-	disobeyEligible := collapseEligible &&
-		pressure > 0.87 &&
-		(directThreat || meaningfulCasualties) &&
-		(meaningfulCasualties || bb.SquadBroken || (lowMorale && bb.SquadStress > 0.58))
+	disobeyEligible := collapseEligible && bb.OfficerOrderActive
 	panicEligible := collapseEligible && pressure > 0.90 && directThreat && (veryLowMorale || heavyCasualties || bb.SquadBroken)
 
 	disobeyDrive := pressure - (s.profile.Skills.Discipline*0.42 + s.profile.Psych.Morale*0.22 + s.profile.Psych.Composure*0.18)
 	if bb.DisobeyingOrders {
-		if disobeyDrive < 0.08 {
+		if !bb.OfficerOrderActive || disobeyDrive < 0.08 {
 			bb.DisobeyingOrders = false
 		}
 	} else if disobeyEligible && disobeyDrive > 0.52 {
@@ -1210,6 +1207,9 @@ func (s *Soldier) Update() {
 	if bb.PeekCooldown > 0 {
 		bb.PeekCooldown--
 	}
+	if bb.FlankCompleteCooldown > 0 {
+		bb.FlankCompleteCooldown--
+	}
 
 	// --- Dash overwatch timer ---
 	// Soldier is frozen post-dash; tick down and force re-evaluation on expiry.
@@ -1377,7 +1377,7 @@ func (s *Soldier) Update() {
 			if s.buildingFootprints != nil {
 				footprints = s.buildingFootprints
 			}
-			bx, by, bscore := s.tacticalMap.ScanBestNearby(s.x, s.y, 10, bearing, hasEnemy, claimedIdx, footprints)
+			bx, by, bscore := s.tacticalMap.ScanBestNearby(s.x, s.y, 10, bearing, hasEnemy, claimedIdx, footprints, nil)
 			if bscore > bb.PositionDesirability+0.15 {
 				bb.BestNearbyX = bx
 				bb.BestNearbyY = by
@@ -1460,7 +1460,9 @@ func (s *Soldier) Update() {
 				s.think(fmt.Sprintf("goal: %s → %s", s.prevGoal, goal))
 				s.prevGoal = goal
 				s.goalPauseTimer = s.goalSwitchPauseDuration(stress, bb.IncomingFireCount > 0)
-				if goal != GoalFlank {
+				// Don't clear FlankComplete on goal switch - let it persist until cooldown expires
+				// or soldier moves significantly. This prevents flank→overwatch→flank loops.
+				if goal != GoalFlank && bb.FlankCompleteCooldown == 0 {
 					bb.FlankComplete = false
 				}
 				// Clear MoveToContact bounding state when leaving that goal.
@@ -1496,7 +1498,12 @@ func (s *Soldier) Update() {
 		} else {
 			bb.IrrelevantCoverTicks = 0
 		}
-		if bb.IrrelevantCoverTicks > 180 {
+		// Reduce threshold when squad is actively engaging.
+		irrelevantCoverThreshold := 180
+		if bb.SquadIntent == IntentEngage {
+			irrelevantCoverThreshold = 90
+		}
+		if bb.IrrelevantCoverTicks > irrelevantCoverThreshold {
 			bb.ForceAdvance = true
 			bb.IrrelevantCoverTicks = 0
 			s.think("irrelevant cover — forced to advance")
@@ -1512,7 +1519,12 @@ func (s *Soldier) Update() {
 			bb.IdleCombatTicks = 0
 			bb.ForceAdvance = false
 		}
-		if bb.IdleCombatTicks > 300 {
+		// Reduce threshold when squad is actively engaging.
+		idleCombatThreshold := 300
+		if bb.SquadIntent == IntentEngage {
+			idleCombatThreshold = 180
+		}
+		if bb.IdleCombatTicks > idleCombatThreshold {
 			bb.ForceAdvance = true
 			bb.IdleCombatTicks = 0
 			s.think("malingering — forced to advance")
@@ -1647,7 +1659,7 @@ func (s *Soldier) moveToClaimedBuilding(dt float64) bool {
 	if s.tacticalMap != nil {
 		bx, by, bscore := s.tacticalMap.ScanBestNearby(
 			s.x, s.y, 14, bearing, hasEnemy,
-			bb.ClaimedBuildingIdx, s.buildingFootprints,
+			bb.ClaimedBuildingIdx, s.buildingFootprints, nil,
 		)
 		if bscore > -0.30 {
 			targetX, targetY = bx, by
@@ -1763,7 +1775,37 @@ func (s *Soldier) executeGoal(dt float64) {
 		combatContext := bb.SquadHasContact || bb.VisibleThreatCount() > 0 || bb.IsActivated()
 		if combatContext && s.state == SoldierStateIdle && terminal {
 			s.mobilityStallTicks++
-			if s.mobilityStallTicks >= 30 {
+			stallThreshold := 30
+			if bb.IncomingFireCount > 0 {
+				// Under direct fire: very aggressive recovery (5-15 ticks)
+				stallThreshold = 15 - bb.IncomingFireCount*2
+				if stallThreshold < 5 {
+					stallThreshold = 5
+				}
+			} else if bb.SquadIntent == IntentEngage {
+				// Offensive posture without incoming fire: faster recovery (90 ticks = 1.5s)
+				// Prevents soldiers from camping in cover during squad assault
+				stallThreshold = 90
+			}
+
+			// Extreme stall: force immediate action to break paralysis.
+			extremeStallThreshold := stallThreshold * 2
+			if s.mobilityStallTicks > extremeStallThreshold {
+				s.mobilityStallTicks = 0
+				bb.ShatterEvent = true
+				// Force into defensive posture - seek cover or hold and fight
+				if bb.VisibleThreatCount() > 0 {
+					s.think("EXTREME STALL - seeking cover")
+					s.seekCoverFromThreat(dt)
+				} else {
+					s.think("EXTREME STALL - holding position")
+					s.state = SoldierStateIdle
+					s.faceNearestThreatOrContact()
+				}
+				return
+			}
+
+			if s.mobilityStallTicks >= stallThreshold {
 				s.mobilityStallTicks = 0
 				tx, ty := s.recoveryTargetHint()
 				bb.ShatterEvent = true
@@ -2572,6 +2614,7 @@ func (s *Soldier) moveFlank(dt float64) {
 	dy := bb.FlankTargetY - s.y
 	if math.Sqrt(dx*dx+dy*dy) < 20 || (s.path != nil && s.pathIndex >= len(s.path)) {
 		bb.FlankComplete = true
+		bb.FlankCompleteCooldown = 180
 		bb.ShatterEvent = true // force immediate re-evaluation → overwatch or advance
 		bb.FlankTargetX = 0
 		bb.FlankTargetY = 0
@@ -3091,6 +3134,18 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 			color.RGBA{R: 255, G: 230, B: 60, A: 100}, false)
 	}
 
+	// --- Medic marker: red cross symbol ---
+	if s.isMedic {
+		medicY := sy - radius - 10
+		crossSize := float32(4.0)
+		redCross := color.RGBA{R: 255, G: 40, B: 40, A: 240}
+		// White background circle
+		vector.FillCircle(screen, sx, medicY, crossSize+1.5, color.RGBA{R: 255, G: 255, B: 255, A: 220}, false)
+		// Red cross
+		vector.StrokeLine(screen, sx-crossSize, medicY, sx+crossSize, medicY, 2.2, redCross, false)
+		vector.StrokeLine(screen, sx, medicY-crossSize, sx, medicY+crossSize, 2.2, redCross, false)
+	}
+
 	// --- Directional chevron instead of a plain line ---
 	// Points in heading direction; length scales with radius.
 	tipDist := radius + 6.0
@@ -3542,6 +3597,23 @@ func (s *Soldier) moveCombatDash(dt float64) {
 	// Distance thresholds in cells (1 cell = cellSize px).
 	var targetX, targetY float64
 	usedCover := false
+
+	// Leader cover awareness: prevent leaders from leaving good cover for open ground under fire.
+	// Leaders should direct the squad from cover, not charge into the open.
+	if s.isLeader && s.tacticalMap != nil && bb.VisibleThreatCount() > 0 {
+		currentDesire := s.tacticalMap.DesirabilityAt(s.x, s.y)
+		// Check if we're in good cover (>0.3 desirability) and the destination is far away
+		if currentDesire > 0.3 && distToDest > float64(cellSize)*12 {
+			// Sample the desirability at the destination to see if we'd be exposed
+			destDesire := s.tacticalMap.DesirabilityAt(destX, destY)
+			// If destination is exposed (<0.1 desirability) and we're under threat, stay put
+			if destDesire < 0.1 {
+				s.state = SoldierStateIdle
+				s.think("holding cover - directing squad")
+				return
+			}
+		}
+	}
 
 	if s.tacticalMap != nil && distToDest > float64(cellSize)*4 {
 		// Scale bound length by distance to contact.
