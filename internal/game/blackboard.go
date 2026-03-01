@@ -19,6 +19,7 @@ const (
 	GoalFlank                             // move perpendicular to enemy then decision point
 	GoalOverwatch                         // hold a high-sightline position, scan for threats
 	GoalPeek                              // cautious peek around a corner or through a window
+	GoalHelpCasualty                      // render medical aid to wounded squad member
 )
 
 func (g GoalKind) String() string {
@@ -45,6 +46,8 @@ func (g GoalKind) String() string {
 		return "overwatch"
 	case GoalPeek:
 		return "peek"
+	case GoalHelpCasualty:
+		return "help_casualty"
 	default:
 		return "unknown"
 	}
@@ -426,6 +429,7 @@ type SoldierInternalGoals struct {
 	LastEstimatedHitChance float64
 	LastRange              float64
 	LastContactRange       float64
+	IsMedic                bool // true if this soldier is designated medic
 	Thresholds             GoalThresholds
 	// ThresholdAge is how long (ticks) this threshold set has been active.
 	// Used to drive adaptive drift: thresholds slowly shift toward current conditions.
@@ -1414,6 +1418,40 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		advanceUtil *= clamp01(1.0 - suppress*1.5)
 	}
 
+	// --- HelpCasualty: render medical aid to wounded squad member. ---
+	helpCasualtyUtil := 0.0
+	// Only consider if soldier can provide care and squad has casualties.
+	// Suppressed soldiers won't expose themselves to help.
+	// High fear reduces willingness unless medic (medics are trained to push through).
+	if !bb.IsSuppressed() && suppress < 0.4 {
+		// Base urgency scales with first aid skill and medic role.
+		baseUrgency := profile.Skills.FirstAid * 0.40
+		if bb.Internal.IsMedic {
+			baseUrgency += 0.35 // medics have strong drive to help
+		}
+
+		// Reduce if under fire or visible threats.
+		if visibleThreats > 0 {
+			baseUrgency *= 0.15 // combat takes priority
+		} else if underFire {
+			baseUrgency *= 0.30
+		}
+
+		// Fear penalty (medics resist this better).
+		fearPenalty := ef * 0.35
+		if bb.Internal.IsMedic {
+			fearPenalty *= 0.5 // medics trained to work under stress
+		}
+
+		helpCasualtyUtil = baseUrgency - fearPenalty
+
+		// Boost if squad has casualties (checked at execution time).
+		// Medics get extra boost.
+		if bb.Internal.IsMedic {
+			helpCasualtyUtil += 0.20
+		}
+	}
+
 	// --- Peek: cautious look around a corner or through a window. ---
 	// Very attractive when near a tactically interesting cell and not under fire.
 	// Each empty peek decays the utility so soldiers eventually move on.
@@ -1509,6 +1547,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	check(GoalFallback, fallbackUtil)
 	check(GoalSurvive, surviveUtil)
 	check(GoalPeek, peekUtil)
+	check(GoalHelpCasualty, helpCasualtyUtil)
 
 	return best
 }

@@ -239,6 +239,38 @@ func (g *Game) drawInspectorCurated(buf *ebiten.Image, s *Soldier, lx, ly int) {
 		ly += inspLineH
 	}
 
+	// ── HEALTH ─────────────────────────────
+	section("HEALTH")
+	bar("overall", s.body.HealthFraction())
+	bar("blood", s.body.BloodVolume)
+
+	// Show wounds if any.
+	if s.body.WoundCount() > 0 {
+		line(fmt.Sprintf("wounds: %d", s.body.WoundCount()))
+		for i, w := range s.body.Wounds {
+			if i >= 3 {
+				line(fmt.Sprintf("  +%d more", s.body.WoundCount()-3))
+				break
+			}
+			treated := " "
+			if w.Treated {
+				treated = "T"
+			}
+			line(fmt.Sprintf("  [%s]%s %s bleed:%.1f", treated, w.Region, w.Severity, w.BleedRate))
+		}
+	}
+
+	// Functional degradation.
+	mobMul := s.body.MobilityMul()
+	accMul := s.body.AccuracyMul()
+	pain := s.body.TotalPain()
+	if mobMul < 1.0 || accMul < 1.0 || pain > 0 {
+		line(fmt.Sprintf("mobility: %.0f%%  accuracy: %.0f%%", mobMul*100, accMul*100))
+		if pain > 0 {
+			line(fmt.Sprintf("pain: %.0f%%", pain*100))
+		}
+	}
+
 	// ── SITUATION ──────────────────────────
 	section("SITUATION")
 	line(fmt.Sprintf("state: %-8s stance: %s", s.state, pr.Stance))
@@ -326,7 +358,7 @@ func (g *Game) drawInspectorCurated(buf *ebiten.Image, s *Soldier, lx, ly int) {
 	if bb.ShouldReinforce {
 		line(fmt.Sprintf("reinf:(%.0f,%.0f)", bb.ReinforceMemberX, bb.ReinforceMemberY))
 	}
-	line(fmt.Sprintf("pos:(%.0f,%.0f) hp:%.0f%%", s.x, s.y, s.health*100))
+	line(fmt.Sprintf("pos:(%.0f,%.0f) hp:%.0f%%", s.x, s.y, s.health()*100))
 }
 
 // drawInspectorRaw dumps every blackboard field verbatim.
@@ -340,7 +372,7 @@ func (g *Game) drawInspectorRaw(buf *ebiten.Image, s *Soldier, lx, ly int) {
 	}
 
 	line(fmt.Sprintf("id=%d %s team=%d", s.id, s.label, s.team))
-	line(fmt.Sprintf("pos=(%.0f,%.0f) hp=%.2f", s.x, s.y, s.health))
+	line(fmt.Sprintf("pos=(%.0f,%.0f) hp=%.2f", s.x, s.y, s.health()))
 	line(fmt.Sprintf("st=%s stn=%s ldr=%v", s.state, pr.Stance, s.isLeader))
 	line(fmt.Sprintf("goal=%s prev=%s", bb.CurrentGoal, s.prevGoal))
 	line(fmt.Sprintf("intent=%s ord=%v", bb.SquadIntent, bb.OrderReceived))

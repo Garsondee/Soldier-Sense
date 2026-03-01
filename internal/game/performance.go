@@ -124,11 +124,11 @@ func (pt *PerfTracker) Update(s *Soldier) {
 	}
 
 	// Damage.
-	healthLost := soldierMaxHP - s.health
+	healthLost := soldierMaxHP - s.health()
 	if healthLost > pt.DamageTaken {
 		pt.DamageTaken = healthLost
 	}
-	pt.HealthAtEnd = s.health
+	pt.HealthAtEnd = s.health()
 
 	if s.blackboard.PanicLocked {
 		pt.TicksPanicLocked++
@@ -259,7 +259,7 @@ func (pt *PerfTracker) Update(s *Soldier) {
 // Finalize snapshots end-of-run state.
 func (pt *PerfTracker) Finalize(s *Soldier) {
 	pt.Survived = s.state != SoldierStateDead
-	pt.HealthAtEnd = s.health
+	pt.HealthAtEnd = s.health()
 }
 
 // ---------------------------------------------------------------------------

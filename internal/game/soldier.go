@@ -459,7 +459,7 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 
 		surrenderChance := clamp01(
 			pressure*0.55 +
-				(1.0-clamp01(s.health/soldierMaxHP))*0.25 +
+				(1.0-clamp01(s.health()/soldierMaxHP))*0.25 +
 				bb.SquadCasualtyRate*0.35,
 		)
 		if s.psychRoll(bb.RetreatDecisionCount+41) < surrenderChance*0.28 {
@@ -533,7 +533,7 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 		s.think("full panic retreat")
 	}
 
-	surrenderNow := panicEligible && pressure > 0.995 && (s.health < soldierMaxHP*0.30 || bb.SquadCasualtyRate > 0.65)
+	surrenderNow := panicEligible && pressure > 0.995 && (s.health() < soldierMaxHP*0.30 || bb.SquadCasualtyRate > 0.65)
 	if surrenderNow {
 		bb.Surrendered = true
 		bb.PanicRetreatActive = false
@@ -666,10 +666,13 @@ const (
 type SoldierState int
 
 const (
-	SoldierStateIdle   SoldierState = iota // holding, scanning
-	SoldierStateMoving                     // advancing along path
-	SoldierStateCover                      // in cover / suppressed
-	SoldierStateDead                       // incapacitated
+	SoldierStateIdle                 SoldierState = iota // holding, scanning
+	SoldierStateMoving                                   // advancing along path
+	SoldierStateCover                                    // in cover / suppressed
+	SoldierStateWoundedAmbulatory                        // hit but can move and fight (degraded)
+	SoldierStateWoundedNonAmbulatory                     // cannot self-move; needs buddy drag/carry
+	SoldierStateUnconscious                              // alive but no agency; bleeds without self-aid
+	SoldierStateDead                                     // incapacitated
 )
 
 func (ss SoldierState) String() string {
@@ -680,11 +683,23 @@ func (ss SoldierState) String() string {
 		return "moving"
 	case SoldierStateCover:
 		return "cover"
+	case SoldierStateWoundedAmbulatory:
+		return "wounded-amb"
+	case SoldierStateWoundedNonAmbulatory:
+		return "wounded-nonamb"
+	case SoldierStateUnconscious:
+		return "unconscious"
 	case SoldierStateDead:
 		return "dead"
 	default:
 		return "unknown"
 	}
+}
+
+// IsIncapacitated returns true for states where the soldier cannot act.
+func (ss SoldierState) IsIncapacitated() bool {
+	return ss == SoldierStateDead || ss == SoldierStateUnconscious ||
+		ss == SoldierStateWoundedNonAmbulatory
 }
 
 // Soldier is an autonomous agent on the battlefield.
@@ -710,8 +725,10 @@ type Soldier struct {
 	squad    *Squad
 
 	// Combat
-	health       float64 // hit points, 0 = incapacitated
-	fireCooldown int     // ticks until next shot allowed
+	body         BodyMap       // per-region health, wounds, blood volume
+	casualty     CasualtyState // medical response state
+	isMedic      bool          // designated medic role
+	fireCooldown int           // ticks until next shot allowed
 
 	// Multi-round trigger state (burst/auto pacing).
 	burstShotsRemaining int // queued rounds left in current trigger pull
@@ -874,7 +891,7 @@ func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavG
 		covers:         covers,
 		buildings:      buildings,
 		state:          SoldierStateMoving,
-		health:         soldierMaxHP,
+		body:           NewBodyMap(),
 		vision:         NewVisionState(initHeading),
 		profile:        DefaultProfile(),
 		thoughtLog:     tl,
@@ -892,6 +909,12 @@ func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavG
 	}
 	s.recomputePath()
 	return s
+}
+
+// health returns a scalar HP value derived from the body map for backward
+// compatibility. It maps HealthFraction back to the old 0–soldierMaxHP scale.
+func (s *Soldier) health() float64 {
+	return s.body.HealthFraction() * soldierMaxHP
 }
 
 func (s *Soldier) recordDebugSnapshot(tick int) {
@@ -923,7 +946,7 @@ func (s *Soldier) recordDebugSnapshot(tick int) {
 		Tick:                        tick,
 		X:                           s.x,
 		Y:                           s.y,
-		HP:                          clamp01(s.health / soldierMaxHP),
+		HP:                          clamp01(s.health() / soldierMaxHP),
 		State:                       s.state,
 		Stance:                      s.profile.Stance,
 		Goal:                        bb.CurrentGoal,
@@ -1118,8 +1141,45 @@ func (s *Soldier) Update() {
 		_ = s.decisionInterval()
 	}
 
+	// --- Wound bleeding progression ---
+	if s.body.HasUntreatedWounds() {
+		ambulatory, conscious, alive := s.body.TickBleed()
+		if !alive {
+			s.state = SoldierStateDead
+			s.think("bled out")
+			return
+		}
+		if !conscious && s.state != SoldierStateUnconscious {
+			s.state = SoldierStateUnconscious
+			s.think("lost consciousness from blood loss")
+			return
+		}
+		if conscious && !ambulatory && s.state != SoldierStateWoundedNonAmbulatory {
+			s.state = SoldierStateWoundedNonAmbulatory
+			s.think("too wounded to move")
+		}
+		if conscious && ambulatory && s.body.IsInjured() &&
+			s.state != SoldierStateWoundedAmbulatory &&
+			s.state != SoldierStateWoundedNonAmbulatory {
+			s.state = SoldierStateWoundedAmbulatory
+		}
+	}
+	// Unconscious soldiers cannot act.
+	if s.state == SoldierStateUnconscious || s.state == SoldierStateWoundedNonAmbulatory {
+		return
+	}
+
+	// Self-aid: wounded soldiers attempt to treat themselves when safe.
+	s.integrateWoundedSelfAid()
+
 	bb := &s.blackboard
 	dt := 1.0
+
+	// Wound pain applies persistent stress each tick.
+	if pain := s.body.TotalPain(); pain > 0 {
+		s.profile.Psych.ApplyStress(pain * 0.03)
+	}
+
 	s.profile.Psych.RecoverFear(dt)
 	s.profile.Psych.UpdateMorale(dt, s.profile.Skills.Discipline, MoraleContext{
 		UnderFire:         bb.IncomingFireCount > 0 || bb.IsSuppressed(),
@@ -1192,6 +1252,7 @@ func (s *Soldier) Update() {
 	tick := s.tickVal()
 	bb.UpdateThreats(s.vision.KnownContacts, tick)
 	bb.RefreshInternalGoals(&s.profile, s.x, s.y)
+	bb.Internal.IsMedic = s.isMedic // populate medic role for goal selection
 	s.updatePsychCrisis(tick)
 
 	// --- Edge-of-map fleeing: soldiers with low morale who hit the edge flee ---
@@ -1547,7 +1608,7 @@ func (s *Soldier) shouldSeekClaimedBuilding(goal GoalKind) bool {
 	if dist > 360 {
 		return false
 	}
-	speed := math.Max(0.35, s.profile.EffectiveSpeed(soldierSpeed))
+	speed := math.Max(0.35, s.profile.EffectiveSpeed(soldierSpeed)*s.body.MobilityMul())
 	etaTicks := dist / speed
 	if underFire {
 		return etaTicks <= 260
@@ -1939,6 +2000,9 @@ func (s *Soldier) executeGoal(dt float64) {
 	case GoalPeek:
 		s.requestStance(StanceCrouching, false)
 		s.executePeek(dt)
+
+	case GoalHelpCasualty:
+		s.executeHelpCasualty(dt)
 	}
 }
 
@@ -2565,7 +2629,7 @@ func (s *Soldier) moveAlongPath(dt float64) {
 		s.pathIndex = bestIdx
 	}
 
-	speed := s.profile.EffectiveSpeed(soldierSpeed)
+	speed := s.profile.EffectiveSpeed(soldierSpeed) * s.body.MobilityMul()
 	if s.profile.Stance == StanceProne && s.blackboard.IsSuppressed() {
 		// Pinned crawl: prone movement under suppression is painfully slow.
 		crawl := pinnedCrawlSpeedMul * (0.75 + s.profile.Skills.Discipline*0.25)
@@ -3078,7 +3142,7 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 	barY := sy + radius + 4
 	vector.FillRect(screen, bx-1, barY-1, barW+2, barH+2, color.RGBA{R: 0, G: 0, B: 0, A: 200}, false)
 	vector.FillRect(screen, bx, barY, barW, barH, color.RGBA{R: 25, G: 25, B: 25, A: 220}, false)
-	frac := float32(s.health / soldierMaxHP)
+	frac := float32(s.health() / soldierMaxHP)
 	filled := barW * frac
 	var hpR, hpG uint8
 	if frac > 0.5 {
@@ -3555,7 +3619,7 @@ func (s *Soldier) moveCombatDash(dt float64) {
 	}
 
 	// --- Step 5: Move at dash speed ---
-	speed := s.profile.EffectiveSpeed(soldierSpeed * dashSpeedMul)
+	speed := s.profile.EffectiveSpeed(soldierSpeed*dashSpeedMul) * s.body.MobilityMul()
 	remaining := speed
 	for remaining > 0 && s.pathIndex < len(s.path) {
 		wp := s.path[s.pathIndex]

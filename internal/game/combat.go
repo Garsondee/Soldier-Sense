@@ -217,6 +217,7 @@ type CombatManager struct {
 	flashes  []*MuzzleFlash
 	Gunfires []GunfireEvent // shots fired this tick, consumed by sound system
 	rng      *rand.Rand
+	tick     int // current game tick, set each frame before ResolveCombat
 }
 
 // NewCombatManager creates a combat manager with its own RNG.
@@ -331,7 +332,7 @@ func gunfireHeardStrength(srcX, srcY float64, listener *Soldier, red, blue []*So
 // allSoldiers is every soldier on the map (for ricochet near-miss stress).
 func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldier, buildings []rect, allSoldiers []*Soldier) {
 	for _, s := range shooters {
-		if s.state == SoldierStateDead {
+		if s.state == SoldierStateDead || s.state.IsIncapacitated() {
 			continue
 		}
 		if s.magCapacity <= 0 {
@@ -405,7 +406,7 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		} else {
 			target = cm.closestContact(s)
 		}
-		if target == nil || target.state == SoldierStateDead {
+		if target == nil || target.state == SoldierStateDead || target.state.IsIncapacitated() {
 			resetBurstState(s)
 			resetAimingState(s)
 			continue
@@ -468,7 +469,8 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		fearSpread := s.profile.Psych.EffectiveFear() * 0.10
 		// Stance multiplier: prone tightens spread, standing widens.
 		stanceMul := 1.0 / math.Max(0.3, s.profile.Stance.Profile().AccuracyMul)
-		baseShooterSpread := (s.aimSpread + suppressSpread + fearSpread) * stanceMul
+		woundAccMul := math.Max(0.1, s.body.AccuracyMul()) // floor to avoid divide-by-zero
+		baseShooterSpread := (s.aimSpread + suppressSpread + fearSpread) * stanceMul / woundAccMul
 		// Distance-dependent spread: pot-shot band becomes substantially inaccurate.
 		baseShooterSpread += shotRangePenalty(dist) * 0.22
 		if queuedBurst && s.burstBaseSpread > 0 {
@@ -722,16 +724,28 @@ func (cm *CombatManager) resolveBullet(
 
 	if hit {
 		damage := baseDamage * dmgMul
-		target.health -= damage
+
+		// Roll hit region and create wound via body map.
+		var coverMask [regionCount]float64 // TODO: populate from cover geometry
+		wound, instantDeath := target.body.ApplyHit(damage, target.profile.Stance, coverMask, cm.tick, cm.rng)
+
 		target.profile.Psych.ApplyStress(hitStress)
 		target.blackboard.IncomingFireCount++
 		target.blackboard.AccumulateSuppression(true, shooter.x, shooter.y, target.x, target.y)
-		if target.health <= 0 {
-			target.health = 0
+
+		// Initialize casualty state on first wound.
+		if target.body.WoundCount() == 1 {
+			target.casualty = NewCasualtyState(cm.tick)
+		}
+
+		if instantDeath {
 			target.state = SoldierStateDead
-			target.think("incapacitated")
+			target.think(fmt.Sprintf("hit %s (%s) — killed instantly", wound.Region, wound.Severity))
+		} else if target.body.HealthFraction() <= 0 {
+			target.state = SoldierStateDead
+			target.think(fmt.Sprintf("hit %s (%s) — incapacitated", wound.Region, wound.Severity))
 		} else {
-			target.think("hit — taking fire")
+			target.think(fmt.Sprintf("hit %s (%s) — taking fire", wound.Region, wound.Severity))
 		}
 		cm.applyWitnessStress(target, allFriendlies)
 		return true

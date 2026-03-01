@@ -93,7 +93,7 @@ func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 		alive++
 		avgFear += m.profile.Psych.EffectiveFear()
 		avgMorale += m.profile.Psych.Morale
-		avgHP += clamp01(m.health / soldierMaxHP)
+		avgHP += clamp01(m.health() / soldierMaxHP)
 		objectiveCounts[m.blackboard.CurrentGoal]++
 	}
 	if alive > 0 {
@@ -139,7 +139,7 @@ func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 		cy := sqY0 + (i/8)*(sqSize+sqGap)
 		fill := color.RGBA{R: 30, G: 10, B: 10, A: 230}
 		if m.state != SoldierStateDead {
-			hp := clamp01(m.health / soldierMaxHP)
+			hp := clamp01(m.health() / soldierMaxHP)
 			if sq.Team == TeamRed {
 				fill = color.RGBA{R: uint8(50 + 190*hp), G: uint8(20 + 100*hp), B: uint8(20 + 60*hp), A: 240}
 			} else {
@@ -1026,6 +1026,7 @@ func (g *Game) simTick() {
 	// 2. COMBAT: fire decisions and resolution.
 	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
 	g.combat.ResetFireCounts(all)
+	g.combat.tick = g.tick
 	g.combat.ResolveCombat(g.soldiers, g.opfor, g.soldiers, g.buildings, all)
 	g.combat.ResolveCombat(g.opfor, g.soldiers, g.opfor, g.buildings, all)
 	g.combat.UpdateTracers()
@@ -1059,6 +1060,10 @@ func (g *Game) simTick() {
 	for _, s := range g.opfor {
 		s.Update()
 	}
+
+	// 5.5. MEDICAL AID: advance treatment for wounded soldiers.
+	integrateBuddyAidTick(g.soldiers, g.tick)
+	integrateBuddyAidTick(g.opfor, g.tick)
 
 	// 6. SQUAD POLL: periodic summary to thought log (~every 5s).
 	if g.tick%squadPollInterval == 0 {

@@ -48,7 +48,7 @@ func speechPressureScore(s *Soldier) float64 {
 	if bb.VisibleThreatCount() > 0 {
 		pressure += 0.10
 	}
-	if s.health < soldierMaxHP*0.45 {
+	if s.health() < soldierMaxHP*0.45 {
 		pressure += 0.10
 	}
 	if bb.OfficerOrderActive && !bb.OfficerOrderImmediate {
@@ -68,7 +68,7 @@ func contextualPhrase(rng *rand.Rand, s *Soldier) (string, string) {
 	threats := bb.VisibleThreatCount()
 	goal := bb.CurrentGoal
 	suppressed := bb.IsSuppressed()
-	hpPct := clamp01(s.health / soldierMaxHP)
+	hpPct := clamp01(s.health() / soldierMaxHP)
 	closestThreatDist := bb.ClosestVisibleThreatDist(s.x, s.y)
 
 	contactX, contactY := s.endTarget[0], s.endTarget[1]
@@ -331,7 +331,7 @@ func (g *Game) UpdateSpeech(rng *rand.Rand) {
 	if s.blackboard.PanicRetreatActive || s.blackboard.Surrendered {
 		speakChance += 0.20
 	}
-	if s.health < soldierMaxHP*0.45 {
+	if s.health() < soldierMaxHP*0.45 {
 		speakChance += 0.08
 	}
 	speakChance = clamp01(speakChance)

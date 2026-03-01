@@ -612,7 +612,7 @@ func (s *Soldier) buildContactReportMessage(leader *Soldier, tick int) (RadioMes
 
 func (s *Soldier) buildStatusReportMessage(leader *Soldier, tick int, pri RadioPriority, prefix string) RadioMessage {
 	fear := s.profile.Psych.EffectiveFear()
-	injured := s.health < soldierMaxHP
+	injured := s.health() < soldierMaxHP
 	status := "OK"
 	if injured {
 		status = "INJURED"
@@ -630,14 +630,14 @@ func (s *Soldier) buildStatusReportMessage(leader *Soldier, tick int, pri RadioP
 		ReceiverLabel: leader.label,
 		Type:          RadioMsgStatusReport,
 		Priority:      pri,
-		Summary:       fmt.Sprintf("%s %s fear:%.2f hp:%.0f", prefix, status, fear, s.health),
+		Summary:       fmt.Sprintf("%s %s fear:%.2f hp:%.0f", prefix, status, fear, s.health()),
 		Fear:          fear,
 		Injured:       injured,
 	}
 }
 
 func (s *Soldier) buildInjuryStatusMessage(leader *Soldier, tick int) (RadioMessage, bool) {
-	if leader == nil || s.health >= soldierMaxHP {
+	if leader == nil || s.health() >= soldierMaxHP {
 		return RadioMessage{}, false
 	}
 	if tick-s.radioLastStatusReportTick < radioStatusReportCooldown {

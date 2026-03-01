@@ -233,7 +233,7 @@ func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) {
 
 	goals[s.blackboard.CurrentGoal]++
 
-	if s.health < soldierMaxHP && s.health > 0 {
+	if s.health() < soldierMaxHP && s.health() > 0 {
 		if team == TeamRed {
 			report.RedInjured++
 		} else {
@@ -311,7 +311,7 @@ func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) {
 			Team:                        team,
 			Goal:                        s.blackboard.CurrentGoal,
 			State:                       s.state,
-			Health:                      s.health,
+			Health:                      s.health(),
 			Fear:                        s.profile.Psych.EffectiveFear(),
 			Morale:                      s.profile.Psych.Morale,
 			DisobeyingOrders:            s.blackboard.DisobeyingOrders,

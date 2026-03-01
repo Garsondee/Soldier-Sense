@@ -251,6 +251,11 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 			// UpdateFormation will redirect them to formation slots once the
 			// leader begins moving and the squad spreads naturally.
 		}
+		// Designate second member as medic (if squad has 2+ members).
+		if i == 1 && len(members) >= 2 {
+			m.isMedic = true
+			m.profile.Skills.FirstAid = 0.85 // medics have high first aid skill
+		}
 	}
 	return sq
 }
@@ -745,7 +750,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		aliveCount++
 		fearSum += m.profile.Psych.EffectiveFear()
 		moraleSum += m.profile.Psych.Morale
-		if m.health < soldierMaxHP {
+		if m.health() < soldierMaxHP {
 			injuredAliveCount++
 		}
 		if m.blackboard.IncomingFireCount > 0 || m.blackboard.IsSuppressed() {

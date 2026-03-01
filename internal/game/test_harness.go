@@ -338,6 +338,7 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 
 	// 2. COMBAT
 	ts.combat.ResetFireCounts(ts.Soldiers)
+	ts.combat.tick = tick
 	ts.combat.ResolveCombat(reds, blues, reds, ts.buildings, ts.Soldiers)
 	ts.combat.ResolveCombat(blues, reds, blues, ts.buildings, ts.Soldiers)
 	ts.combat.UpdateTracers()
