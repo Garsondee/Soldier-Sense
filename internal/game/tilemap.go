@@ -126,7 +126,7 @@ func objectBlocksMovement(o ObjectType) bool {
 }
 
 // objectBlocksLOS returns true if the object fully blocks line of sight.
-func objectBlocksLOS(o ObjectType) bool {
+func objectBlocksLOS(o ObjectType) bool { //nolint:unused
 	switch o {
 	case ObjectWall, ObjectDoor, ObjectPillar, ObjectCrate,
 		ObjectTallWall, ObjectTreeTrunk, ObjectVehicleWreck:
@@ -463,7 +463,7 @@ func (tm *TileMap) DamageTile(col, row int, dmg int) {
 	if t.Durability <= 0 {
 		return // already broken or unbreakable
 	}
-	t.Durability -= int16(dmg)
+	t.Durability -= int16(dmg) // #nosec G115 -- dmg is always a small game damage value, well within int16 range
 	if t.Durability <= 0 {
 		t.Durability = 0
 		switch t.Object {
