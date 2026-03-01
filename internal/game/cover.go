@@ -105,7 +105,7 @@ const (
 //
 // Walls and chest-walls form long horizontal or vertical runs that extend
 // from building edges or span open corridors between buildings.
-func GenerateCover(mapW, mapH int, footprints []rect, walls []rect, rng *rand.Rand, roads []roadSegment) ([]*CoverObject, []*CoverObject) {
+func GenerateCover(mapW, mapH int, footprints []rect, walls []rect, rng *rand.Rand, tm *TileMap) ([]*CoverObject, []*CoverObject) {
 	cs := coverCellSize
 	margin := cs * 3
 	covers := make([]*CoverObject, 0, 64)
@@ -114,19 +114,12 @@ func GenerateCover(mapW, mapH int, footprints []rect, walls []rect, rng *rand.Ra
 	type cellKey struct{ cx, cy int }
 	occupied := map[cellKey]bool{}
 
-	// roadSet: mark cells that sit on a road band so walls are never placed there.
-	type roadBand struct{ x, y, w, h int }
-	roadBands := make([]roadBand, 0, len(roads))
-	for _, rd := range roads {
-		roadBands = append(roadBands, roadBand{rd.x, rd.y, rd.w, rd.h})
-	}
+	// onRoad checks the tile map for road tiles.
 	onRoad := func(px, py int) bool {
-		for _, rb := range roadBands {
-			if px >= rb.x && px < rb.x+rb.w && py >= rb.y && py < rb.y+rb.h {
-				return true
-			}
+		if tm == nil {
+			return false
 		}
-		return false
+		return tileOnRoad(tm, px/cs, py/cs)
 	}
 
 	placeLine := func(startX, startY, length int, horizontal bool, kind CoverKind) {
@@ -233,7 +226,7 @@ func GenerateCover(mapW, mapH int, footprints []rect, walls []rect, rng *rand.Ra
 	}
 
 	// --- 4. Generate rubble positions from building explosions (returned separately) ---
-	rubble := generateExplosionRubble(mapW, mapH, footprints, walls, rng, roads)
+	rubble := generateExplosionRubble(mapW, mapH, footprints, walls, rng, tm)
 
 	return covers, rubble
 }
@@ -244,7 +237,7 @@ func footprintsToRects(fps []rect) []rect { return fps }
 // generateExplosionRubble fires numExplosions into the map, preferring to hit
 // buildings. Each explosion that overlaps a building removes wall segments
 // (handled by applyBuildingDamage) and drops rubble in a radius.
-func generateExplosionRubble(mapW, mapH int, footprints []rect, _ []rect, rng *rand.Rand, roads []roadSegment) []*CoverObject {
+func generateExplosionRubble(mapW, mapH int, footprints []rect, _ []rect, rng *rand.Rand, tm *TileMap) []*CoverObject {
 	cs := coverCellSize
 	rubble := make([]*CoverObject, 0, 32)
 	type cellKey struct{ cx, cy int }
@@ -293,14 +286,7 @@ func generateExplosionRubble(mapW, mapH int, footprints []rect, _ []rect, rng *r
 					continue
 				}
 				// Don't place rubble on roads — it would visually clash.
-				onAnyRoad := false
-				for _, rd := range roads {
-					if rx >= rd.x && rx < rd.x+rd.w && ry >= rd.y && ry < rd.y+rd.h {
-						onAnyRoad = true
-						break
-					}
-				}
-				if onAnyRoad {
+				if tm != nil && tileOnRoad(tm, rx/cs, ry/cs) {
 					continue
 				}
 				placed[k] = true

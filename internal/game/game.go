@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"math"
 	"math/rand"
+	"sort"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -45,15 +46,13 @@ var overlayColors = [intelMapCount]color.RGBA{
 type Game struct {
 	width              int
 	height             int
-	gameWidth          int            // playfield width (log panel takes the rest)
-	gameHeight         int            // playfield height (inside border)
-	offX               int            // pixel offset from window left to battlefield left
-	offY               int            // pixel offset from window top to battlefield top
-	buildings          []rect         // individual wall segments (1-cell wide), used for LOS/nav
-	windows            []rect         // window segments: block movement, transparent to LOS
-	buildingFootprints []rect         // overall floor area of each structure, used for rendering
-	roads              []roadSegment  // road layout (decomposed segments for collision)
-	roadPolylines      []roadPolyline // smooth centrelines for rendering
+	gameWidth          int    // playfield width (log panel takes the rest)
+	gameHeight         int    // playfield height (inside border)
+	offX               int    // pixel offset from window left to battlefield left
+	offY               int    // pixel offset from window top to battlefield top
+	buildings          []rect // individual wall segments (1-cell wide), used for LOS/nav
+	windows            []rect // window segments: block movement, transparent to LOS
+	buildingFootprints []rect // overall floor area of each structure, used for rendering
 	covers             []*CoverObject
 	navGrid            *NavGrid
 	soldiers           []*Soldier // red friendlies
@@ -86,6 +85,9 @@ type Game struct {
 
 	// Deterministic terrain noise patches, generated once.
 	terrainPatches []terrainPatch
+
+	// Per-tile terrain map — authoritative ground/object data for every cell.
+	tileMap *TileMap
 
 	// Camera pan + zoom.
 	camX    float64 // world-space X of the camera centre
@@ -181,9 +183,14 @@ func New() *Game {
 		mapSeed:    mapSeed,
 	}
 	mapRng := rand.New(rand.NewSource(mapSeed)) // #nosec G404 -- game only
-	g.initRoads(mapRng)
+	// Create the TileMap first — grid roads and buildings write directly into it.
+	g.tileMap = NewTileMap(battleW/cellSize, battleH/cellSize)
+	generateGridRoads(g.tileMap, mapRng, defaultRoadConfig)
 	g.initBuildings(mapRng)
 	g.initCover()
+	g.initTileMap() // stamp buildings/cover into tileMap after generation
+	generateBiome(g.tileMap, mapRng, defaultBiomeConfig)
+	generateFortifications(g.tileMap, mapRng, defaultFortConfig)
 	g.navGrid = NewNavGrid(g.gameWidth, g.gameHeight, g.buildings, soldierRadius, g.covers, g.windows)
 	g.tacticalMap = NewTacticalMap(g.gameWidth, g.gameHeight, g.buildings, g.windows, g.buildingFootprints)
 	g.initSoldiers()
@@ -227,10 +234,57 @@ func (g *Game) initTerrainPatches() {
 	}
 }
 
+// initTileMap stamps buildings and cover into the existing TileMap.
+// The TileMap is created in New() and grid roads are already stamped before this runs.
+func (g *Game) initTileMap() {
+	// Mark building footprints as indoor with concrete floor.
+	for _, fp := range g.buildingFootprints {
+		cMin := fp.x / cellSize
+		rMin := fp.y / cellSize
+		cMax := (fp.x + fp.w - 1) / cellSize
+		rMax := (fp.y + fp.h - 1) / cellSize
+		for r := rMin; r <= rMax; r++ {
+			for c := cMin; c <= cMax; c++ {
+				g.tileMap.SetGround(c, r, GroundConcrete)
+				g.tileMap.AddFlag(c, r, TileFlagIndoor)
+			}
+		}
+	}
+
+	// Stamp wall segments.
+	for _, b := range g.buildings {
+		c := b.x / cellSize
+		r := b.y / cellSize
+		g.tileMap.SetObject(c, r, ObjectWall)
+	}
+
+	// Stamp window segments.
+	for _, w := range g.windows {
+		c := w.x / cellSize
+		r := w.y / cellSize
+		g.tileMap.SetObject(c, r, ObjectWindow)
+	}
+
+	// Stamp cover objects.
+	for _, co := range g.covers {
+		c := co.x / cellSize
+		r := co.y / cellSize
+		switch co.kind {
+		case CoverTallWall:
+			g.tileMap.SetObject(c, r, ObjectTallWall)
+		case CoverChestWall:
+			g.tileMap.SetObject(c, r, ObjectChestWall)
+		case CoverRubble:
+			g.tileMap.SetObject(c, r, ObjectRubblePile)
+			g.tileMap.SetGround(c, r, GroundRubbleLight)
+		}
+	}
+}
+
 func (g *Game) initCover() {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 12345)) // #nosec G404 -- game only
 	var rubble []*CoverObject
-	g.covers, rubble = GenerateCover(g.gameWidth, g.gameHeight, g.buildingFootprints, g.buildings, rng, g.roads)
+	g.covers, rubble = GenerateCover(g.gameWidth, g.gameHeight, g.buildingFootprints, g.buildings, rng, g.tileMap)
 	// Rubble replaces wall segments where explosions hit — remove those walls and add rubble.
 	g.applyBuildingDamage(rubble)
 }
@@ -288,7 +342,7 @@ func (g *Game) initBuildings(rng *rand.Rand) {
 	var candidates []rect
 	for _, sz := range sizes {
 		for rep := 0; rep < sz.weight; rep++ {
-			c := g.buildingCandidatesAlongRoads(rng, sz.w*unit, sz.h*unit, unit/2, unit*3)
+			c := buildingCandidatesAlongGridRoads(g.tileMap, rng, sz.w*unit, sz.h*unit, unit/2, unit*3)
 			candidates = append(candidates, c...)
 		}
 	}
@@ -303,7 +357,7 @@ func (g *Game) initBuildings(rng *rand.Rand) {
 		if g.overlapsAnyBuilding(candidate, rng) {
 			continue
 		}
-		if g.rectOverlapsRoad(candidate) {
+		if rectOverlapsRoadTiles(g.tileMap, candidate) {
 			continue
 		}
 		g.buildingFootprints = append(g.buildingFootprints, candidate)
@@ -481,21 +535,43 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 		}
 	}
 
+	// --- Place doors in exterior doorways into TileMap. ---
+	for _, f := range []face{faceN, faceS, faceE, faceW} {
+		if !doorFaces[f] {
+			continue
+		}
+		var dx, dy int
+		switch f {
+		case faceN:
+			dx, dy = doorPositions[f], y
+		case faceS:
+			dx, dy = doorPositions[f], y+h-wall
+		case faceW:
+			dx, dy = x, doorPositions[f]
+		case faceE:
+			dx, dy = x+w-wall, doorPositions[f]
+		}
+		placeDoorInDoorway(g.tileMap, rng, dx, dy, unit, true)
+	}
+
 	// --- Recursive internal room subdivision (BSP-style). ---
 	// Split the interior into rooms. Each room is at least 2×2 units.
-	// Partition walls have doorways.
+	// Partition walls have doorways. Leaf rooms are collected for furnishing.
 	type room struct{ rx, ry, rw, rh int }
 	interior := room{x + unit, y + unit, w - 2*unit, h - 2*unit}
+	var leafRooms []interiorRoom
 	var subdivide func(rm room, depth int)
 	subdivide = func(rm room, depth int) {
 		rmWU := rm.rw / unit
 		rmHU := rm.rh / unit
 		// Stop if room is too small to split (min 3 units on the split axis).
 		if rmWU < 4 && rmHU < 4 {
+			leafRooms = append(leafRooms, interiorRoom{rx: rm.rx, ry: rm.ry, rw: rm.rw, rh: rm.rh})
 			return
 		}
 		// Stop probabilistically at deeper levels.
 		if depth > 0 && rng.Float64() < 0.15 {
+			leafRooms = append(leafRooms, interiorRoom{rx: rm.rx, ry: rm.ry, rw: rm.rw, rh: rm.rh})
 			return
 		}
 		// Choose split axis: prefer splitting the longer dimension.
@@ -516,6 +592,7 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 			minU := 2
 			maxU := rmWU - 2
 			if maxU <= minU {
+				leafRooms = append(leafRooms, interiorRoom{rx: rm.rx, ry: rm.ry, rw: rm.rw, rh: rm.rh})
 				return
 			}
 			splitU := minU + rng.Intn(maxU-minU)
@@ -529,6 +606,8 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 				}
 				g.buildings = append(g.buildings, rect{x: px, y: wy, w: wall, h: wall})
 			}
+			// Place interior door in the doorway gap.
+			placeDoorInDoorway(g.tileMap, rng, px, doorY, unit, false)
 			// Recurse into the two sub-rooms.
 			leftW := splitU * unit
 			rightW := rm.rw - splitU*unit - wall
@@ -543,6 +622,7 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 			minU := 2
 			maxU := rmHU - 2
 			if maxU <= minU {
+				leafRooms = append(leafRooms, interiorRoom{rx: rm.rx, ry: rm.ry, rw: rm.rw, rh: rm.rh})
 				return
 			}
 			splitU := minU + rng.Intn(maxU-minU)
@@ -556,6 +636,8 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 				}
 				g.buildings = append(g.buildings, rect{x: wx, y: py, w: wall, h: wall})
 			}
+			// Place interior door in the doorway gap.
+			placeDoorInDoorway(g.tileMap, rng, doorX, py, unit, false)
 			// Recurse into the two sub-rooms.
 			topH := splitU * unit
 			bottomH := rm.rh - splitU*unit - wall
@@ -583,6 +665,16 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 					}
 					g.buildings = append(g.buildings, rect{x: px, y: wy, w: wall, h: wall})
 				}
+				placeDoorInDoorway(g.tileMap, rng, px, doorY, unit, false)
+				// Collect the two resulting rooms.
+				leftW := px - (x + unit)
+				rightW := (x + w - unit) - (px + wall)
+				if leftW > 0 {
+					leafRooms = append(leafRooms, interiorRoom{rx: x + unit, ry: y + unit, rw: leftW, rh: h - 2*unit})
+				}
+				if rightW > 0 {
+					leafRooms = append(leafRooms, interiorRoom{rx: px + wall, ry: y + unit, rw: rightW, rh: h - 2*unit})
+				}
 			} else if hUnits >= 4 {
 				py := y + (rng.Intn(hUnits-2)+1)*unit
 				doorX := x + (rng.Intn(wUnits-2)+1)*unit
@@ -592,9 +684,28 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 					}
 					g.buildings = append(g.buildings, rect{x: wx, y: py, w: wall, h: wall})
 				}
+				placeDoorInDoorway(g.tileMap, rng, doorX, py, unit, false)
+				// Collect the two resulting rooms.
+				topH := py - (y + unit)
+				bottomH := (y + h - unit) - (py + wall)
+				if topH > 0 {
+					leafRooms = append(leafRooms, interiorRoom{rx: x + unit, ry: y + unit, rw: w - 2*unit, rh: topH})
+				}
+				if bottomH > 0 {
+					leafRooms = append(leafRooms, interiorRoom{rx: x + unit, ry: py + wall, rw: w - 2*unit, rh: bottomH})
+				}
 			}
+		} else {
+			// No partition — whole interior is one room.
+			leafRooms = append(leafRooms, interiorRoom{rx: x + unit, ry: y + unit, rw: w - 2*unit, rh: h - 2*unit})
 		}
+	} else {
+		// Small building — whole interior is one room.
+		leafRooms = append(leafRooms, interiorRoom{rx: x + unit, ry: y + unit, rw: w - 2*unit, rh: h - 2*unit})
 	}
+
+	// --- Furnish interior rooms ---
+	furnishBuilding(g.tileMap, rng, fp, leafRooms)
 }
 
 // overlapsAnyBuilding checks if the candidate rect overlaps any existing
@@ -638,6 +749,7 @@ func (g *Game) spawnCluster(rng *rand.Rand, team Team, squadSize int, clusterCen
 			[2]float64{startX, y}, [2]float64{endX, y},
 			g.navGrid, g.covers, g.buildings, g.thoughtLog, &g.tick, g.tacticalMap)
 		s.buildingFootprints = g.buildingFootprints
+		s.tileMap = g.tileMap
 		s.blackboard.ClaimedBuildingIdx = -1
 		if s.path != nil {
 			out = append(out, s)
@@ -758,6 +870,12 @@ func (g *Game) simTick() {
 	// 3. SQUAD THINK: leaders evaluate and set intent/orders.
 	for _, sq := range g.squads {
 		sq.SquadThink(g.intel)
+	}
+
+	// 3.5 + 3.6 COMMS PLAN/RESOLVE: phase-A squad radio messaging.
+	for _, sq := range g.squads {
+		sq.PlanComms(g.tick)
+		sq.ResolveComms(g.tick, g.thoughtLog)
 	}
 
 	// Formation pass: update slot targets before soldiers decide to move.
@@ -1014,6 +1132,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	logOpts.GeoM.Translate(float64(logX), 0)
 	screen.DrawImage(g.logBuf, logOpts)
 
+	// Radio chat box overlay (left: sender, center: message, right: receiver).
+	g.drawRadioChatBox(screen)
+
 	// HUD key legend.
 	if g.showHUD {
 		g.drawHUD(screen)
@@ -1058,44 +1179,36 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	ox, oy := float32(0), float32(0)
 	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
 
-	// Ground fill inside battlefield.
-	vector.FillRect(screen, ox, oy, gw, gh, color.RGBA{R: 30, G: 45, B: 30, A: 255}, false)
-	// Broad grass bands to keep the field from looking uniformly flat.
-	for y := 0; y < g.gameHeight; y += 48 {
-		band := (y / 48) % 5
-		bandCol := color.RGBA{R: 0, G: clampToByte(36 + band*3), B: 0, A: 18}
-		vector.FillRect(screen, ox, oy+float32(y), gw, 24, bandCol, false)
-	}
-
-	// Terrain patches — richer grassy variation and subtle texture.
-	for _, tp := range g.terrainPatches {
-		delta := int(tp.shade) - 6
-		baseG := 42 + delta
-		baseR := 28 + delta/2
-		baseB := 26 + delta/4
-		vector.FillRect(screen, ox+tp.x, oy+tp.y, tp.w, tp.h,
-			color.RGBA{R: clampToByte(baseR), G: clampToByte(baseG), B: clampToByte(baseB), A: 38}, false)
-		// Secondary tint for less boxy, more natural variation.
-		vector.FillRect(screen,
-			ox+tp.x+tp.w*0.15, oy+tp.y+tp.h*0.15,
-			tp.w*0.65, tp.h*0.65,
-			color.RGBA{R: clampToByte(baseR - 3), G: clampToByte(baseG + 4), B: clampToByte(baseB - 2), A: 24}, false)
-	}
-
-	// Sparse grass tufts for visual detail at medium zoom.
-	for gy := 8; gy < g.gameHeight; gy += 12 {
-		for gx := 8; gx < g.gameWidth; gx += 12 {
-			h := terrainHash(gx/12, gy/12)
-			if h%11 != 0 {
-				continue
+	// Per-tile ground rendering from TileMap.
+	if g.tileMap != nil {
+		cs := float32(cellSize)
+		for row := 0; row < g.tileMap.Rows; row++ {
+			for col := 0; col < g.tileMap.Cols; col++ {
+				gt := g.tileMap.Ground(col, row)
+				r, gr, b := groundBaseColour(gt)
+				// Per-tile hash jitter for natural variation.
+				h := terrainHash(col, row)
+				jitter := int(h%13) - 6 // -6..+6
+				r = clampToByte(int(r) + jitter/2)
+				gr = clampToByte(int(gr) + jitter)
+				b = clampToByte(int(b) + jitter/3)
+				// Chequerboard for tile/wood floors.
+				if gt == GroundTile && (col+row)%2 == 0 {
+					gr = clampToByte(int(gr) + 4)
+				}
+				if gt == GroundWood && col%3 == 0 {
+					gr = clampToByte(int(gr) - 3)
+					b = clampToByte(int(b) - 2)
+				}
+				px := ox + float32(col)*cs
+				py := oy + float32(row)*cs
+				vector.FillRect(screen, px, py, cs, cs,
+					color.RGBA{R: r, G: gr, B: b, A: 255}, false)
 			}
-			height := float32(3 + int((h>>4)%5))
-			tilt := float32(int(h>>8)%3 - 1)
-			c := color.RGBA{R: clampToByte(46 + int((h>>12)%14)), G: clampToByte(70 + int((h>>16)%28)), B: clampToByte(44 + int((h>>20)%12)), A: 85}
-			x0 := ox + float32(gx)
-			y0 := oy + float32(gy)
-			vector.StrokeLine(screen, x0, y0, x0+tilt, y0-height, 0.5, c, false)
 		}
+	} else {
+		// Fallback: flat green fill.
+		vector.FillRect(screen, ox, oy, gw, gh, color.RGBA{R: 30, G: 45, B: 30, A: 255}, false)
 	}
 
 	gridFine := 16
@@ -1106,97 +1219,33 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridMid, color.RGBA{R: 38, G: 55, B: 38, A: 255})
 	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridCoarse, color.RGBA{R: 48, G: 68, B: 48, A: 255})
 
-	// Roads — drawn as smooth curved polylines before buildings.
-	roadFill := color.RGBA{R: 48, G: 46, B: 42, A: 255}     // dark asphalt
-	roadEdge := color.RGBA{R: 62, G: 60, B: 54, A: 255}     // slightly lighter kerb
-	roadMark := color.RGBA{R: 70, G: 68, B: 58, A: 120}     // faint centre-line
-	roadShoulder := color.RGBA{R: 40, G: 38, B: 34, A: 255} // darker shoulder
-	for _, rp := range g.roadPolylines {
-		pts := rp.points
-		hw := float32(rp.width)
-		if len(pts) < 2 {
-			continue
-		}
-		// Draw road as thick line segments following the polyline.
-		// Shoulder (slightly wider, darker).
-		for i := 0; i < len(pts)-1; i++ {
-			x0 := ox + float32(pts[i][0])
-			y0 := oy + float32(pts[i][1])
-			x1 := ox + float32(pts[i+1][0])
-			y1 := oy + float32(pts[i+1][1])
-			vector.StrokeLine(screen, x0, y0, x1, y1, hw*2+6, roadShoulder, false)
-		}
-		// Main asphalt body.
-		for i := 0; i < len(pts)-1; i++ {
-			x0 := ox + float32(pts[i][0])
-			y0 := oy + float32(pts[i][1])
-			x1 := ox + float32(pts[i+1][0])
-			y1 := oy + float32(pts[i+1][1])
-			vector.StrokeLine(screen, x0, y0, x1, y1, hw*2, roadFill, false)
-		}
-		// Edge kerb lines.
-		for i := 0; i < len(pts)-1; i++ {
-			ax, ay := pts[i][0], pts[i][1]
-			bx, by := pts[i+1][0], pts[i+1][1]
-			dx := bx - ax
-			dy := by - ay
-			l := math.Sqrt(dx*dx + dy*dy)
-			if l < 1 {
-				continue
-			}
-			nx := float32(-dy / l * float64(hw))
-			ny := float32(dx / l * float64(hw))
-			// Left edge.
-			vector.StrokeLine(screen,
-				ox+float32(ax)+nx, oy+float32(ay)+ny,
-				ox+float32(bx)+nx, oy+float32(by)+ny,
-				1.0, roadEdge, false)
-			// Right edge.
-			vector.StrokeLine(screen,
-				ox+float32(ax)-nx, oy+float32(ay)-ny,
-				ox+float32(bx)-nx, oy+float32(by)-ny,
-				1.0, roadEdge, false)
-		}
-		// Dashed centre-line.
-		dashLen := float32(24)
-		gapLen := float32(16)
-		accum := float32(0)
-		drawing := true
-		for i := 0; i < len(pts)-1; i++ {
-			x0 := ox + float32(pts[i][0])
-			y0 := oy + float32(pts[i][1])
-			x1 := ox + float32(pts[i+1][0])
-			y1 := oy + float32(pts[i+1][1])
-			dx := x1 - x0
-			dy := y1 - y0
-			segLen := float32(math.Sqrt(float64(dx*dx + dy*dy)))
-			if segLen < 1 {
-				continue
-			}
-			pos := float32(0)
-			for pos < segLen {
-				threshold := dashLen
-				if !drawing {
-					threshold = gapLen
+	// Roads are now rendered as tarmac/pavement tiles in the ground layer above.
+	// Road centre-line dashes drawn on tarmac tiles for visual detail.
+	if g.tileMap != nil {
+		cs := float32(cellSize)
+		markCol := color.RGBA{R: 70, G: 68, B: 58, A: 100}
+		for row := 0; row < g.tileMap.Rows; row++ {
+			for col := 0; col < g.tileMap.Cols; col++ {
+				if g.tileMap.Ground(col, row) != GroundTarmac {
+					continue
 				}
-				remain := threshold - accum
-				advance := remain
-				if pos+advance > segLen {
-					advance = segLen - pos
+				// Draw dashed centre-line on tarmac tiles that have tarmac neighbours
+				// on both cross-axis sides (i.e. are interior road tiles).
+				hasL := col > 0 && g.tileMap.Ground(col-1, row) == GroundTarmac
+				hasR := col < g.tileMap.Cols-1 && g.tileMap.Ground(col+1, row) == GroundTarmac
+				hasU := row > 0 && g.tileMap.Ground(col, row-1) == GroundTarmac
+				hasD := row < g.tileMap.Rows-1 && g.tileMap.Ground(col, row+1) == GroundTarmac
+				px := ox + float32(col)*cs
+				py := oy + float32(row)*cs
+				// Horizontal road interior: dash every other pair of tiles.
+				if hasL && hasR && (col/2)%2 == 0 {
+					mid := py + cs/2
+					vector.StrokeLine(screen, px, mid, px+cs, mid, 0.5, markCol, false)
 				}
-				if drawing {
-					t0 := pos / segLen
-					t1 := (pos + advance) / segLen
-					vector.StrokeLine(screen,
-						x0+dx*t0, y0+dy*t0,
-						x0+dx*t1, y0+dy*t1,
-						1.0, roadMark, false)
-				}
-				accum += advance
-				pos += advance
-				if accum >= threshold {
-					accum = 0
-					drawing = !drawing
+				// Vertical road interior: dash every other pair of tiles.
+				if hasU && hasD && (row/2)%2 == 0 {
+					mid := px + cs/2
+					vector.StrokeLine(screen, mid, py, mid, py+cs, 0.5, markCol, false)
 				}
 			}
 		}
@@ -1351,6 +1400,9 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 		vector.StrokeLine(screen, paneX+paneW*0.2, paneY+paneH*0.15, paneX+paneW*0.8, paneY+paneH*0.85, 0.5, color.RGBA{R: 175, G: 215, B: 245, A: 110}, false)
 	}
 
+	// TileMap interior objects (doors, furniture, pillars, crates).
+	g.drawTileMapObjects(screen, ox, oy)
+
 	// Cover objects.
 	g.drawCoverObjects(screen, 0, 0)
 
@@ -1364,6 +1416,9 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	for _, s := range g.opfor {
 		s.Draw(screen, 0, 0)
 	}
+
+	// Radio transmission arcs (transient comms visual effects).
+	g.drawRadioVisualEffects(screen)
 
 	// Movement intent lines: faint dashed line from soldier to path endpoint.
 	g.drawMovementIntentLines(screen)
@@ -1413,6 +1468,158 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 
 	// Edge vignette — deeper for more atmosphere.
 	g.drawVignette(screen, 0, 0)
+}
+
+// drawTileMapObjects renders interior objects from the TileMap (doors, furniture,
+// pillars, crates) that aren't already drawn by the wall/window/cover renderers.
+func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) {
+	if g.tileMap == nil {
+		return
+	}
+	cs := float32(cellSize)
+	for row := 0; row < g.tileMap.Rows; row++ {
+		for col := 0; col < g.tileMap.Cols; col++ {
+			obj := g.tileMap.ObjectAt(col, row)
+			px := ox + float32(col)*cs
+			py := oy + float32(row)*cs
+
+			switch obj {
+			case ObjectDoor:
+				// Closed door — brown rect with darker frame.
+				vector.FillRect(screen, px+1, py+1, cs-2, cs-2, color.RGBA{R: 72, G: 52, B: 32, A: 255}, false)
+				vector.StrokeRect(screen, px+1, py+1, cs-2, cs-2, 0.8, color.RGBA{R: 50, G: 36, B: 22, A: 220}, false)
+				// Door handle hint.
+				vector.FillRect(screen, px+cs*0.7, py+cs*0.45, 2, 2, color.RGBA{R: 140, G: 130, B: 100, A: 200}, false)
+
+			case ObjectDoorOpen:
+				// Open door — thin line along one wall edge.
+				vector.StrokeLine(screen, px, py, px, py+cs, 1.5, color.RGBA{R: 72, G: 52, B: 32, A: 180}, false)
+
+			case ObjectDoorBroken:
+				// Broken door — just scattered debris marks.
+				vector.FillRect(screen, px+2, py+cs*0.3, 3, 2, color.RGBA{R: 60, G: 44, B: 28, A: 120}, false)
+				vector.FillRect(screen, px+cs*0.5, py+cs*0.6, 4, 2, color.RGBA{R: 55, G: 40, B: 25, A: 100}, false)
+
+			case ObjectPillar:
+				// Structural column — dark filled square, slightly inset.
+				inset := float32(2)
+				vector.FillRect(screen, px+inset, py+inset, cs-inset*2, cs-inset*2, color.RGBA{R: 70, G: 66, B: 58, A: 255}, false)
+				// Light edge top-left, dark edge bottom-right.
+				vector.StrokeLine(screen, px+inset, py+inset, px+cs-inset, py+inset, 0.8, color.RGBA{R: 100, G: 94, B: 82, A: 200}, false)
+				vector.StrokeLine(screen, px+inset, py+inset, px+inset, py+cs-inset, 0.8, color.RGBA{R: 100, G: 94, B: 82, A: 200}, false)
+				vector.StrokeLine(screen, px+cs-inset, py+inset, px+cs-inset, py+cs-inset, 0.8, color.RGBA{R: 44, G: 40, B: 34, A: 200}, false)
+				vector.StrokeLine(screen, px+inset, py+cs-inset, px+cs-inset, py+cs-inset, 0.8, color.RGBA{R: 44, G: 40, B: 34, A: 200}, false)
+
+			case ObjectTable:
+				// Table — brown filled rect, edge highlights.
+				vector.FillRect(screen, px+1, py+1, cs-2, cs-2, color.RGBA{R: 82, G: 60, B: 36, A: 240}, false)
+				vector.StrokeLine(screen, px+1, py+1, px+cs-1, py+1, 0.5, color.RGBA{R: 105, G: 80, B: 50, A: 180}, false)
+				vector.StrokeLine(screen, px+1, py+cs-1, px+cs-1, py+cs-1, 0.5, color.RGBA{R: 55, G: 40, B: 24, A: 180}, false)
+
+			case ObjectChair:
+				// Chair — smaller lighter rect.
+				inset := float32(3)
+				vector.FillRect(screen, px+inset, py+inset, cs-inset*2, cs-inset*2, color.RGBA{R: 90, G: 70, B: 46, A: 220}, false)
+
+			case ObjectCrate:
+				// Wooden crate — tan/brown with cross-bracing.
+				vector.FillRect(screen, px+1, py+1, cs-2, cs-2, color.RGBA{R: 76, G: 62, B: 42, A: 255}, false)
+				vector.StrokeRect(screen, px+1, py+1, cs-2, cs-2, 0.8, color.RGBA{R: 56, G: 44, B: 28, A: 220}, false)
+				// Cross bracing.
+				vector.StrokeLine(screen, px+2, py+2, px+cs-2, py+cs-2, 0.5, color.RGBA{R: 56, G: 44, B: 28, A: 150}, false)
+				vector.StrokeLine(screen, px+cs-2, py+2, px+2, py+cs-2, 0.5, color.RGBA{R: 56, G: 44, B: 28, A: 150}, false)
+
+			case ObjectWindowBroken:
+				// Broken window — empty frame with glass shards hint.
+				vector.FillRect(screen, px, py, cs, cs, color.RGBA{R: 50, G: 55, B: 60, A: 160}, false)
+				vector.StrokeLine(screen, px+2, py+cs*0.3, px+cs*0.4, py+cs*0.7, 0.5, color.RGBA{R: 100, G: 130, B: 160, A: 100}, false)
+				vector.StrokeLine(screen, px+cs*0.6, py+2, px+cs*0.8, py+cs*0.5, 0.5, color.RGBA{R: 100, G: 130, B: 160, A: 80}, false)
+
+			case ObjectTreeTrunk:
+				// Tree trunk — dark brown circle-ish square.
+				inset := float32(4)
+				vector.FillRect(screen, px+inset, py+inset, cs-inset*2, cs-inset*2, color.RGBA{R: 50, G: 36, B: 22, A: 255}, false)
+				// Bark texture lines.
+				vector.StrokeLine(screen, px+cs*0.4, py+inset, px+cs*0.4, py+cs-inset, 0.5, color.RGBA{R: 40, G: 28, B: 16, A: 150}, false)
+				vector.StrokeLine(screen, px+cs*0.6, py+inset, px+cs*0.6, py+cs-inset, 0.5, color.RGBA{R: 60, G: 44, B: 28, A: 120}, false)
+
+			case ObjectTreeCanopy:
+				// Canopy — translucent green with variation.
+				h := terrainHash(col, row)
+				gVar := int(h%12) - 6
+				vector.FillRect(screen, px, py, cs, cs, color.RGBA{R: 20, G: clampToByte(55 + gVar), B: 18, A: 140}, false)
+				// Leaf detail.
+				if h%3 == 0 {
+					vector.FillRect(screen, px+2, py+2, 3, 3, color.RGBA{R: 25, G: clampToByte(65 + gVar), B: 20, A: 100}, false)
+				}
+
+			case ObjectBush:
+				// Bush — small green blob.
+				inset := float32(2)
+				h := terrainHash(col, row)
+				gVar := int(h%10) - 5
+				vector.FillRect(screen, px+inset, py+inset, cs-inset*2, cs-inset*2, color.RGBA{R: 28, G: clampToByte(52 + gVar), B: 24, A: 210}, false)
+				// Highlight.
+				vector.FillRect(screen, px+inset+1, py+inset+1, cs*0.4, cs*0.3, color.RGBA{R: 35, G: clampToByte(68 + gVar), B: 30, A: 120}, false)
+
+			case ObjectHedgerow:
+				// Hedgerow — dense green fill, darker than bushes.
+				h := terrainHash(col, row)
+				gVar := int(h%8) - 4
+				vector.FillRect(screen, px, py, cs, cs, color.RGBA{R: 22, G: clampToByte(44 + gVar), B: 20, A: 240}, false)
+				// Top highlight stripe.
+				vector.StrokeLine(screen, px, py+1, px+cs, py+1, 0.8, color.RGBA{R: 30, G: clampToByte(58 + gVar), B: 26, A: 160}, false)
+
+			case ObjectRubblePile:
+				// Rubble pile — already drawn by cover renderer, but add detail if from TileMap directly.
+				vector.FillRect(screen, px+1, py+1, cs-2, cs-2, color.RGBA{R: 55, G: 50, B: 42, A: 220}, false)
+				vector.StrokeLine(screen, px+2, py+cs*0.4, px+cs*0.6, py+2, 0.5, color.RGBA{R: 65, G: 58, B: 48, A: 150}, false)
+
+			case ObjectSandbag:
+				// Sandbag wall — tan filled rect with horizontal lines.
+				vector.FillRect(screen, px+1, py+1, cs-2, cs-2, color.RGBA{R: 85, G: 78, B: 55, A: 255}, false)
+				vector.StrokeLine(screen, px+1, py+cs*0.33, px+cs-1, py+cs*0.33, 0.5, color.RGBA{R: 70, G: 64, B: 44, A: 200}, false)
+				vector.StrokeLine(screen, px+1, py+cs*0.66, px+cs-1, py+cs*0.66, 0.5, color.RGBA{R: 70, G: 64, B: 44, A: 200}, false)
+
+			case ObjectSlitTrench:
+				// Slit trench — dark recessed rectangle with shadow.
+				vector.FillRect(screen, px+1, py+1, cs-2, cs-2, color.RGBA{R: 28, G: 24, B: 18, A: 255}, false)
+				// Inner shadow for depth.
+				vector.StrokeRect(screen, px+2, py+2, cs-4, cs-4, 0.8, color.RGBA{R: 18, G: 14, B: 10, A: 200}, false)
+				// Dirt lip on edges.
+				vector.StrokeLine(screen, px, py, px+cs, py, 0.8, color.RGBA{R: 52, G: 44, B: 32, A: 180}, false)
+				vector.StrokeLine(screen, px, py+cs, px+cs, py+cs, 0.8, color.RGBA{R: 52, G: 44, B: 32, A: 180}, false)
+
+			case ObjectWire:
+				// Barbed wire — crisscross lines.
+				vector.StrokeLine(screen, px+1, py+1, px+cs-1, py+cs-1, 0.5, color.RGBA{R: 80, G: 78, B: 74, A: 180}, false)
+				vector.StrokeLine(screen, px+cs-1, py+1, px+1, py+cs-1, 0.5, color.RGBA{R: 80, G: 78, B: 74, A: 180}, false)
+				// Barb dots.
+				vector.FillRect(screen, px+cs*0.25, py+cs*0.25, 1, 1, color.RGBA{R: 100, G: 96, B: 90, A: 200}, false)
+				vector.FillRect(screen, px+cs*0.75, py+cs*0.75, 1, 1, color.RGBA{R: 100, G: 96, B: 90, A: 200}, false)
+
+			case ObjectATBarrier:
+				// Anti-tank barrier — concrete block with X marks.
+				vector.FillRect(screen, px+1, py+1, cs-2, cs-2, color.RGBA{R: 72, G: 70, B: 66, A: 255}, false)
+				vector.StrokeLine(screen, px+2, py+2, px+cs-2, py+cs-2, 1.0, color.RGBA{R: 58, G: 56, B: 52, A: 200}, false)
+				vector.StrokeLine(screen, px+cs-2, py+2, px+2, py+cs-2, 1.0, color.RGBA{R: 58, G: 56, B: 52, A: 200}, false)
+
+			case ObjectFence:
+				// Fence — thin vertical lines with horizontal rail.
+				vector.StrokeLine(screen, px+cs*0.25, py+1, px+cs*0.25, py+cs-1, 0.5, color.RGBA{R: 68, G: 60, B: 44, A: 200}, false)
+				vector.StrokeLine(screen, px+cs*0.75, py+1, px+cs*0.75, py+cs-1, 0.5, color.RGBA{R: 68, G: 60, B: 44, A: 200}, false)
+				vector.StrokeLine(screen, px, py+cs*0.35, px+cs, py+cs*0.35, 0.5, color.RGBA{R: 74, G: 66, B: 48, A: 180}, false)
+				vector.StrokeLine(screen, px, py+cs*0.65, px+cs, py+cs*0.65, 0.5, color.RGBA{R: 74, G: 66, B: 48, A: 180}, false)
+
+			case ObjectVehicleWreck:
+				// Vehicle wreck — dark charred rectangle.
+				vector.FillRect(screen, px, py, cs, cs, color.RGBA{R: 36, G: 32, B: 28, A: 255}, false)
+				vector.StrokeLine(screen, px+2, py+cs*0.5, px+cs-2, py+cs*0.5, 1.0, color.RGBA{R: 50, G: 44, B: 36, A: 200}, false)
+				// Flame hint.
+				vector.FillRect(screen, px+cs*0.4, py+1, 3, 3, color.RGBA{R: 120, G: 60, B: 20, A: 100}, false)
+			}
+		}
+	}
 }
 
 // drawCoverObjects renders cover objects with orientation-aware visuals.
@@ -1679,6 +1886,176 @@ func (g *Game) drawSpottedIndicators(screen *ebiten.Image, offX, offY int) {
 		// Dot of the "!"
 		vector.FillCircle(screen, sx, topY+7, 1.0, c, false)
 	}
+}
+
+func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) {
+	const segments = 22
+	const baseOpacity = 0.25 // requested: 25% opacity
+	for _, sq := range g.squads {
+		sq.pruneRadioVisualEvents(g.tick)
+		for _, ev := range sq.radioVisualEvents {
+			age := g.tick - ev.StartTick
+			if age < 0 || age >= ev.Duration {
+				continue
+			}
+			life := 1.0 - float64(age)/float64(ev.Duration)
+			if life <= 0 {
+				continue
+			}
+
+			// Console-green baseline, capped at ~25% alpha.
+			base := color.RGBA{R: 76, G: 255, B: 136, A: uint8(255 * baseOpacity * life)}
+			coreWidth := float32(1.5)
+			grain := 3.0
+			switch ev.Delivery {
+			case radioDeliveryGarbled:
+				base = color.RGBA{R: 90, G: 250, B: 145, A: uint8(255 * 0.22 * life)}
+				coreWidth = 1.35
+				grain = 5.0
+			case radioDeliveryDrop:
+				base = color.RGBA{R: 110, G: 225, B: 140, A: uint8(255 * 0.18 * life)}
+				coreWidth = 1.2
+				grain = 6.5
+			}
+
+			sx := float32(ev.SenderX)
+			sy := float32(ev.SenderY)
+			rx := float32(ev.ReceiverX)
+			ry := float32(ev.ReceiverY)
+			dx := rx - sx
+			dy := ry - sy
+			dist := math.Hypot(float64(dx), float64(dy))
+			if dist < 1 {
+				continue
+			}
+			nx := -dy / float32(dist)
+			ny := dx / float32(dist)
+			arch := float32(math.Min(30.0, dist*0.06))
+			mx := (sx + rx) * 0.5
+			my := (sy + ry) * 0.5
+			cx := mx + nx*arch
+			cy := my + ny*arch
+
+			prevX := sx
+			prevY := sy
+			for i := 1; i <= segments; i++ {
+				t := float32(i) / float32(segments)
+				omt := 1.0 - t
+				arcX := omt*omt*sx + 2*omt*t*cx + t*t*rx
+				arcY := omt*omt*sy + 2*omt*t*cy + t*t*ry
+				phase := float64(ev.MessageID*31+uint64(i*17)+uint64(g.tick*7)) * 0.11
+				jitter := float32(math.Sin(phase)) * float32(grain*(1.0-life)*0.9)
+				jx := arcX + nx*jitter
+				jy := arcY + ny*jitter
+
+				glowCol := color.RGBA{R: 76, G: 255, B: 136, A: uint8(float64(base.A) * 0.35)}
+				vector.StrokeLine(screen, prevX, prevY, jx, jy, coreWidth+1.3, glowCol, false)
+				vector.StrokeLine(screen, prevX, prevY, jx, jy, coreWidth, base, false)
+
+				// Grain speckle along the arc for analog/static feel.
+				if i%2 == 0 {
+					sparkA := uint8(float64(base.A) * 0.45)
+					vector.FillCircle(screen, jx+nx*0.6, jy+ny*0.6, 0.9, color.RGBA{R: 110, G: 255, B: 165, A: sparkA}, false)
+				}
+
+				prevX, prevY = jx, jy
+			}
+
+			// Endpoint pings for readability.
+			pingAlpha := uint8(255 * baseOpacity * (0.7 + 0.3*life))
+			vector.FillCircle(screen, sx, sy, 2.0, color.RGBA{R: 120, G: 255, B: 170, A: pingAlpha}, false)
+			vector.FillCircle(screen, rx, ry, 1.8, color.RGBA{R: 120, G: 255, B: 170, A: pingAlpha}, false)
+		}
+	}
+}
+
+func (g *Game) drawRadioChatBox(screen *ebiten.Image) {
+	lines := make([]radioChatLine, 0, 32)
+	for _, sq := range g.squads {
+		sq.pruneRadioChatLines(g.tick)
+		lines = append(lines, sq.radioChatLines...)
+	}
+	if len(lines) == 0 {
+		return
+	}
+	sort.Slice(lines, func(i, j int) bool {
+		if lines[i].Tick == lines[j].Tick {
+			return lines[i].Sender < lines[j].Sender
+		}
+		return lines[i].Tick < lines[j].Tick
+	})
+
+	const (
+		maxRows    = 8
+		charW      = 6
+		lineH      = 14
+		pad        = 8
+		senderColW = 68
+		recvColW   = 68
+	)
+
+	start := 0
+	if len(lines) > maxRows {
+		start = len(lines) - maxRows
+	}
+	lines = lines[start:]
+
+	panelW := 540
+	panelH := 22 + len(lines)*lineH + pad
+	px := g.offX + 14
+	py := g.offY + 14
+
+	vector.FillRect(screen, float32(px), float32(py), float32(panelW), float32(panelH), color.RGBA{R: 6, G: 16, B: 10, A: 190}, false)
+	vector.StrokeRect(screen, float32(px), float32(py), float32(panelW), float32(panelH), 1.4, color.RGBA{R: 76, G: 180, B: 120, A: 200}, false)
+	vector.FillRect(screen, float32(px), float32(py), float32(panelW), 18, color.RGBA{R: 14, G: 42, B: 26, A: 210}, false)
+
+	g.drawTintedDebugText(screen, "RADIO NET", px+6, py+3, color.RGBA{R: 120, G: 255, B: 170, A: 230})
+
+	senderSepX := float32(px + pad + senderColW)
+	recvSepX := float32(px + panelW - pad - recvColW)
+	vector.StrokeLine(screen, senderSepX, float32(py+19), senderSepX, float32(py+panelH-3), 1.0, color.RGBA{R: 50, G: 110, B: 80, A: 170}, false)
+	vector.StrokeLine(screen, recvSepX, float32(py+19), recvSepX, float32(py+panelH-3), 1.0, color.RGBA{R: 50, G: 110, B: 80, A: 170}, false)
+
+	msgMaxChars := (panelW - (pad * 2) - senderColW - recvColW - 8) / charW
+	for i, ln := range lines {
+		y := py + 22 + i*lineH
+		if i%2 == 0 {
+			vector.FillRect(screen, float32(px+2), float32(y-1), float32(panelW-4), float32(lineH), color.RGBA{R: 10, G: 24, B: 15, A: 130}, false)
+		}
+
+		sender := trimRunes(ln.Sender, senderColW/charW)
+		receiver := trimRunes(ln.Receiver, recvColW/charW)
+		msg := trimRunes(ln.Message, msgMaxChars)
+
+		g.drawTintedDebugText(screen, sender, px+pad, y, color.RGBA{R: 120, G: 255, B: 180, A: 220})
+		g.drawTintedDebugText(screen, msg, px+pad+senderColW+6, y, color.RGBA{R: 96, G: 240, B: 156, A: 220})
+		rx := px + panelW - pad - recvColW
+		g.drawTintedDebugText(screen, receiver, rx, y, color.RGBA{R: 120, G: 255, B: 180, A: 220})
+	}
+}
+
+func (g *Game) drawTintedDebugText(screen *ebiten.Image, text string, x, y int, tint color.RGBA) {
+	if text == "" {
+		return
+	}
+	bufW := max(1, len(text)*6+2)
+	buf := ebiten.NewImage(bufW, 14)
+	buf.Clear()
+	ebitenutil.DebugPrintAt(buf, text, 0, 0)
+	opts := &ebiten.DrawImageOptions{}
+	opts.ColorScale.ScaleWithColor(tint)
+	opts.GeoM.Translate(float64(x), float64(y))
+	screen.DrawImage(buf, opts)
+}
+
+func trimRunes(s string, maxChars int) string {
+	if maxChars <= 0 || len(s) <= maxChars {
+		return s
+	}
+	if maxChars <= 3 {
+		return s[:1]
+	}
+	return s[:maxChars-3] + "..."
 }
 
 // drawVisionConesBuffered renders all FOV fans for a team into an offscreen buffer,

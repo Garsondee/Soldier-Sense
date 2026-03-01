@@ -334,6 +334,12 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		if s.state == SoldierStateDead {
 			continue
 		}
+		if s.magCapacity <= 0 {
+			s.magCapacity = defaultMagazineCapacity
+		}
+		if s.magRounds < 0 {
+			s.magRounds = 0
+		}
 
 		// Tick down mode-switch timer first — soldier is busy changing modes.
 		if s.modeSwitchTimer > 0 {
@@ -343,6 +349,25 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 				s.currentFireMode = s.desiredFireMode
 				s.think(fmt.Sprintf("fire mode → %s", s.currentFireMode))
 			}
+			resetBurstState(s)
+			resetAimingState(s)
+			continue
+		}
+
+		if s.reloadTimer > 0 {
+			s.reloadTimer--
+			if s.reloadTimer == 0 {
+				s.magRounds = s.magCapacity
+				s.think("reload complete")
+			}
+			resetBurstState(s)
+			resetAimingState(s)
+			continue
+		}
+		if s.magRounds <= 0 {
+			s.reloadTimer = s.reloadDurationTicks()
+			s.fireCooldown = 0
+			s.think(fmt.Sprintf("reloading (%dt)", s.reloadTimer))
 			resetBurstState(s)
 			resetAimingState(s)
 			continue
@@ -453,8 +478,21 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		// Effective target body radius reduced by cover and prone stance.
 		baseBodyRadius := float64(soldierRadius) * target.profile.Stance.Profile().ProfileMul
 		coverReduction := 0.0
-		if inCover, defence := IsBehindCover(target.x, target.y, s.x, s.y, target.covers); inCover {
-			coverReduction = defence
+		if target.tileMap != nil {
+			if inCover, defence := TileMapCoverBetween(target.tileMap, target.x, target.y, s.x, s.y); inCover {
+				coverReduction = defence
+			}
+		}
+		if coverReduction <= 0 {
+			if inCover, defence := IsBehindCover(target.x, target.y, s.x, s.y, target.covers); inCover {
+				coverReduction = defence
+			}
+		}
+		if coverReduction > 0.90 {
+			coverReduction = 0.90
+		}
+		if coverReduction < 0 {
+			coverReduction = 0
 		}
 		effBodyRadius := baseBodyRadius * (1.0 - coverReduction*0.7)
 
@@ -524,6 +562,11 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 			shotIdx = s.burstShotIndex
 		}
 
+		s.magRounds--
+		if s.magRounds < 0 {
+			s.magRounds = 0
+		}
+
 		cm.Gunfires = append(cm.Gunfires, GunfireEvent{X: s.x, Y: s.y, Team: s.team})
 		cm.flashes = append(cm.flashes, &MuzzleFlash{x: s.x, y: s.y, angle: targetH, team: s.team})
 
@@ -532,15 +575,21 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		if !queuedBurst {
 			resetAimingState(s)
 			if params.shots > 1 {
-				s.burstShotsRemaining = params.shots - 1
-				s.burstShotIndex = 1
-				s.burstTargetID = target.id
-				s.burstAnyHit = hit
-				s.burstHitChance = hitChance
-				s.burstDist = dist
-				s.burstBaseSpread = baseShooterSpread
-				s.fireCooldown = burstInterShotGap
-				continue
+				followUpRounds := params.shots - 1
+				if followUpRounds > s.magRounds {
+					followUpRounds = s.magRounds
+				}
+				if followUpRounds > 0 {
+					s.burstShotsRemaining = followUpRounds
+					s.burstShotIndex = 1
+					s.burstTargetID = target.id
+					s.burstAnyHit = hit
+					s.burstHitChance = hitChance
+					s.burstDist = dist
+					s.burstBaseSpread = baseShooterSpread
+					s.fireCooldown = burstInterShotGap
+					continue
+				}
 			}
 
 			s.fireCooldown = params.interval

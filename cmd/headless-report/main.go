@@ -9,9 +9,15 @@ import (
 	"github.com/Garsondee/Soldier-Sense/internal/game"
 )
 
+const (
+	stalemateMinTeamSurvivalRate   = 0.50
+	stalemateMinFrictionPerSoldier = 2.0
+)
+
 type runStats struct {
 	runIndex int
 	seed     int64
+	ticks    int
 
 	firstContactTick   int
 	firstEngageTick    int
@@ -38,6 +44,14 @@ type runStats struct {
 
 	windowSummary *game.WindowReport
 	grades        []game.SoldierGrade
+
+	redTotal      int
+	blueTotal     int
+	redSurvivors  int
+	blueSurvivors int
+
+	stalemate       bool
+	stalemateReason string
 }
 
 func main() {
@@ -145,9 +159,13 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		}
 	}
 
-	return runStats{
+	grades := ts.SoldierGrades()
+	redTotal, blueTotal, redSurvivors, blueSurvivors := teamSurvivalCounts(grades)
+
+	rs := runStats{
 		runIndex:             runIndex,
 		seed:                 seed,
+		ticks:                ticks,
 		firstContactTick:     firstTick(entries, "vision", "contact_new", ""),
 		firstEngageTick:      firstTick(entries, "squad", "intent_change", "engage"),
 		firstRegroupTick:     firstTick(entries, "squad", "intent_change", "regroup"),
@@ -169,8 +187,14 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		cohesionReformEvents: cohesionReformEvents,
 		affected:             affected,
 		windowSummary:        ts.Reporter.WindowSummary(),
-		grades:               ts.SoldierGrades(),
+		grades:               grades,
+		redTotal:             redTotal,
+		blueTotal:            blueTotal,
+		redSurvivors:         redSurvivors,
+		blueSurvivors:        blueSurvivors,
 	}
+	rs.stalemate, rs.stalemateReason = detectStalemate(rs)
+	return rs
 }
 
 func firstTick(entries []game.SimLogEntry, category, key, contains string) int {
@@ -193,6 +217,8 @@ func printRun(rs runStats) {
 		rs.intentChanges, rs.goalChanges, rs.stateChanges, rs.contactNew, rs.contactLost)
 	fmt.Printf("effectiveness_events: stalled_in_combat=%d detached_from_engagement=%d affected_soldiers=%d\n",
 		rs.stalledEvents, rs.detachedEvents, len(rs.affected))
+	fmt.Printf("survivors: red=%d/%d blue=%d/%d\n", rs.redSurvivors, rs.redTotal, rs.blueSurvivors, rs.blueTotal)
+	fmt.Printf("stalemate_check: verdict=%t reason=%s\n", rs.stalemate, rs.stalemateReason)
 	fmt.Printf("psych_events: disobedience=%d panic_retreat=%d surrender=%d squad_break=%d squad_reform=%d\n",
 		rs.disobeyEvents, rs.panicEvents, rs.surrenderEvents, rs.cohesionBreakEvents, rs.cohesionReformEvents)
 	fmt.Printf("affected_labels: %s\n", joinSet(rs.affected))
@@ -239,6 +265,11 @@ func printAggregate(all []runStats) {
 	totalState := 0
 	totalContactNew := 0
 	totalContactLost := 0
+	totalRedSurvivors := 0
+	totalBlueSurvivors := 0
+	totalRedSoldiers := 0
+	totalBlueSoldiers := 0
+	stalemateRuns := 0
 
 	contactTicks := make([]int, 0, len(all))
 	engageTicks := make([]int, 0, len(all))
@@ -271,6 +302,13 @@ func printAggregate(all []runStats) {
 		totalState += rs.stateChanges
 		totalContactNew += rs.contactNew
 		totalContactLost += rs.contactLost
+		totalRedSurvivors += rs.redSurvivors
+		totalBlueSurvivors += rs.blueSurvivors
+		totalRedSoldiers += rs.redTotal
+		totalBlueSoldiers += rs.blueTotal
+		if rs.stalemate {
+			stalemateRuns++
+		}
 		if rs.firstContactTick >= 0 {
 			contactTicks = append(contactTicks, rs.firstContactTick)
 		}
@@ -323,6 +361,13 @@ func printAggregate(all []runStats) {
 	fmt.Printf("phase_marker_avg_ticks: first_contact=%s first_engage=%s first_death=%s first_panic=%s first_surrender=%s first_break=%s\n",
 		avgTickString(contactTicks), avgTickString(engageTicks), avgTickString(deathTicks), avgTickString(panicTicks), avgTickString(surrenderTicks), avgTickString(breakTicks))
 	fmt.Printf("unique_affected_labels=%d [%s]\n", len(affectedGlobal), joinSet(affectedGlobal))
+	fmt.Printf("stalemate_runs=%d/%d (%.1f%%)\n", stalemateRuns, len(all), avg(stalemateRuns*100, len(all)))
+	if totalRedSoldiers > 0 && totalBlueSoldiers > 0 {
+		fmt.Printf("survival_rate: red=%.1f%% blue=%.1f%%\n",
+			float64(totalRedSurvivors)/float64(totalRedSoldiers)*100,
+			float64(totalBlueSurvivors)/float64(totalBlueSoldiers)*100,
+		)
+	}
 
 	// Per-soldier aggregate performance.
 	fmt.Println("\n=== Aggregate Soldier Performance ===")
@@ -408,6 +453,48 @@ func collectAllGrades(all []runStats) []game.SoldierGrade {
 		out = append(out, rs.grades...)
 	}
 	return out
+}
+
+func teamSurvivalCounts(grades []game.SoldierGrade) (redTotal, blueTotal, redSurvivors, blueSurvivors int) {
+	for _, g := range grades {
+		switch g.Team {
+		case game.TeamRed:
+			redTotal++
+			if g.Survived {
+				redSurvivors++
+			}
+		case game.TeamBlue:
+			blueTotal++
+			if g.Survived {
+				blueSurvivors++
+			}
+		}
+	}
+	return redTotal, blueTotal, redSurvivors, blueSurvivors
+}
+
+func detectStalemate(rs runStats) (bool, string) {
+	if rs.redTotal <= 0 || rs.blueTotal <= 0 {
+		return false, "insufficient-team-data"
+	}
+	redSurvival := float64(rs.redSurvivors) / float64(rs.redTotal)
+	blueSurvival := float64(rs.blueSurvivors) / float64(rs.blueTotal)
+	highMutualSurvival := redSurvival >= stalemateMinTeamSurvivalRate && blueSurvival >= stalemateMinTeamSurvivalRate
+
+	totalSoldiers := rs.redTotal + rs.blueTotal
+	frictionPerSoldier := 0.0
+	if totalSoldiers > 0 {
+		frictionPerSoldier = float64(rs.stalledEvents+rs.detachedEvents) / float64(totalSoldiers)
+	}
+	highFriction := frictionPerSoldier >= stalemateMinFrictionPerSoldier
+
+	noSquadBreak := rs.cohesionBreakEvents == 0
+
+	if highMutualSurvival && highFriction && noSquadBreak {
+		return true, fmt.Sprintf("high_mutual_survival(%.2f/%.2f)+high_friction_per_soldier(%.2f)+no_squad_break", redSurvival, blueSurvival, frictionPerSoldier)
+	}
+
+	return false, fmt.Sprintf("mutual_survival=%.2f/%.2f friction_per_soldier=%.2f no_squad_break=%t", redSurvival, blueSurvival, frictionPerSoldier, noSquadBreak)
 }
 
 func joinSet(s map[string]struct{}) string {
