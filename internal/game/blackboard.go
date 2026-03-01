@@ -799,9 +799,10 @@ func (bb *Blackboard) VisibleThreatCount() int {
 	return n
 }
 
-// ClosestVisibleThreatDist returns the distance to the nearest visible threat
-// from the given position. Returns math.MaxFloat64 if none visible.
-func (bb *Blackboard) ClosestVisibleThreatDist(x, y float64) float64 {
+// ClosestVisibleThreatDist2 returns the squared distance to the nearest visible
+// threat from the given position. Returns math.MaxFloat64 if none visible.
+// Prefer this over ClosestVisibleThreatDist for comparisons to avoid sqrt.
+func (bb *Blackboard) ClosestVisibleThreatDist2(x, y float64) float64 {
 	best := math.MaxFloat64
 	for _, t := range bb.Threats {
 		if !t.IsVisible {
@@ -809,12 +810,23 @@ func (bb *Blackboard) ClosestVisibleThreatDist(x, y float64) float64 {
 		}
 		dx := t.X - x
 		dy := t.Y - y
-		d := math.Sqrt(dx*dx + dy*dy)
-		if d < best {
-			best = d
+		d2 := dx*dx + dy*dy
+		if d2 < best {
+			best = d2
 		}
 	}
 	return best
+}
+
+// ClosestVisibleThreatDist returns the distance to the nearest visible threat
+// from the given position. Returns math.MaxFloat64 if none visible.
+// Use ClosestVisibleThreatDist2 for comparisons to avoid sqrt.
+func (bb *Blackboard) ClosestVisibleThreatDist(x, y float64) float64 {
+	d2 := bb.ClosestVisibleThreatDist2(x, y)
+	if d2 == math.MaxFloat64 {
+		return math.MaxFloat64
+	}
+	return math.Sqrt(d2)
 }
 
 // combatMemoryDecayPerTick is 1/3600 so memory lasts ~60s at 60TPS.
