@@ -25,9 +25,64 @@ type Inspector struct {
 	rawView  bool // false = curated, true = raw dump
 }
 
+type inspectorButton struct {
+	label     string
+	lastTicks int
+	r         rectI
+}
+
+type rectI struct {
+	x int
+	y int
+	w int
+	h int
+}
+
+func (r rectI) contains(x, y int) bool {
+	return x >= r.x && x < r.x+r.w && y >= r.y && y < r.y+r.h
+}
+
+func (g *Game) inspectorButtons() []inspectorButton {
+	// Button positions are in screen space.
+	// Must match the inspector blit position in drawInspector.
+	px := g.width - logPanelWidth - inspBufW*inspScale - g.offX - 12
+	py := g.height - inspBufH*inspScale - g.offY - 8
+
+	// Top-left of the inspector buffer in screen space.
+	baseX := px
+	baseY := py
+
+	btnH := 18 * inspScale
+	btnW := (inspBufW*inspScale - 12)
+	btnX := baseX + 6
+	btnY0 := baseY + 54
+	gap := 6
+
+	return []inspectorButton{
+		{label: "COPY 120T (SEL+LDR)", lastTicks: 120, r: rectI{x: btnX, y: btnY0, w: btnW, h: btnH}},
+		{label: "COPY 300T (SEL+LDR)", lastTicks: 300, r: rectI{x: btnX, y: btnY0 + btnH + gap, w: btnW, h: btnH}},
+	}
+}
+
 // handleClick checks if a mouse click hit a soldier and selects it.
 // Returns true if a soldier was hit.
 func (g *Game) handleInspectorClick(mx, my int) bool {
+	// If the inspector panel is open, buttons take click priority.
+	if g.inspector.selected != nil {
+		for _, btn := range g.inspectorButtons() {
+			if btn.r.contains(mx, my) {
+				report := g.soldierDebugReport(g.inspector.selected, btn.lastTicks)
+				if report != "" {
+					_ = setClipboardText(report)
+					if g.thoughtLog != nil {
+						g.thoughtLog.Add(g.tick, "DBG", TeamRed, fmt.Sprintf("copied report (%dt)", btn.lastTicks), LogCatThought)
+					}
+				}
+				return true
+			}
+		}
+	}
+
 	// Inverse of Draw camera transform:
 	//   screen = (world - cam) * zoom + vpHalf + offset
 	//   world  = (screen - offset - vpHalf) / zoom + cam
@@ -109,6 +164,25 @@ func (g *Game) drawInspector(screen *ebiten.Image) {
 	}
 	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("view: %s  [I] toggle", viewName), lx, ly)
 	ly += inspLineH + 4
+
+	// Debug report buttons.
+	for _, btn := range g.inspectorButtons() {
+		r := btn.r
+		// Convert screen-space button rect into buffer-space coordinates.
+		// Since the buffer is blitted at inspScale, we scale down and subtract the inspector origin.
+		px := g.width - logPanelWidth - inspBufW*inspScale - g.offX - 12
+		py := g.height - inspBufH*inspScale - g.offY - 8
+		bx := (r.x - px) / inspScale
+		by := (r.y - py) / inspScale
+		bw := r.w / inspScale
+		bh := r.h / inspScale
+		bg := color.RGBA{R: 24, G: 30, B: 24, A: 230}
+		bd := color.RGBA{R: 70, G: 110, B: 70, A: 180}
+		vector.FillRect(buf, float32(bx), float32(by), float32(bw), float32(bh), bg, false)
+		vector.StrokeRect(buf, float32(bx), float32(by), float32(bw), float32(bh), 1.0, bd, false)
+		ebitenutil.DebugPrintAt(buf, btn.label, bx+6, by+3)
+	}
+	ly += inspLineH + 6
 
 	// Divider.
 	vector.StrokeLine(buf, float32(lx), float32(ly), bw-float32(inspPad), float32(ly), 1.0, panelBorder, false)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
@@ -86,6 +87,101 @@ func (fm FireMode) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+type SoldierDebugSnapshot struct {
+	Tick int
+
+	X  float64
+	Y  float64
+	HP float64
+
+	State  SoldierState
+	Stance Stance
+
+	Goal        GoalKind
+	SquadIntent SquadIntentKind
+
+	IncomingFireCount int
+	SuppressLevel     float64
+
+	Fear      float64
+	EffFear   float64
+	Morale    float64
+	Composure float64
+
+	VisibleThreats  int
+	ThreatsKnown    int
+	SquadHasContact bool
+	HeardGunfire    bool
+
+	CombatMemoryStrength float64
+	CombatMemoryX        float64
+	CombatMemoryY        float64
+
+	DecisionDebt     float64
+	NextDecisionTick int
+	PanicLocked      bool
+	PanicRetreat     bool
+	Surrendered      bool
+	DisobeyingOrders bool
+
+	OfficerOrderActive          bool
+	OfficerOrderImmediate       bool
+	OfficerOrderObedienceChance float64
+	OfficerOrderKind            OfficerCommandKind
+	OfficerOrderPriority        float64
+
+	PathLen              int
+	PathIndex            int
+	SlotTargetX          float64
+	SlotTargetY          float64
+	DistToSlot           float64
+	DistToLeader         float64
+	BoundMover           bool
+	DashOverwatchTimer   int
+	BoundHoldTicks       int
+	MobilityStallTicks   int
+	RecoveryNoPathStreak int
+	RecoveryCommitTicks  int
+	RecoveryAction       RecoveryAction
+	SuppressionAbort     bool
+	GoalPauseTimer       int
+	CognitionPauseTimer  int
+	PostArrivalTimer     int
+}
+
+func (ss SoldierDebugSnapshot) CompactString(label string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[T=%03d] %-3s ", ss.Tick, label)
+	fmt.Fprintf(&b, "pos:(%.0f,%.0f) hp:%.0f%% ", ss.X, ss.Y, ss.HP*100)
+	fmt.Fprintf(&b, "st:%s %s g:%s int:%s ", ss.State, ss.Stance, ss.Goal, ss.SquadIntent)
+	fmt.Fprintf(&b, "thr:%dV/%d in:%d sup:%.0f%% ", ss.VisibleThreats, ss.ThreatsKnown, ss.IncomingFireCount, ss.SuppressLevel*100)
+	fmt.Fprintf(&b, "fear:%.0f%% eff:%.0f%% mor:%.0f%% comp:%.0f%% ", ss.Fear*100, ss.EffFear*100, ss.Morale*100, ss.Composure*100)
+	if ss.Surrendered {
+		b.WriteString("SURRENDER ")
+	}
+	if ss.PanicRetreat {
+		b.WriteString("PANIC_RETREAT ")
+	}
+	if ss.DisobeyingOrders {
+		b.WriteString("DISOBEY ")
+	}
+	if ss.OfficerOrderActive {
+		if ss.OfficerOrderImmediate {
+			fmt.Fprintf(&b, "ord:%s imm pri:%.2f ", ss.OfficerOrderKind, ss.OfficerOrderPriority)
+		} else {
+			fmt.Fprintf(&b, "ord:%s obey:%.0f%% pri:%.2f ", ss.OfficerOrderKind, ss.OfficerOrderObedienceChance*100, ss.OfficerOrderPriority)
+		}
+	}
+	fmt.Fprintf(&b, "path:%d/%d dslot:%.0f dldr:%.0f ", ss.PathIndex, ss.PathLen, ss.DistToSlot, ss.DistToLeader)
+	fmt.Fprintf(&b, "bound:%t dash:%d hold:%d stall:%d np:%d rc:%d ra:%d ",
+		ss.BoundMover, ss.DashOverwatchTimer, ss.BoundHoldTicks, ss.MobilityStallTicks,
+		ss.RecoveryNoPathStreak, ss.RecoveryCommitTicks, ss.RecoveryAction)
+	fmt.Fprintf(&b, "gp:%d cp:%d pa:%d next:%d debt:%.2f",
+		ss.GoalPauseTimer, ss.CognitionPauseTimer, ss.PostArrivalTimer,
+		ss.NextDecisionTick, ss.DecisionDebt)
+	return b.String()
 }
 
 func (s *Soldier) beginStanceTransition(target Stance, urgent bool) {
@@ -619,6 +715,9 @@ type Soldier struct {
 	prevGoal    GoalKind
 	thoughtLog  *ThoughtLog
 	currentTick *int // pointer to game tick counter
+	debugRing   []SoldierDebugSnapshot
+	debugHead   int
+	debugCount  int
 
 	// Formation
 	formationMember bool    // true = follows squad slot, not fixed patrol
@@ -759,6 +858,7 @@ func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavG
 		profile:        DefaultProfile(),
 		thoughtLog:     tl,
 		currentTick:    tick,
+		debugRing:      make([]SoldierDebugSnapshot, 720),
 		prevGoal:       GoalAdvance,
 		aimingTargetID: -1,
 		burstTargetID:  -1,
@@ -771,6 +871,105 @@ func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavG
 	}
 	s.recomputePath()
 	return s
+}
+
+func (s *Soldier) recordDebugSnapshot(tick int) {
+	if len(s.debugRing) == 0 {
+		return
+	}
+	bb := &s.blackboard
+	threatsKnown := len(bb.Threats)
+	visibleThreats := 0
+	for _, t := range bb.Threats {
+		if t.IsVisible {
+			visibleThreats++
+		}
+	}
+	pathLen := len(s.path)
+	pathIdx := s.pathIndex
+	if pathIdx < 0 {
+		pathIdx = 0
+	}
+	if pathIdx > pathLen {
+		pathIdx = pathLen
+	}
+	distToSlot := math.Hypot(s.slotTargetX-s.x, s.slotTargetY-s.y)
+	distToLeader := 0.0
+	if s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
+		distToLeader = math.Hypot(s.squad.Leader.x-s.x, s.squad.Leader.y-s.y)
+	}
+	ss := SoldierDebugSnapshot{
+		Tick:                        tick,
+		X:                           s.x,
+		Y:                           s.y,
+		HP:                          clamp01(s.health / soldierMaxHP),
+		State:                       s.state,
+		Stance:                      s.profile.Stance,
+		Goal:                        bb.CurrentGoal,
+		SquadIntent:                 bb.SquadIntent,
+		IncomingFireCount:           bb.IncomingFireCount,
+		SuppressLevel:               bb.SuppressLevel,
+		Fear:                        s.profile.Psych.Fear,
+		EffFear:                     s.profile.Psych.EffectiveFear(),
+		Morale:                      s.profile.Psych.Morale,
+		Composure:                   s.profile.Psych.Composure,
+		VisibleThreats:              visibleThreats,
+		ThreatsKnown:                threatsKnown,
+		SquadHasContact:             bb.SquadHasContact,
+		HeardGunfire:                bb.HeardGunfire,
+		CombatMemoryStrength:        bb.CombatMemoryStrength,
+		CombatMemoryX:               bb.CombatMemoryX,
+		CombatMemoryY:               bb.CombatMemoryY,
+		DecisionDebt:                bb.DecisionDebt,
+		NextDecisionTick:            bb.NextDecisionTick,
+		PanicLocked:                 bb.PanicLocked,
+		PanicRetreat:                bb.PanicRetreatActive,
+		Surrendered:                 bb.Surrendered,
+		DisobeyingOrders:            bb.DisobeyingOrders,
+		OfficerOrderActive:          bb.OfficerOrderActive,
+		OfficerOrderImmediate:       bb.OfficerOrderImmediate,
+		OfficerOrderObedienceChance: bb.OfficerOrderObedienceChance,
+		OfficerOrderKind:            bb.OfficerOrderKind,
+		OfficerOrderPriority:        bb.OfficerOrderPriority,
+		PathLen:                     pathLen,
+		PathIndex:                   pathIdx,
+		SlotTargetX:                 s.slotTargetX,
+		SlotTargetY:                 s.slotTargetY,
+		DistToSlot:                  distToSlot,
+		DistToLeader:                distToLeader,
+		BoundMover:                  bb.BoundMover,
+		DashOverwatchTimer:          s.dashOverwatchTimer,
+		BoundHoldTicks:              s.boundHoldTicks,
+		MobilityStallTicks:          s.mobilityStallTicks,
+		RecoveryNoPathStreak:        s.recoveryNoPathStreak,
+		RecoveryCommitTicks:         s.recoveryCommitTicks,
+		RecoveryAction:              s.recoveryAction,
+		SuppressionAbort:            s.suppressionAbort,
+		GoalPauseTimer:              s.goalPauseTimer,
+		CognitionPauseTimer:         s.cognitionPauseTimer,
+		PostArrivalTimer:            s.postArrivalTimer,
+	}
+	s.debugRing[s.debugHead] = ss
+	s.debugHead = (s.debugHead + 1) % len(s.debugRing)
+	if s.debugCount < len(s.debugRing) {
+		s.debugCount++
+	}
+}
+
+func (s *Soldier) debugSnapshots(fromTick, toTick int) []SoldierDebugSnapshot {
+	if s.debugCount == 0 {
+		return nil
+	}
+	out := make([]SoldierDebugSnapshot, 0, s.debugCount)
+	for i := 0; i < s.debugCount; i++ {
+		idx := (s.debugHead - s.debugCount + i + len(s.debugRing)) % len(s.debugRing)
+		ss := s.debugRing[idx]
+		if ss.Tick < fromTick || ss.Tick > toTick {
+			continue
+		}
+		out = append(out, ss)
+	}
+	return out
 }
 
 // DefaultProfile returns a baseline average soldier.
@@ -890,6 +1089,8 @@ func (s *Soldier) Update() {
 	if s.state == SoldierStateDead {
 		return
 	}
+	tick0 := s.tickVal()
+	defer s.recordDebugSnapshot(tick0)
 	if false {
 		_ = baseDecisionInterval
 		_ = minDecisionInterval
@@ -1980,21 +2181,38 @@ func (s *Soldier) moveToContact(dt float64) {
 				nearestTY = t.Y
 			}
 		}
+		distToThreat := math.Sqrt(best)
 		// Don't close inside burst range when already in a valid firing position.
 		// Stop at ~burstRange so soldiers fight at effective distance, not point-blank.
 		// Only push past burst range if the shot quality is genuinely poor (long-range miss streak).
 		stopDist := float64(burstRange) * 0.75 // ~240px — inside burst, outside CQB rush
-		distToThreat := math.Sqrt(best)
-		if distToThreat <= stopDist {
+		// Aim for a point burstRange*0.75 short of the enemy, not the enemy itself.
+		bearing := math.Atan2(nearestTY-s.y, nearestTX-s.x)
+		targetX = nearestTX - math.Cos(bearing)*stopDist
+		targetY = nearestTY - math.Sin(bearing)*stopDist
+
+		// Leash BEFORE deciding to stop at effective range.
+		// Otherwise soldiers can become permanently "anchored" on a visible threat
+		// and never rejoin their leader during regroup/shift.
+		leashedToLeader := false
+		if s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
+			lx, ly := s.squad.Leader.x, s.squad.Leader.y
+			dx := s.x - lx
+			dy := s.y - ly
+			distFromLeader := math.Sqrt(dx*dx + dy*dy)
+			leash := contactLeashBase * contactLeashMul
+			if distFromLeader > leash {
+				targetX = lx
+				targetY = ly
+				leashedToLeader = true
+			}
+		}
+		if !leashedToLeader && distToThreat <= stopDist {
 			// Already in effective range — don't advance further, seek cover instead.
 			s.state = SoldierStateIdle
 			s.seekCoverFromThreat(dt)
 			return
 		}
-		// Aim for a point burstRange*0.75 short of the enemy, not the enemy itself.
-		bearing := math.Atan2(nearestTY-s.y, nearestTX-s.x)
-		targetX = nearestTX - math.Cos(bearing)*stopDist
-		targetY = nearestTY - math.Sin(bearing)*stopDist
 	} else if bb.HasMoveOrder {
 		orderDist := math.Hypot(bb.OrderMoveX-s.x, bb.OrderMoveY-s.y)
 		if orderDist > preferredOrderArriveDist {
@@ -2023,15 +2241,18 @@ func (s *Soldier) moveToContact(dt float64) {
 	}
 
 	// Leash: don't stray too far from leader.
-	if s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
-		lx, ly := s.squad.Leader.x, s.squad.Leader.y
-		dx := s.x - lx
-		dy := s.y - ly
-		distFromLeader := math.Sqrt(dx*dx + dy*dy)
-		leash := contactLeashBase * contactLeashMul
-		if distFromLeader > leash {
-			targetX = lx
-			targetY = ly
+	// (Visible-threat branch handles this earlier to avoid anchoring.)
+	if !visible {
+		if s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
+			lx, ly := s.squad.Leader.x, s.squad.Leader.y
+			dx := s.x - lx
+			dy := s.y - ly
+			distFromLeader := math.Sqrt(dx*dx + dy*dy)
+			leash := contactLeashBase * contactLeashMul
+			if distFromLeader > leash {
+				targetX = lx
+				targetY = ly
+			}
 		}
 	}
 
