@@ -186,7 +186,7 @@ func objectCoverValue(o ObjectType) float64 {
 	case ObjectHedgerow:
 		return 0.40
 	case ObjectBush:
-		return 0.20
+		return 0.25
 	case ObjectTreeTrunk:
 		return 0.80
 	case ObjectRubblePile:

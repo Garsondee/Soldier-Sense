@@ -478,8 +478,21 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		// Effective target body radius reduced by cover and prone stance.
 		baseBodyRadius := float64(soldierRadius) * target.profile.Stance.Profile().ProfileMul
 		coverReduction := 0.0
-		if inCover, defence := IsBehindCover(target.x, target.y, s.x, s.y, target.covers); inCover {
-			coverReduction = defence
+		if target.tileMap != nil {
+			if inCover, defence := TileMapCoverBetween(target.tileMap, target.x, target.y, s.x, s.y); inCover {
+				coverReduction = defence
+			}
+		}
+		if coverReduction <= 0 {
+			if inCover, defence := IsBehindCover(target.x, target.y, s.x, s.y, target.covers); inCover {
+				coverReduction = defence
+			}
+		}
+		if coverReduction > 0.90 {
+			coverReduction = 0.90
+		}
+		if coverReduction < 0 {
+			coverReduction = 0
 		}
 		effBodyRadius := baseBodyRadius * (1.0 - coverReduction*0.7)
 

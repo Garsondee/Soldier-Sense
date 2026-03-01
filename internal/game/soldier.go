@@ -631,6 +631,7 @@ type Soldier struct {
 	buildings          []rect
 	buildingFootprints []rect
 	tacticalMap        *TacticalMap
+	tileMap            *TileMap
 
 	// Sightline cache.
 	lastSightlineTick int
@@ -2808,6 +2809,12 @@ func (s *Soldier) isInCover() bool {
 		if !t.IsVisible {
 			continue
 		}
+		if s.tileMap != nil {
+			inCover, defence := TileMapCoverBetween(s.tileMap, s.x, s.y, t.X, t.Y)
+			if inCover && defence >= 0.30 {
+				return true
+			}
+		}
 		inCover, defence := IsBehindCover(s.x, s.y, t.X, t.Y, s.covers)
 		if inCover && defence >= 0.30 {
 			return true
@@ -2868,6 +2875,23 @@ func (s *Soldier) seekCoverFromThreat(dt float64) {
 
 	// Find a new cover target if we don't have one or have reached the old one.
 	if s.coverTarget == nil || s.isNearCoverTarget() {
+		if s.tileMap != nil {
+			if px, py, _, ok := FindTileMapCoverForThreat(s.tileMap, s.x, s.y, threatAngle, coverSearchDist); ok {
+				newPath := s.navGrid.FindPath(s.x, s.y, px, py)
+				if newPath != nil {
+					s.path = newPath
+					s.pathIndex = 0
+					s.slotTargetX = px
+					s.slotTargetY = py
+					s.coverTarget = nil // TileMap mode doesn't require a legacy CoverObject target.
+					s.think("seeking cover")
+				} else {
+					s.think("cover position unreachable")
+				}
+			}
+		}
+
+		// Legacy fallback to CoverObject-based cover.
 		best := FindCoverForThreat(s.x, s.y, threatAngle, s.covers, nil, coverSearchDist)
 		if best != nil {
 			s.coverTarget = best

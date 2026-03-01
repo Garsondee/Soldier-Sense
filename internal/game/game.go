@@ -749,6 +749,7 @@ func (g *Game) spawnCluster(rng *rand.Rand, team Team, squadSize int, clusterCen
 			[2]float64{startX, y}, [2]float64{endX, y},
 			g.navGrid, g.covers, g.buildings, g.thoughtLog, &g.tick, g.tacticalMap)
 		s.buildingFootprints = g.buildingFootprints
+		s.tileMap = g.tileMap
 		s.blackboard.ClaimedBuildingIdx = -1
 		if s.path != nil {
 			out = append(out, s)
