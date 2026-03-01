@@ -24,7 +24,6 @@ type Squad struct {
 	// used to prevent formation thrash on minor direction changes.
 	smoothedHeading float64
 	headingInit     bool
-	prevIntent      SquadIntentKind //nolint:unused
 
 	// EnemyBearing is the squad-level bearing from centroid toward the enemy.
 	// Updated each SquadThink when contact exists. Used to assign flank sides.
