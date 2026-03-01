@@ -215,8 +215,8 @@ func (s *Soldier) psychPressure() float64 {
 		(1.0-s.profile.Psych.Morale)*0.35 +
 		bb.SuppressLevel*0.25 +
 		clamp01(float64(bb.IncomingFireCount)/3.0)*0.12 +
-		bb.SquadCasualtyRate*0.22 +
-		bb.SquadStress*0.18
+		bb.SquadCasualtyRate*0.16 +
+		bb.SquadStress*0.12
 	if bb.SquadBroken {
 		pressure += 0.08
 	}
@@ -386,21 +386,24 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 	}
 
 	kineticThreat := bb.IncomingFireCount > 0 || bb.IsSuppressed()
-	combatSignal := bb.VisibleThreatCount() > 0 || bb.SquadHasContact || bb.HeardGunfire || bb.IsActivated()
+	combatSignal := bb.VisibleThreatCount() > 0 || bb.SquadHasContact || bb.HeardGunfire
 	battlePressure := bb.SquadStress > 0.26 || bb.SquadCasualtyRate > 0.12
-	collapseEligible := kineticThreat || combatSignal || bb.SquadCasualtyRate > 0.25 || (battlePressure && combatSignal)
+	directThreat := kineticThreat || bb.VisibleThreatCount() > 0
+	collapseEligible := directThreat || bb.SquadCasualtyRate > 0.30 || (battlePressure && combatSignal && bb.SquadCasualtyRate > 0.10)
+	disobeyEligible := collapseEligible && (directThreat || bb.SquadCasualtyRate > 0.15)
+	panicEligible := collapseEligible && (directThreat || bb.SquadCasualtyRate > 0.35)
 
 	disobeyDrive := pressure - (s.profile.Skills.Discipline*0.42 + s.profile.Psych.Morale*0.22 + s.profile.Psych.Composure*0.18)
 	if bb.DisobeyingOrders {
-		if disobeyDrive < 0.10 {
+		if disobeyDrive < 0.08 {
 			bb.DisobeyingOrders = false
 		}
-	} else if collapseEligible && disobeyDrive > 0.23 {
+	} else if disobeyEligible && disobeyDrive > 0.30 {
 		bb.DisobeyingOrders = true
 	}
 
 	panicDrive := pressure + bb.SquadStress*0.15 + bb.SquadCasualtyRate*0.20 - s.profile.Skills.Discipline*0.20
-	if collapseEligible && (panicDrive > 0.90 || (panicDrive > 0.82 && s.psychRoll(53) < panicDrive-0.75)) {
+	if panicEligible && (panicDrive > 0.96 || (panicDrive > 0.88 && s.psychRoll(53) < panicDrive-0.80)) {
 		retreatToOwn := s.psychRoll(59) < (0.45 + s.profile.Skills.Discipline*0.35)
 		bb.PanicRetreatActive = true
 		bb.DisobeyingOrders = true
@@ -413,7 +416,7 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 		s.think("full panic retreat")
 	}
 
-	surrenderNow := collapseEligible && pressure > 0.98 && (s.health < soldierMaxHP*0.45 || bb.SquadCasualtyRate > 0.55)
+	surrenderNow := panicEligible && pressure > 0.99 && (s.health < soldierMaxHP*0.40 || bb.SquadCasualtyRate > 0.60)
 	if surrenderNow {
 		bb.Surrendered = true
 		bb.PanicRetreatActive = false
@@ -802,7 +805,7 @@ func (s *Soldier) recomputePath() {
 // think logs a thought if the message represents a goal/state change.
 func (s *Soldier) think(msg string) {
 	if s.thoughtLog != nil && s.currentTick != nil {
-		s.thoughtLog.Add(*s.currentTick, s.label, s.team, msg)
+		s.thoughtLog.Add(*s.currentTick, s.label, s.team, msg, LogCatThought)
 	}
 }
 

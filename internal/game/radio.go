@@ -326,7 +326,7 @@ func (sq *Squad) resolveInFlightTransmission(tick int, tl *ThoughtLog) {
 	case radioDeliveryDrop:
 		sq.RadioDropped++
 		if tl != nil {
-			tl.Add(tick, tx.msg.SenderLabel, sq.Team, fmt.Sprintf("radio %s->%s DROP %s", tx.msg.SenderLabel, tx.msg.ReceiverLabel, tx.msg.Summary))
+			tl.Add(tick, tx.msg.SenderLabel, sq.Team, fmt.Sprintf("radio %s->%s DROP %s", tx.msg.SenderLabel, tx.msg.ReceiverLabel, tx.msg.Summary), LogCatRadio)
 		}
 		return
 	case radioDeliveryGarbled:
@@ -353,7 +353,7 @@ func (sq *Squad) resolveInFlightTransmission(tick int, tl *ThoughtLog) {
 		if tx.outcome == radioDeliveryGarbled {
 			quality = "GARBLED"
 		}
-		tl.Add(tick, tx.resolvedMsg.SenderLabel, sq.Team, fmt.Sprintf("radio %s->%s %s (%s)", tx.resolvedMsg.SenderLabel, tx.resolvedMsg.ReceiverLabel, tx.resolvedMsg.Summary, quality))
+		tl.Add(tick, tx.resolvedMsg.SenderLabel, sq.Team, fmt.Sprintf("radio %s->%s %s (%s)", tx.resolvedMsg.SenderLabel, tx.resolvedMsg.ReceiverLabel, tx.resolvedMsg.Summary, quality), LogCatRadio)
 	}
 }
 
@@ -372,7 +372,7 @@ func (sq *Squad) resolveStatusTimeouts(tick int, tl *ThoughtLog) {
 			sq.Leader.blackboard.UnresponsiveMembers = len(sq.radioUnresponsive)
 		}
 		if tl != nil {
-			tl.Add(tick, sq.Leader.label, sq.Team, fmt.Sprintf("radio timeout: %s no reply", sq.memberLabelByID(id)))
+			tl.Add(tick, sq.Leader.label, sq.Team, fmt.Sprintf("radio timeout: %s no reply", sq.memberLabelByID(id)), LogCatRadio)
 		}
 	}
 }

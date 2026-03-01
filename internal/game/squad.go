@@ -47,6 +47,10 @@ type Squad struct {
 
 	// Intent hysteresis: avoid order thrash at range boundaries.
 	intentLockUntil int // tick until which non-critical intent changes are deferred
+	// Stalemate controller: detects prolonged non-progress contact and forces
+	// proactive pushes to break static long-range deadlocks.
+	stalemateTicks     int
+	proactivePushUntil int
 	// Cooldown for targeted officer intervention on stalled members.
 	lastStalledOrderTick int
 	lastStalledOrderID   int
@@ -70,11 +74,21 @@ type Squad struct {
 	boundCycleActive bool
 
 	// Cohesion collapse telemetry.
-	CasualtyRate float64
-	Stress       float64
-	Cohesion     float64
-	Broken       bool
-	breakLockEnd int
+	CasualtyRate  float64
+	Stress        float64
+	StressDelta   float64
+	AvgMorale     float64
+	MoraleDelta   float64
+	Cohesion      float64
+	CohesionDelta float64
+	Broken        bool
+	breakLockEnd  int
+
+	// Cohesion shock memory: temporary hit from fresh injuries/deaths,
+	// decays over time so squads can regain backbone after contact eases.
+	cohesionShock         float64
+	prevInjuredAliveCount int
+	prevCasualtyCount     int
 
 	// Phase A radio net state.
 	radioNet                   radioNet
@@ -247,6 +261,7 @@ const successionDelayTicks = 180 // 3 seconds at 60TPS base
 const (
 	engageEnterDist = 300.0 // must be this close to enter engage
 	engageExitDist  = 360.0 // can stay engaged until this distance
+	stalemateRange  = accurateFireRange * 1.05
 
 	leaderPreferredForwardMin = 72.0
 	leaderPreferredForwardMax = 170.0
@@ -262,7 +277,53 @@ const (
 	squadBreakLockTicks         = 180
 
 	phaseEventSteerMinHoldTicks = 36
+	stalemateTriggerTicks       = 150
+	stalemateForceTicks         = 240
 )
+
+func (sq *Squad) claimedBuildingCentroid() (float64, float64, bool) {
+	if sq.ClaimedBuildingIdx < 0 || sq.ClaimedBuildingIdx >= len(sq.buildingFootprints) {
+		return 0, 0, false
+	}
+	fp := sq.buildingFootprints[sq.ClaimedBuildingIdx]
+	return float64(fp.x) + float64(fp.w)/2, float64(fp.y) + float64(fp.h)/2, true
+}
+
+func (sq *Squad) updateStalematePressure(tick int, hasContact bool, anyVisibleThreats int, closestDist float64, phaseStalled bool, terminalStalledCount, aliveCount int) (bool, bool) {
+	if sq.Leader == nil || !hasContact || aliveCount == 0 {
+		sq.stalemateTicks = 0
+		if tick >= sq.proactivePushUntil {
+			sq.proactivePushUntil = 0
+		}
+		return false, tick < sq.proactivePushUntil
+	}
+
+	leaderUnderFire := sq.Leader.blackboard.IncomingFireCount > 0 || sq.Leader.blackboard.IsSuppressed()
+	outOfEffectiveRange := closestDist > stalemateRange
+	limitedVisualContact := anyVisibleThreats == 0
+	manyTerminalStalled := aliveCount >= 2 && terminalStalledCount*2 >= aliveCount
+
+	if outOfEffectiveRange && !leaderUnderFire && (phaseStalled || limitedVisualContact || manyTerminalStalled) {
+		sq.stalemateTicks++
+	} else if sq.stalemateTicks > 0 {
+		sq.stalemateTicks -= 2
+		if sq.stalemateTicks < 0 {
+			sq.stalemateTicks = 0
+		}
+	}
+
+	stalemateActive := sq.stalemateTicks >= stalemateTriggerTicks
+	if stalemateActive {
+		if tick >= sq.proactivePushUntil && sq.Leader != nil {
+			sq.Leader.think("stalemate detected — forcing proactive push")
+		}
+		if sq.proactivePushUntil < tick+stalemateForceTicks {
+			sq.proactivePushUntil = tick + stalemateForceTicks
+		}
+	}
+
+	return stalemateActive, tick < sq.proactivePushUntil
+}
 
 func (sq *Squad) leaderObservedPhaseSteer(hasContact bool, closestDist float64, anyVisibleThreats int) (SquadPhase, bool) {
 	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
@@ -454,7 +515,7 @@ func (sq *Squad) issueOfficerOrder(tick int, kind OfficerCommandKind, targetX, t
 	}
 }
 
-func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY float64) {
+func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY float64, stalemateActive, forceProactive bool) {
 	if sq.Leader == nil {
 		return
 	}
@@ -470,7 +531,16 @@ func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY 
 			form = FormationColumn
 		}
 		sq.Formation = form
-		sq.issueOfficerOrder(tick, CmdMoveTo, goalX, goalY, 120, form, 0.65, 0.80, 360)
+		tx, ty := goalX, goalY
+		priority, strength := 0.65, 0.80
+		if forceProactive {
+			if bx, by, ok := sq.claimedBuildingCentroid(); ok {
+				tx, ty = bx, by
+			}
+			priority = 0.84
+			strength = 0.92
+		}
+		sq.issueOfficerOrder(tick, CmdMoveTo, tx, ty, 120, form, priority, strength, 360)
 
 	case IntentHold:
 		sq.Formation = FormationLine
@@ -486,18 +556,40 @@ func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY 
 		if !hasContact {
 			tx, ty = goalX, goalY
 		}
+		if forceProactive {
+			if bx, by, ok := sq.claimedBuildingCentroid(); ok {
+				tx, ty = bx, by
+			}
+		}
 		switch sq.Phase {
 		case SquadPhaseFixFire:
-			sq.issueOfficerOrder(tick, CmdHold, leaderX, leaderY, 170, sq.Formation, 0.80, 0.92, 220)
+			if forceProactive || stalemateActive {
+				sq.issueOfficerOrder(tick, CmdAssault, tx, ty, 210, sq.Formation, 0.92, 0.98, 220)
+			} else {
+				sq.issueOfficerOrder(tick, CmdHold, leaderX, leaderY, 170, sq.Formation, 0.80, 0.92, 220)
+			}
 		case SquadPhaseBound:
-			sq.issueOfficerOrder(tick, CmdBoundForward, tx, ty, 220, sq.Formation, 0.84, 0.95, 220)
+			priority, strength := 0.84, 0.95
+			if forceProactive {
+				priority = 0.90
+				strength = 0.98
+			}
+			sq.issueOfficerOrder(tick, CmdBoundForward, tx, ty, 220, sq.Formation, priority, strength, 220)
 		case SquadPhaseAssault:
 			sq.issueOfficerOrder(tick, CmdAssault, tx, ty, 230, sq.Formation, 0.88, 0.98, 220)
 		case SquadPhaseStalledRecovery:
-			rx, ry := sq.recoveryRetaskTarget(hasContact, tx, ty)
-			sq.issueOfficerOrder(tick, CmdMoveTo, rx, ry, 190, sq.Formation, 0.90, 0.96, 180)
+			if forceProactive {
+				sq.issueOfficerOrder(tick, CmdAssault, tx, ty, 220, sq.Formation, 0.94, 0.99, 200)
+			} else {
+				rx, ry := sq.recoveryRetaskTarget(hasContact, tx, ty)
+				sq.issueOfficerOrder(tick, CmdMoveTo, rx, ry, 190, sq.Formation, 0.90, 0.96, 180)
+			}
 		default:
-			sq.issueOfficerOrder(tick, CmdFanOut, tx, ty, 220, sq.Formation, 0.80, 0.90, 260)
+			if forceProactive {
+				sq.issueOfficerOrder(tick, CmdBoundForward, tx, ty, 220, sq.Formation, 0.88, 0.96, 240)
+			} else {
+				sq.issueOfficerOrder(tick, CmdFanOut, tx, ty, 220, sq.Formation, 0.80, 0.90, 260)
+			}
 		}
 	}
 
@@ -553,6 +645,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	// Gather contact info across ALL alive members, not just leader.
 	// A squad knows what any member can see.
 	anyVisibleThreats := 0
+	maxVisibleThreatsByMember := 0
 	closestDist := math.MaxFloat64
 	var contactX, contactY float64
 	hasContact := false
@@ -560,11 +653,13 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		if m.state == SoldierStateDead {
 			continue
 		}
+		visibleByMember := 0
 		for _, t := range m.blackboard.Threats {
 			if !t.IsVisible {
 				continue
 			}
 			anyVisibleThreats++
+			visibleByMember++
 			dx := t.X - sq.Leader.x
 			dy := t.Y - sq.Leader.y
 			d := math.Sqrt(dx*dx + dy*dy)
@@ -574,6 +669,9 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 				contactY = t.Y
 				hasContact = true
 			}
+		}
+		if visibleByMember > maxVisibleThreatsByMember {
+			maxVisibleThreatsByMember = visibleByMember
 		}
 	}
 
@@ -636,12 +734,22 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	aliveCount := 0
 	terminalStalledCount := 0
 	fearSum := 0.0
+	moraleSum := 0.0
+	injuredAliveCount := 0
+	underFireCount := 0
 	for _, m := range sq.Members {
 		if m.state == SoldierStateDead {
 			continue
 		}
 		aliveCount++
 		fearSum += m.profile.Psych.EffectiveFear()
+		moraleSum += m.profile.Psych.Morale
+		if m.health < soldierMaxHP {
+			injuredAliveCount++
+		}
+		if m.blackboard.IncomingFireCount > 0 || m.blackboard.IsSuppressed() {
+			underFireCount++
+		}
 		if m.blackboard.CurrentGoal != GoalMoveToContact && m.blackboard.CurrentGoal != GoalEngage {
 			continue
 		}
@@ -662,8 +770,10 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	}
 
 	avgFear := 0.0
+	avgMorale := 0.0
 	if aliveCount > 0 {
 		avgFear = fearSum / float64(aliveCount)
+		avgMorale = moraleSum / float64(aliveCount)
 	}
 	casualties := sq.CasualtyCount()
 	casualtyRate := 0.0
@@ -678,18 +788,55 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	if spread > 160 {
 		spreadPressure = clamp01((spread - 160) / 220.0)
 	}
-	sq.CasualtyRate = casualtyRate
-	sq.Stress = clamp01(avgFear*0.55 + casualtyRate*0.75 + stallPressure*0.20)
-	cohesionPressure := clamp01(avgFear*0.50 + casualtyRate*0.95 + spreadPressure*0.30 + stallPressure*0.25)
-	if hasContact {
-		cohesionPressure = clamp01(cohesionPressure + 0.06)
+	leaderUnderFire := sq.Leader.blackboard.IncomingFireCount > 0 || sq.Leader.blackboard.IsSuppressed()
+	fearStressWeight := 0.34
+	if leaderUnderFire || anyVisibleThreats > 0 {
+		fearStressWeight = 0.50
 	}
-	cohesionDecay := cohesionPressure * 0.0085
+	prevStress := sq.Stress
+	prevCohesion := sq.Cohesion
+	prevAvgMorale := sq.AvgMorale
+	sq.CasualtyRate = casualtyRate
+	sq.Stress = clamp01(avgFear*fearStressWeight + casualtyRate*0.75 + stallPressure*0.20)
+	sq.StressDelta = sq.Stress - prevStress
+	sq.AvgMorale = avgMorale
+	sq.MoraleDelta = sq.AvgMorale - prevAvgMorale
+
+	// Cohesion should degrade from tangible battlefield shocks only:
+	// 1) significantly outnumbered, 2) nearby incoming fire/suppression,
+	// 3) injuries in the squad, 4) squad deaths.
+	outnumberedPressure := 0.0
+	if aliveCount > 0 {
+		enemyPerFriendly := float64(maxVisibleThreatsByMember) / float64(aliveCount)
+		if enemyPerFriendly > 1.75 {
+			outnumberedPressure = clamp01((enemyPerFriendly - 1.75) / 1.25)
+		}
+	}
+	incomingFirePressure := 0.0
+	if aliveCount > 0 {
+		incomingFirePressure = clamp01(float64(underFireCount) / float64(aliveCount))
+	}
+	deathPressure := casualtyRate
+
+	// Fresh injuries/deaths create a temporary cohesion shock that fades.
+	newInjuries := max(0, injuredAliveCount-sq.prevInjuredAliveCount)
+	newDeaths := max(0, casualties-sq.prevCasualtyCount)
+	sq.cohesionShock = clamp01(sq.cohesionShock*0.90 + float64(newInjuries)*0.18 + float64(newDeaths)*0.35)
+
+	cohesionPressure := clamp01(outnumberedPressure*0.45 + incomingFirePressure*0.75 + deathPressure*1.10 + sq.cohesionShock*0.85)
+	cohesionDecay := cohesionPressure * 0.0065
 	cohesionRecovery := 0.0
-	if cohesionPressure < 0.18 && casualtyRate < 0.20 {
-		cohesionRecovery = (0.18 - cohesionPressure) * 0.0015
+	if cohesionPressure < 0.35 && incomingFirePressure < 0.20 && outnumberedPressure < 0.20 {
+		calmFactor := clamp01(1.0 - cohesionPressure)
+		cohesionRecovery = (0.0025 + calmFactor*0.0035) * (0.75 + 0.25*avgMorale)
+		if casualtyRate == 0 {
+			cohesionRecovery += 0.0015
+		}
 	}
 	sq.Cohesion = clamp01(sq.Cohesion - cohesionDecay + cohesionRecovery)
+	sq.CohesionDelta = sq.Cohesion - prevCohesion
+	sq.prevInjuredAliveCount = injuredAliveCount
+	sq.prevCasualtyCount = casualties
 	breakPressure := clamp01(sq.Stress + spreadPressure*0.35)
 	if sq.Broken {
 		if breakPressure <= squadBreakRecoverThreshold && tick >= sq.breakLockEnd {
@@ -708,6 +855,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 
 	phaseStalled := sq.updatePhaseWithGuards(tick, hasContact, anyVisibleThreats, closestDist, spread, contactX, contactY, terminalStalledCount, aliveCount)
 	sq.applyLeaderPhaseSteering(tick, hasContact, closestDist, anyVisibleThreats)
+	stalemateActive, forceProactive := sq.updateStalematePressure(tick, hasContact, anyVisibleThreats, closestDist, phaseStalled, terminalStalledCount, aliveCount)
 
 	// --- Intel map queries (augment blackboard counts with spatial data) ---
 	// dangerAtPos: how much danger heat is around the leader's current position.
@@ -736,8 +884,9 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		candidateIntent = IntentEngage
 	case sq.Intent == IntentEngage && anyVisibleThreats > 0 && closestDist < engageExitDist:
 		candidateIntent = IntentEngage
-	// Heatmap: heavy danger pressure even without current LOS → hold/fallback.
-	case dangerAtPos > 1.5 && anyVisibleThreats == 0:
+	// Heatmap: heavy danger pressure should only trigger hold when combat pressure
+	// is current (incoming fire or close inferred contact), not from stale fear alone.
+	case dangerAtPos > 1.5 && anyVisibleThreats == 0 && (leaderUnderFire || (hasContact && closestDist < engageExitDist*1.10)):
 		candidateIntent = IntentHold
 	// Distant contact: keep advancing while watching.
 	case anyVisibleThreats > 0 && closestDist >= engageExitDist:
@@ -788,15 +937,25 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	if phaseStalled && hasContact && candidateIntent != IntentRegroup {
 		candidateIntent = IntentEngage
 	}
+	if forceProactive && !sq.Broken {
+		if hasContact {
+			candidateIntent = IntentEngage
+		} else {
+			candidateIntent = IntentAdvance
+		}
+	}
 	if sq.Broken {
 		candidateIntent = IntentWithdraw
 	}
-	criticalIntent := spread > 250 || (anyVisibleThreats > 0 && closestDist < engageEnterDist)
+	criticalIntent := forceProactive || spread > 250 || (anyVisibleThreats > 0 && closestDist < engageEnterDist)
 	if candidateIntent != sq.Intent {
 		if !criticalIntent && tick < sq.intentLockUntil {
 			candidateIntent = sq.Intent
 		} else {
 			leaderFear := sq.Leader.profile.Psych.EffectiveFear()
+			if forceProactive && sq.Leader.blackboard.IncomingFireCount == 0 && !sq.Leader.blackboard.IsSuppressed() {
+				leaderFear = math.Min(leaderFear, 0.35)
+			}
 			if sq.Broken {
 				leaderFear = 1.0
 			}
@@ -805,7 +964,7 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		}
 	}
 	sq.Intent = candidateIntent
-	sq.syncOfficerOrder(tick, hasContact, contactX, contactY)
+	sq.syncOfficerOrder(tick, hasContact, contactX, contactY, stalemateActive, forceProactive)
 
 	// Log intent changes.
 	if sq.Intent != oldIntent {

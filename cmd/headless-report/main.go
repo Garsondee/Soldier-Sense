@@ -19,13 +19,16 @@ type runStats struct {
 	seed     int64
 	ticks    int
 
-	firstContactTick   int
-	firstEngageTick    int
-	firstRegroupTick   int
-	firstDeathTick     int
-	firstPanicTick     int
-	firstSurrenderTick int
-	firstBreakTick     int
+	firstContactTick     int
+	firstEngageTick      int
+	firstRegroupTick     int
+	firstDeathTick       int
+	firstPanicTick       int
+	firstSurrenderTick   int
+	firstBreakTick       int
+	firstDisobeyOnTick   int
+	firstPanicOnTick     int
+	firstSurrenderOnTick int
 
 	intentChanges int
 	goalChanges   int
@@ -38,9 +41,22 @@ type runStats struct {
 	disobeyEvents        int
 	panicEvents          int
 	surrenderEvents      int
+	disobeyOnEvents      int
+	disobeyOffEvents     int
+	panicOnEvents        int
+	panicOffEvents       int
+	surrenderOnEvents    int
+	surrenderOffEvents   int
+	disobeyOnPreDeath    int
+	panicOnPreDeath      int
+	surrenderOnPreDeath  int
 	cohesionBreakEvents  int
 	cohesionReformEvents int
 	affected             map[string]struct{}
+	peakRefusing         int
+	peakRefusingRed      int
+	peakRefusingBlue     int
+	peakRefusingTick     int
 
 	windowSummary *game.WindowReport
 	grades        []game.SoldierGrade
@@ -117,12 +133,37 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 	ts.RunTicks(ticks)
 
 	entries := ts.SimLog.Entries()
+	firstDeathTick := firstTick(entries, "state", "change", "→ dead")
 	affected := map[string]struct{}{}
 	stalledEvents := 0
 	detachedEvents := 0
 	disobeyEvents := 0
 	panicEvents := 0
 	surrenderEvents := 0
+	disobeyOnEvents := 0
+	disobeyOffEvents := 0
+	panicOnEvents := 0
+	panicOffEvents := 0
+	surrenderOnEvents := 0
+	surrenderOffEvents := 0
+	disobeyOnPreDeath := 0
+	panicOnPreDeath := 0
+	surrenderOnPreDeath := 0
+	firstDisobeyOnTick := -1
+	firstPanicOnTick := -1
+	firstSurrenderOnTick := -1
+
+	type psychState struct {
+		team      string
+		disobey   bool
+		panic     bool
+		surrender bool
+	}
+	psychBySoldier := map[string]psychState{}
+	peakRefusing := 0
+	peakRefusingRed := 0
+	peakRefusingBlue := 0
+	peakRefusingTick := -1
 	cohesionBreakEvents := 0
 	cohesionReformEvents := 0
 	for _, e := range entries {
@@ -137,16 +178,81 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 				affected[e.Soldier] = struct{}{}
 			}
 		case "psych":
+			ps := psychBySoldier[e.Soldier]
+			if ps.team == "" {
+				ps.team = e.Team
+			}
 			switch e.Key {
 			case "disobedience":
 				disobeyEvents++
 				affected[e.Soldier] = struct{}{}
+				if strings.Contains(e.Value, "disobeying") {
+					disobeyOnEvents++
+					ps.disobey = true
+					if firstDisobeyOnTick < 0 {
+						firstDisobeyOnTick = e.Tick
+					}
+					if firstDeathTick < 0 || e.Tick < firstDeathTick {
+						disobeyOnPreDeath++
+					}
+				} else if strings.Contains(e.Value, "obeying") {
+					disobeyOffEvents++
+					ps.disobey = false
+				}
 			case "panic_retreat":
 				panicEvents++
 				affected[e.Soldier] = struct{}{}
+				if strings.Contains(e.Value, "panic_retreat_on") {
+					panicOnEvents++
+					ps.panic = true
+					if firstPanicOnTick < 0 {
+						firstPanicOnTick = e.Tick
+					}
+					if firstDeathTick < 0 || e.Tick < firstDeathTick {
+						panicOnPreDeath++
+					}
+				} else if strings.Contains(e.Value, "panic_retreat_off") {
+					panicOffEvents++
+					ps.panic = false
+				}
 			case "surrender":
 				surrenderEvents++
 				affected[e.Soldier] = struct{}{}
+				if strings.Contains(e.Value, "surrender_on") {
+					surrenderOnEvents++
+					ps.surrender = true
+					if firstSurrenderOnTick < 0 {
+						firstSurrenderOnTick = e.Tick
+					}
+					if firstDeathTick < 0 || e.Tick < firstDeathTick {
+						surrenderOnPreDeath++
+					}
+				} else if strings.Contains(e.Value, "surrender_off") {
+					surrenderOffEvents++
+					ps.surrender = false
+				}
+			}
+			psychBySoldier[e.Soldier] = ps
+
+			curRefusing := 0
+			curRefusingRed := 0
+			curRefusingBlue := 0
+			for _, st := range psychBySoldier {
+				if !(st.disobey || st.panic || st.surrender) {
+					continue
+				}
+				curRefusing++
+				if st.team == "red" {
+					curRefusingRed++
+				} else if st.team == "blue" {
+					curRefusingBlue++
+				}
+			}
+			if curRefusing > peakRefusing {
+				peakRefusing = curRefusing
+				peakRefusingRed = curRefusingRed
+				peakRefusingBlue = curRefusingBlue
+				peakRefusingTick = e.Tick
 			}
 		case "squad":
 			if e.Key == "cohesion" {
@@ -169,10 +275,13 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		firstContactTick:     firstTick(entries, "vision", "contact_new", ""),
 		firstEngageTick:      firstTick(entries, "squad", "intent_change", "engage"),
 		firstRegroupTick:     firstTick(entries, "squad", "intent_change", "regroup"),
-		firstDeathTick:       firstTick(entries, "state", "change", "→ dead"),
+		firstDeathTick:       firstDeathTick,
 		firstPanicTick:       firstTick(entries, "psych", "panic_retreat", "panic_retreat_on"),
 		firstSurrenderTick:   firstTick(entries, "psych", "surrender", "surrender_on"),
 		firstBreakTick:       firstTick(entries, "squad", "cohesion", "broken"),
+		firstDisobeyOnTick:   firstDisobeyOnTick,
+		firstPanicOnTick:     firstPanicOnTick,
+		firstSurrenderOnTick: firstSurrenderOnTick,
 		intentChanges:        ts.SimLog.CountCategory("squad", "intent_change"),
 		goalChanges:          ts.SimLog.CountCategory("goal", "change"),
 		stateChanges:         ts.SimLog.CountCategory("state", "change"),
@@ -183,9 +292,22 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		disobeyEvents:        disobeyEvents,
 		panicEvents:          panicEvents,
 		surrenderEvents:      surrenderEvents,
+		disobeyOnEvents:      disobeyOnEvents,
+		disobeyOffEvents:     disobeyOffEvents,
+		panicOnEvents:        panicOnEvents,
+		panicOffEvents:       panicOffEvents,
+		surrenderOnEvents:    surrenderOnEvents,
+		surrenderOffEvents:   surrenderOffEvents,
+		disobeyOnPreDeath:    disobeyOnPreDeath,
+		panicOnPreDeath:      panicOnPreDeath,
+		surrenderOnPreDeath:  surrenderOnPreDeath,
 		cohesionBreakEvents:  cohesionBreakEvents,
 		cohesionReformEvents: cohesionReformEvents,
 		affected:             affected,
+		peakRefusing:         peakRefusing,
+		peakRefusingRed:      peakRefusingRed,
+		peakRefusingBlue:     peakRefusingBlue,
+		peakRefusingTick:     peakRefusingTick,
 		windowSummary:        ts.Reporter.WindowSummary(),
 		grades:               grades,
 		redTotal:             redTotal,
@@ -221,6 +343,14 @@ func printRun(rs runStats) {
 	fmt.Printf("stalemate_check: verdict=%t reason=%s\n", rs.stalemate, rs.stalemateReason)
 	fmt.Printf("psych_events: disobedience=%d panic_retreat=%d surrender=%d squad_break=%d squad_reform=%d\n",
 		rs.disobeyEvents, rs.panicEvents, rs.surrenderEvents, rs.cohesionBreakEvents, rs.cohesionReformEvents)
+	fmt.Printf("psych_refusal_transitions: disobey_on=%d disobey_off=%d panic_on=%d panic_off=%d surrender_on=%d surrender_off=%d\n",
+		rs.disobeyOnEvents, rs.disobeyOffEvents, rs.panicOnEvents, rs.panicOffEvents, rs.surrenderOnEvents, rs.surrenderOffEvents)
+	fmt.Printf("psych_refusal_early: disobey_on_pre_first_death=%d panic_on_pre_first_death=%d surrender_on_pre_first_death=%d\n",
+		rs.disobeyOnPreDeath, rs.panicOnPreDeath, rs.surrenderOnPreDeath)
+	fmt.Printf("psych_refusal_first_onsets: disobey_on=%d panic_on=%d surrender_on=%d\n",
+		rs.firstDisobeyOnTick, rs.firstPanicOnTick, rs.firstSurrenderOnTick)
+	fmt.Printf("psych_refusal_peak: total=%d red=%d blue=%d tick=%d\n",
+		rs.peakRefusing, rs.peakRefusingRed, rs.peakRefusingBlue, rs.peakRefusingTick)
 	fmt.Printf("affected_labels: %s\n", joinSet(rs.affected))
 	if rs.windowSummary != nil {
 		fmt.Printf("window_samples=%d window_tick_range=%d..%d\n",
@@ -247,6 +377,16 @@ func printRun(rs runStats) {
 			rs.windowSummary.AvgBlueSquadStress,
 			rs.windowSummary.AvgBlueCasualtyRate,
 		)
+		redAvgRefusing := rs.windowSummary.AvgRedDisobeying + rs.windowSummary.AvgRedPanicRetreat + rs.windowSummary.AvgRedSurrendered
+		blueAvgRefusing := rs.windowSummary.AvgBlueDisobeying + rs.windowSummary.AvgBluePanicRetreat + rs.windowSummary.AvgBlueSurrendered
+		fmt.Printf("window_refusal_pressure: red_refusing=%.1f/%.1f (%.1f%%) blue_refusing=%.1f/%.1f (%.1f%%)\n",
+			redAvgRefusing,
+			rs.windowSummary.AvgRedAlive,
+			pct(redAvgRefusing, rs.windowSummary.AvgRedAlive),
+			blueAvgRefusing,
+			rs.windowSummary.AvgBlueAlive,
+			pct(blueAvgRefusing, rs.windowSummary.AvgBlueAlive),
+		)
 	}
 	fmt.Print(game.FormatGrades(rs.grades))
 	fmt.Println()
@@ -258,6 +398,18 @@ func printAggregate(all []runStats) {
 	totalDisobey := 0
 	totalPanic := 0
 	totalSurrender := 0
+	totalDisobeyOn := 0
+	totalDisobeyOff := 0
+	totalPanicOn := 0
+	totalPanicOff := 0
+	totalSurrenderOn := 0
+	totalSurrenderOff := 0
+	totalDisobeyOnPreDeath := 0
+	totalPanicOnPreDeath := 0
+	totalSurrenderOnPreDeath := 0
+	totalPeakRefusing := 0
+	totalPeakRefusingRed := 0
+	totalPeakRefusingBlue := 0
 	totalBreak := 0
 	totalReform := 0
 	totalIntent := 0
@@ -295,6 +447,18 @@ func printAggregate(all []runStats) {
 		totalDisobey += rs.disobeyEvents
 		totalPanic += rs.panicEvents
 		totalSurrender += rs.surrenderEvents
+		totalDisobeyOn += rs.disobeyOnEvents
+		totalDisobeyOff += rs.disobeyOffEvents
+		totalPanicOn += rs.panicOnEvents
+		totalPanicOff += rs.panicOffEvents
+		totalSurrenderOn += rs.surrenderOnEvents
+		totalSurrenderOff += rs.surrenderOffEvents
+		totalDisobeyOnPreDeath += rs.disobeyOnPreDeath
+		totalPanicOnPreDeath += rs.panicOnPreDeath
+		totalSurrenderOnPreDeath += rs.surrenderOnPreDeath
+		totalPeakRefusing += rs.peakRefusing
+		totalPeakRefusingRed += rs.peakRefusingRed
+		totalPeakRefusingBlue += rs.peakRefusingBlue
 		totalBreak += rs.cohesionBreakEvents
 		totalReform += rs.cohesionReformEvents
 		totalIntent += rs.intentChanges
@@ -358,6 +522,12 @@ func printAggregate(all []runStats) {
 		avg(totalStalled, len(all)), avg(totalDetached, len(all)))
 	fmt.Printf("avg_psych_events_per_run: disobedience=%.1f panic_retreat=%.1f surrender=%.1f squad_break=%.1f squad_reform=%.1f\n",
 		avg(totalDisobey, len(all)), avg(totalPanic, len(all)), avg(totalSurrender, len(all)), avg(totalBreak, len(all)), avg(totalReform, len(all)))
+	fmt.Printf("avg_psych_refusal_transitions_per_run: disobey_on=%.1f disobey_off=%.1f panic_on=%.1f panic_off=%.1f surrender_on=%.1f surrender_off=%.1f\n",
+		avg(totalDisobeyOn, len(all)), avg(totalDisobeyOff, len(all)), avg(totalPanicOn, len(all)), avg(totalPanicOff, len(all)), avg(totalSurrenderOn, len(all)), avg(totalSurrenderOff, len(all)))
+	fmt.Printf("avg_psych_refusal_onsets_pre_first_death_per_run: disobey_on=%.1f panic_on=%.1f surrender_on=%.1f\n",
+		avg(totalDisobeyOnPreDeath, len(all)), avg(totalPanicOnPreDeath, len(all)), avg(totalSurrenderOnPreDeath, len(all)))
+	fmt.Printf("avg_peak_refusing_per_run: total=%.1f red=%.1f blue=%.1f\n",
+		avg(totalPeakRefusing, len(all)), avg(totalPeakRefusingRed, len(all)), avg(totalPeakRefusingBlue, len(all)))
 	fmt.Printf("phase_marker_avg_ticks: first_contact=%s first_engage=%s first_death=%s first_panic=%s first_surrender=%s first_break=%s\n",
 		avgTickString(contactTicks), avgTickString(engageTicks), avgTickString(deathTicks), avgTickString(panicTicks), avgTickString(surrenderTicks), avgTickString(breakTicks))
 	fmt.Printf("unique_affected_labels=%d [%s]\n", len(affectedGlobal), joinSet(affectedGlobal))
@@ -419,6 +589,13 @@ func avg(sum int, n int) float64 {
 		return 0
 	}
 	return float64(sum) / float64(n)
+}
+
+func pct(part, whole float64) float64 {
+	if whole <= 0 {
+		return 0
+	}
+	return part / whole * 100
 }
 
 func avgTickString(vals []int) string {

@@ -6,7 +6,6 @@ import (
 	"image/color"
 	"math"
 	"math/rand"
-	"sort"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -19,6 +18,13 @@ const borderWidth = 24
 
 // hudScale is the integer upscale factor applied to all HUD text (3 = 3× larger).
 const hudScale = 3
+
+const (
+	// Squad status panels — rendered into a buffer at 1x then blitted at logScale.
+	squadBufW     = 240 // same width as log buffer (logPanelWidth / logScale)
+	squadBufH     = 88  // buffer height per panel; on screen = 88 * logScale = 264px
+	squadPanelGap = 4   // screen-space gap between panels (pixels, at 1x before scale)
+)
 
 const (
 	menuOptionQuit = iota
@@ -41,6 +47,160 @@ var overlayColors = [intelMapCount]color.RGBA{
 	IntelFriendlyPresence: {R: 30, G: 160, B: 255, A: 130}, // sky blue
 	IntelDangerZone:       {R: 255, G: 220, B: 0, A: 140},  // yellow
 	IntelUnexplored:       {R: 20, G: 20, B: 20, A: 160},   // dark grey
+}
+
+// drawSquadStatusPanels renders all squad status panels into the top of the
+// right-side column using the same buffer→3x-blit technique as the thought log.
+// Returns the total screen-space height consumed so the log can start below.
+func (g *Game) drawSquadStatusPanels(screen *ebiten.Image, panelX int) int {
+	if len(g.squads) == 0 || g.squadBuf == nil {
+		return 0
+	}
+	screenY := 0
+	for _, sq := range g.squads {
+		g.squadBuf.Clear()
+		g.renderSquadPanel(g.squadBuf, sq)
+		opts := &ebiten.DrawImageOptions{}
+		opts.GeoM.Scale(float64(logScale), float64(logScale))
+		opts.GeoM.Translate(float64(panelX), float64(screenY))
+		screen.DrawImage(g.squadBuf, opts)
+		screenY += squadBufH*logScale + squadPanelGap*logScale
+	}
+	return screenY
+}
+
+// renderSquadPanel draws a single squad's status into buf at 1× scale.
+func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
+	bw := float32(squadBufW)
+	bh := float32(squadBufH)
+
+	// Panel background.
+	vector.FillRect(buf, 0, 0, bw, bh, color.RGBA{R: 10, G: 14, B: 10, A: 248}, false)
+	vector.StrokeRect(buf, 0, 0, bw, bh, 1.0, color.RGBA{R: 55, G: 85, B: 60, A: 255}, false)
+
+	// Gather per-squad stats.
+	alive := 0
+	casualties := 0
+	avgFear := 0.0
+	avgMorale := 0.0
+	avgHP := 0.0
+	objectiveCounts := map[GoalKind]int{}
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			casualties++
+			continue
+		}
+		alive++
+		avgFear += m.profile.Psych.EffectiveFear()
+		avgMorale += m.profile.Psych.Morale
+		avgHP += clamp01(m.health / soldierMaxHP)
+		objectiveCounts[m.blackboard.CurrentGoal]++
+	}
+	if alive > 0 {
+		inv := 1.0 / float64(alive)
+		avgFear *= inv
+		avgMorale *= inv
+		avgHP *= inv
+	}
+
+	// ── Row 0: Title bar (y 0..13) ──
+	titleBg := color.RGBA{R: 28, G: 14, B: 14, A: 255}
+	if sq.Team == TeamBlue {
+		titleBg = color.RGBA{R: 14, G: 18, B: 32, A: 255}
+	}
+	vector.FillRect(buf, 0, 0, bw, 14, titleBg, false)
+	vector.StrokeLine(buf, 0, 14, bw, 14, 1.0, color.RGBA{R: 60, G: 90, B: 60, A: 200}, false)
+
+	teamStr := "RED"
+	if sq.Team == TeamBlue {
+		teamStr = "BLU"
+	}
+	statusLabel := "STEADY"
+	if sq.Broken {
+		statusLabel = "SHATTERED"
+	} else if sq.Stress > 0.62 || avgFear > 0.58 {
+		statusLabel = "SHAKEN"
+	} else if sq.Intent == IntentEngage {
+		statusLabel = "CONTACT"
+	}
+	effectiveness := clamp01(
+		(1.0-float64(casualties)/float64(max(1, len(sq.Members))))*0.35 +
+			avgHP*0.30 + avgMorale*0.20 + (1.0-sq.Stress)*0.15)
+
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("%s SQ-%d  %s  eff:%2.0f%%", teamStr, sq.ID, statusLabel, effectiveness*100), 4, 2)
+
+	// ── Row 1: Health squares + strength summary (y 16..27) ──
+	const sqSize = 6
+	const sqGap = 2
+	sqX0 := 4
+	sqY0 := 17
+	for i, m := range sq.Members {
+		cx := sqX0 + (i%8)*(sqSize+sqGap)
+		cy := sqY0 + (i/8)*(sqSize+sqGap)
+		fill := color.RGBA{R: 30, G: 10, B: 10, A: 230}
+		if m.state != SoldierStateDead {
+			hp := clamp01(m.health / soldierMaxHP)
+			if sq.Team == TeamRed {
+				fill = color.RGBA{R: uint8(50 + 190*hp), G: uint8(20 + 100*hp), B: uint8(20 + 60*hp), A: 240}
+			} else {
+				fill = color.RGBA{R: uint8(25 + 80*hp), G: uint8(45 + 130*hp), B: uint8(55 + 180*hp), A: 240}
+			}
+		}
+		vector.FillRect(buf, float32(cx), float32(cy), sqSize, sqSize, fill, false)
+		vector.StrokeRect(buf, float32(cx), float32(cy), sqSize, sqSize, 0.5, color.RGBA{R: 20, G: 30, B: 20, A: 200}, false)
+	}
+
+	lead := "-"
+	if sq.Leader != nil && sq.Leader.state != SoldierStateDead {
+		lead = sq.Leader.label
+	}
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("%d/%d up  lead:%s", alive, len(sq.Members), lead), 72, 17)
+
+	// ── Row 2: Objective + casualties (y 29..40) ──
+	mainGoal := GoalAdvance
+	bestCount := -1
+	for goal, cnt := range objectiveCounts {
+		if cnt > bestCount {
+			bestCount = cnt
+			mainGoal = goal
+		}
+	}
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("obj:%s  cas:%d", mainGoal, casualties), 4, 30)
+
+	// ── Row 3: Phase / intent / formation (y 42..53) ──
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("ph:%s int:%s", sq.Phase, sq.Intent), 4, 42)
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("form:%d coh:%.0f%% dC:%+3.1f", sq.Formation, sq.Cohesion*100, sq.CohesionDelta*100), 4, 54)
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("dS:%+3.1f dM:%+3.1f", sq.StressDelta*100, sq.MoraleDelta*100), 134, 42)
+
+	// ── Metric bars (y 68..84) — 4 bars, each 3px tall with 1px gap ──
+	barX := 4
+	barW := int(bw) - 8
+	barH := 3
+	type metricBar struct {
+		label string
+		value float64
+		col   color.RGBA
+	}
+	bars := []metricBar{
+		{"STR", sq.Stress, color.RGBA{R: 210, G: 80, B: 60, A: 220}},
+		{"FER", avgFear, color.RGBA{R: 220, G: 150, B: 55, A: 220}},
+		{"MOR", avgMorale, color.RGBA{R: 70, G: 180, B: 110, A: 220}},
+		{"COH", sq.Cohesion, color.RGBA{R: 80, G: 140, B: 220, A: 220}},
+	}
+	barY0 := 68
+	for i, b := range bars {
+		by := barY0 + i*4
+		// Bar track.
+		vector.FillRect(buf, float32(barX), float32(by), float32(barW), float32(barH),
+			color.RGBA{R: 20, G: 28, B: 22, A: 220}, false)
+		// Filled portion.
+		filled := int(clamp01(b.value) * float64(barW))
+		if filled > 0 {
+			vector.FillRect(buf, float32(barX), float32(by), float32(filled), float32(barH), b.col, false)
+		}
+	}
+	// Bar legend — single line below bars.
+	ebitenutil.DebugPrintAt(buf, "STR  FER  MOR  COH", 4+barW/2-54, barY0+4*4)
 }
 
 type Game struct {
@@ -82,6 +242,8 @@ type Game struct {
 	logBuf *ebiten.Image
 	// Offscreen buffer for the inspector panel — rendered at 1x then blitted at inspScale.
 	inspBuf *ebiten.Image
+	// Offscreen buffer for squad status panels — reused per panel, blitted at logScale.
+	squadBuf *ebiten.Image
 
 	// Deterministic terrain noise patches, generated once.
 	terrainPatches []terrainPatch
@@ -207,6 +369,8 @@ func New() *Game {
 	g.logBuf = ebiten.NewImage(logPanelWidth/logScale, g.height/logScale)
 	// Inspector buffer: 1/inspScale of the inspector panel area.
 	g.inspBuf = ebiten.NewImage(inspBufW, inspBufH)
+	// Squad status panel buffer: reused for each panel, blitted at logScale.
+	g.squadBuf = ebiten.NewImage(squadBufW, squadBufH)
 	g.initTerrainPatches()
 	// Default camera: centred on battlefield, zoom 0.5 so the full map is visible.
 	g.camX = float64(battleW) / 2
@@ -979,6 +1143,15 @@ func (g *Game) handleInput() {
 		g.showHUD = !g.showHUD
 	}
 
+	// F5-F8: toggle log category filters.
+	filterKeys := [logCatCount]ebiten.Key{ebiten.KeyF5, ebiten.KeyF6, ebiten.KeyF7, ebiten.KeyF8}
+	for i, fk := range filterKeys {
+		currentKeys[fk] = ebiten.IsKeyPressed(fk)
+		if currentKeys[fk] && !g.prevKeys[fk] {
+			g.thoughtLog.ToggleFilter(LogCategory(i))
+		}
+	}
+
 	// Camera pan: WASD or arrow keys.
 	panSpeed := 6.0 / g.camZoom // pan slower when zoomed in
 	if ebiten.IsKeyPressed(ebiten.KeyW) || ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
@@ -1122,18 +1295,22 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	// Inner highlight.
 	vector.StrokeRect(screen, ox, oy, gw, gh, 1.0, color.RGBA{R: 90, G: 140, B: 90, A: 60}, false)
 
-	// Thought log panel — rendered to scaled buffer, then blitted.
-	logBufW := logPanelWidth / logScale
-	logBufH := g.height / logScale
-	g.thoughtLog.Draw(g.logBuf, logBufW, logBufH)
+	// Right-side column: squad status panels on top, thought log below.
 	logX := g.offX + g.gameWidth + g.offX
+	squadAreaH := g.drawSquadStatusPanels(screen, logX)
+
+	// Thought log panel — rendered to scaled buffer, then blitted below squad panels.
+	logBufW := logPanelWidth / logScale
+	logAvailH := g.height - squadAreaH
+	if logAvailH < logScale*20 {
+		logAvailH = logScale * 20
+	}
+	logBufH := logAvailH / logScale
+	g.thoughtLog.Draw(g.logBuf, logBufW, logBufH)
 	logOpts := &ebiten.DrawImageOptions{}
 	logOpts.GeoM.Scale(float64(logScale), float64(logScale))
-	logOpts.GeoM.Translate(float64(logX), 0)
+	logOpts.GeoM.Translate(float64(logX), float64(squadAreaH))
 	screen.DrawImage(g.logBuf, logOpts)
-
-	// Radio chat box overlay (left: sender, center: message, right: receiver).
-	g.drawRadioChatBox(screen)
 
 	// HUD key legend.
 	if g.showHUD {
@@ -1773,7 +1950,7 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 	}
 
 	lines := []string{
-		fmt.Sprintf("SIM: %s  P=pause  ,/. speed", speedStr),
+		fmt.Sprintf("SIM: %s  tick:%d  P=pause  ,/. speed", speedStr, g.tick),
 		fmt.Sprintf("Intel: [%s]  Tab=switch", teamLabel),
 	}
 	for k := IntelMapKind(0); k < intelMapCount; k++ {
@@ -1786,6 +1963,17 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 	lines = append(lines, "[H] toggle HUD")
 	lines = append(lines, "WASD/arrows=pan  scroll=zoom")
 	lines = append(lines, fmt.Sprintf("zoom: %.1fx  click=inspect", g.camZoom))
+	// Log filter toggles.
+	filterLine := "Log:"
+	filterFKeys := [logCatCount]string{"F5", "F6", "F7", "F8"}
+	for i := LogCategory(0); i < logCatCount; i++ {
+		on := "-"
+		if g.thoughtLog.FilterEnabled(i) {
+			on = "*"
+		}
+		filterLine += fmt.Sprintf(" [%s]%s%s", filterFKeys[i], on, i.ShortName())
+	}
+	lines = append(lines, filterLine)
 
 	// Render into hudBuf at 1x, then scale up.
 	const lineH = 12 // debug font line height at 1x
@@ -1967,95 +2155,6 @@ func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) {
 			vector.FillCircle(screen, rx, ry, 1.8, color.RGBA{R: 120, G: 255, B: 170, A: pingAlpha}, false)
 		}
 	}
-}
-
-func (g *Game) drawRadioChatBox(screen *ebiten.Image) {
-	lines := make([]radioChatLine, 0, 32)
-	for _, sq := range g.squads {
-		sq.pruneRadioChatLines(g.tick)
-		lines = append(lines, sq.radioChatLines...)
-	}
-	if len(lines) == 0 {
-		return
-	}
-	sort.Slice(lines, func(i, j int) bool {
-		if lines[i].Tick == lines[j].Tick {
-			return lines[i].Sender < lines[j].Sender
-		}
-		return lines[i].Tick < lines[j].Tick
-	})
-
-	const (
-		maxRows    = 8
-		charW      = 6
-		lineH      = 14
-		pad        = 8
-		senderColW = 68
-		recvColW   = 68
-	)
-
-	start := 0
-	if len(lines) > maxRows {
-		start = len(lines) - maxRows
-	}
-	lines = lines[start:]
-
-	panelW := 540
-	panelH := 22 + len(lines)*lineH + pad
-	px := g.offX + 14
-	py := g.offY + 14
-
-	vector.FillRect(screen, float32(px), float32(py), float32(panelW), float32(panelH), color.RGBA{R: 6, G: 16, B: 10, A: 190}, false)
-	vector.StrokeRect(screen, float32(px), float32(py), float32(panelW), float32(panelH), 1.4, color.RGBA{R: 76, G: 180, B: 120, A: 200}, false)
-	vector.FillRect(screen, float32(px), float32(py), float32(panelW), 18, color.RGBA{R: 14, G: 42, B: 26, A: 210}, false)
-
-	g.drawTintedDebugText(screen, "RADIO NET", px+6, py+3, color.RGBA{R: 120, G: 255, B: 170, A: 230})
-
-	senderSepX := float32(px + pad + senderColW)
-	recvSepX := float32(px + panelW - pad - recvColW)
-	vector.StrokeLine(screen, senderSepX, float32(py+19), senderSepX, float32(py+panelH-3), 1.0, color.RGBA{R: 50, G: 110, B: 80, A: 170}, false)
-	vector.StrokeLine(screen, recvSepX, float32(py+19), recvSepX, float32(py+panelH-3), 1.0, color.RGBA{R: 50, G: 110, B: 80, A: 170}, false)
-
-	msgMaxChars := (panelW - (pad * 2) - senderColW - recvColW - 8) / charW
-	for i, ln := range lines {
-		y := py + 22 + i*lineH
-		if i%2 == 0 {
-			vector.FillRect(screen, float32(px+2), float32(y-1), float32(panelW-4), float32(lineH), color.RGBA{R: 10, G: 24, B: 15, A: 130}, false)
-		}
-
-		sender := trimRunes(ln.Sender, senderColW/charW)
-		receiver := trimRunes(ln.Receiver, recvColW/charW)
-		msg := trimRunes(ln.Message, msgMaxChars)
-
-		g.drawTintedDebugText(screen, sender, px+pad, y, color.RGBA{R: 120, G: 255, B: 180, A: 220})
-		g.drawTintedDebugText(screen, msg, px+pad+senderColW+6, y, color.RGBA{R: 96, G: 240, B: 156, A: 220})
-		rx := px + panelW - pad - recvColW
-		g.drawTintedDebugText(screen, receiver, rx, y, color.RGBA{R: 120, G: 255, B: 180, A: 220})
-	}
-}
-
-func (g *Game) drawTintedDebugText(screen *ebiten.Image, text string, x, y int, tint color.RGBA) {
-	if text == "" {
-		return
-	}
-	bufW := max(1, len(text)*6+2)
-	buf := ebiten.NewImage(bufW, 14)
-	buf.Clear()
-	ebitenutil.DebugPrintAt(buf, text, 0, 0)
-	opts := &ebiten.DrawImageOptions{}
-	opts.ColorScale.ScaleWithColor(tint)
-	opts.GeoM.Translate(float64(x), float64(y))
-	screen.DrawImage(buf, opts)
-}
-
-func trimRunes(s string, maxChars int) string {
-	if maxChars <= 0 || len(s) <= maxChars {
-		return s
-	}
-	if maxChars <= 3 {
-		return s[:1]
-	}
-	return s[:maxChars-3] + "..."
 }
 
 // drawVisionConesBuffered renders all FOV fans for a team into an offscreen buffer,
