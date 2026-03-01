@@ -13,6 +13,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # The Go version here must match go.mod. golangci-lint-action downloads a
+    # pre-built binary that vendors the Go stdlib internally, so its build
+    # toolchain must match the project's Go version. Using a newer Go version
+    # (e.g. 1.25 or 1.26) causes typecheck errors on stdlib files that declare
+    # //go:build constraints for the newer version.
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
