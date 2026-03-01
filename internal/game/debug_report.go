@@ -239,22 +239,30 @@ func buildStages(snaps []SoldierDebugSnapshot) []reportStage {
 	}
 	keyOf := func(s SoldierDebugSnapshot) string {
 		pathTerminal := s.PathLen == 0 || s.PathIndex >= s.PathLen
-		return fmt.Sprintf("st=%d|g=%d|si=%d|ord=%d|imm=%t|b=%t|dash=%d|term=%t|supAbort=%t|ra=%d|stall=%d|np=%d|gp=%d|cp=%d|pa=%d",
+		stallBand := s.MobilityStallTicks / 5
+		if stallBand > 6 {
+			stallBand = 6
+		}
+		npBand := s.RecoveryNoPathStreak / 10
+		if npBand > 8 {
+			npBand = 8
+		}
+		return fmt.Sprintf("st=%d|g=%d|si=%d|ord=%d|imm=%t|b=%t|dashOn=%t|term=%t|supAbort=%t|ra=%d|stallBand=%d|npBand=%d|gpOn=%t|cpOn=%t|paOn=%t",
 			s.State,
 			s.Goal,
 			s.SquadIntent,
 			s.OfficerOrderKind,
 			s.OfficerOrderImmediate,
 			s.BoundMover,
-			s.DashOverwatchTimer,
+			s.DashOverwatchTimer > 0,
 			pathTerminal,
 			s.SuppressionAbort,
 			s.RecoveryAction,
-			s.MobilityStallTicks,
-			s.RecoveryNoPathStreak,
-			s.GoalPauseTimer,
-			s.CognitionPauseTimer,
-			s.PostArrivalTimer,
+			stallBand,
+			npBand,
+			s.GoalPauseTimer > 0,
+			s.CognitionPauseTimer > 0,
+			s.PostArrivalTimer > 0,
 		)
 	}
 

@@ -274,6 +274,11 @@ type Game struct {
 	menuResumeSpeed float64
 	pendingExit     error
 
+	// AAR overlay state.
+	aarOpen      bool
+	aarSelection int
+	aarReason    BattleOutcomeReason
+
 	// Analytics reporter — collects behaviour stats periodically.
 	reporter *SimReporter
 
@@ -1069,11 +1074,76 @@ func (g *Game) simTick() {
 	if g.tick%60 == 0 && g.reporter != nil {
 		g.reporter.Collect(g.tick, g.soldiers, g.opfor, g.squads)
 	}
+
+	if !g.aarOpen {
+		g.checkCombatEnd()
+	}
+}
+
+func (g *Game) checkCombatEnd() {
+	redSquads := make([]*Squad, 0, len(g.squads))
+	blueSquads := make([]*Squad, 0, len(g.squads))
+	for _, sq := range g.squads {
+		if sq == nil {
+			continue
+		}
+		switch sq.Team {
+		case TeamRed:
+			redSquads = append(redSquads, sq)
+		case TeamBlue:
+			blueSquads = append(blueSquads, sq)
+		}
+	}
+
+	reason := DetermineBattleOutcome(g.soldiers, g.opfor, redSquads, blueSquads)
+	if reason.Outcome == OutcomeInconclusive {
+		return
+	}
+
+	g.aarOpen = true
+	g.aarSelection = 0
+	g.aarReason = reason
+	g.menuOpen = false
+	g.simSpeed = 0
 }
 
 // handleInput processes overlay toggle keypresses (edge-triggered).
 func (g *Game) handleInput() {
 	currentKeys := map[ebiten.Key]bool{}
+	if g.aarOpen {
+		currentKeys[ebiten.KeyArrowUp] = ebiten.IsKeyPressed(ebiten.KeyArrowUp)
+		currentKeys[ebiten.KeyArrowDown] = ebiten.IsKeyPressed(ebiten.KeyArrowDown)
+		currentKeys[ebiten.KeyW] = ebiten.IsKeyPressed(ebiten.KeyW)
+		currentKeys[ebiten.KeyS] = ebiten.IsKeyPressed(ebiten.KeyS)
+		currentKeys[ebiten.KeyEnter] = ebiten.IsKeyPressed(ebiten.KeyEnter)
+
+		moveUp := (currentKeys[ebiten.KeyArrowUp] && !g.prevKeys[ebiten.KeyArrowUp]) ||
+			(currentKeys[ebiten.KeyW] && !g.prevKeys[ebiten.KeyW])
+		moveDown := (currentKeys[ebiten.KeyArrowDown] && !g.prevKeys[ebiten.KeyArrowDown]) ||
+			(currentKeys[ebiten.KeyS] && !g.prevKeys[ebiten.KeyS])
+		if moveUp {
+			g.aarSelection = (g.aarSelection + 2) % 3
+		}
+		if moveDown {
+			g.aarSelection = (g.aarSelection + 1) % 3
+		}
+
+		if currentKeys[ebiten.KeyEnter] && !g.prevKeys[ebiten.KeyEnter] {
+			switch g.aarSelection {
+			case 0:
+				g.pendingExit = ErrRestart
+			case 1:
+				g.pendingExit = ErrQuit
+			case 2:
+				g.aarOpen = false
+			}
+		}
+
+		g.prevKeys = currentKeys
+		g.prevMouseLeft = ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+		return
+	}
+
 	currentKeys[ebiten.KeyEscape] = ebiten.IsKeyPressed(ebiten.KeyEscape)
 	if currentKeys[ebiten.KeyEscape] && !g.prevKeys[ebiten.KeyEscape] {
 		if g.menuOpen {
@@ -1322,6 +1392,116 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	if g.menuOpen {
 		g.drawPauseMenu(screen)
+	}
+	if g.aarOpen {
+		g.drawAAR(screen)
+	}
+}
+
+func (g *Game) aarTitle() string {
+	switch g.aarReason.Outcome {
+	case OutcomeRedVictory:
+		return "RED VICTORY"
+	case OutcomeBlueVictory:
+		return "BLUE VICTORY"
+	case OutcomeDraw:
+		return "DRAW"
+	default:
+		return "INCONCLUSIVE"
+	}
+}
+
+func (g *Game) aarQuality() string {
+	redLoss := 0
+	blueLoss := 0
+	if g.aarReason.RedTotal > 0 {
+		redLoss = g.aarReason.RedTotal - g.aarReason.RedSurvivors
+	}
+	if g.aarReason.BlueTotal > 0 {
+		blueLoss = g.aarReason.BlueTotal - g.aarReason.BlueSurvivors
+	}
+	redCas := 0.0
+	blueCas := 0.0
+	if g.aarReason.RedTotal > 0 {
+		redCas = float64(redLoss) / float64(g.aarReason.RedTotal)
+	}
+	if g.aarReason.BlueTotal > 0 {
+		blueCas = float64(blueLoss) / float64(g.aarReason.BlueTotal)
+	}
+
+	switch g.aarReason.Outcome {
+	case OutcomeRedVictory:
+		switch {
+		case redCas < 0.15 && blueCas > 0.75:
+			return "DECISIVE"
+		case redCas < 0.35:
+			return "CLEAR"
+		case redCas < 0.55:
+			return "COSTLY"
+		default:
+			return "PYRRHIC"
+		}
+	case OutcomeBlueVictory:
+		switch {
+		case blueCas < 0.15 && redCas > 0.75:
+			return "DECISIVE"
+		case blueCas < 0.35:
+			return "CLEAR"
+		case blueCas < 0.55:
+			return "COSTLY"
+		default:
+			return "PYRRHIC"
+		}
+	case OutcomeDraw:
+		switch {
+		case redCas > 0.55 && blueCas > 0.55:
+			return "BLOODY"
+		case redCas > 0.25 || blueCas > 0.25:
+			return "CONTESTED"
+		default:
+			return "STALEMATE"
+		}
+	default:
+		return ""
+	}
+}
+
+func (g *Game) drawAAR(screen *ebiten.Image) {
+	vector.FillRect(screen, 0, 0, float32(g.width), float32(g.height), color.RGBA{R: 0, G: 0, B: 0, A: 200}, false)
+
+	const panelW = 520
+	const panelH = 280
+	px := (g.width - panelW) / 2
+	py := (g.height - panelH) / 2
+
+	vector.FillRect(screen, float32(px), float32(py), panelW, panelH, color.RGBA{R: 12, G: 18, B: 12, A: 245}, false)
+	vector.StrokeRect(screen, float32(px), float32(py), panelW, panelH, 2, color.RGBA{R: 92, G: 140, B: 92, A: 255}, false)
+
+	title := g.aarTitle()
+	quality := g.aarQuality()
+	if quality != "" {
+		title = title + " — " + quality
+	}
+
+	ebitenutil.DebugPrintAt(screen, "AFTER ACTION REPORT", px+170, py+18)
+	ebitenutil.DebugPrintAt(screen, title, px+170, py+40)
+
+	redLoss := g.aarReason.RedTotal - g.aarReason.RedSurvivors
+	blueLoss := g.aarReason.BlueTotal - g.aarReason.BlueSurvivors
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("RED:  %d/%d losses  squads_broken=%d/%d", redLoss, g.aarReason.RedTotal, g.aarReason.RedSquadsBroken, g.aarReason.RedSquadsTotal), px+30, py+82)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("BLUE: %d/%d losses  squads_broken=%d/%d", blueLoss, g.aarReason.BlueTotal, g.aarReason.BlueSquadsBroken, g.aarReason.BlueSquadsTotal), px+30, py+98)
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("reason: %s", g.aarReason.Description), px+30, py+126)
+
+	ebitenutil.DebugPrintAt(screen, "W/S or Up/Down: select", px+30, py+156)
+	ebitenutil.DebugPrintAt(screen, "Enter: confirm", px+30, py+170)
+
+	options := []string{"Restart (New Seed)", "Quit Program", "Close AAR"}
+	for i, label := range options {
+		prefix := "  "
+		if i == g.aarSelection {
+			prefix = "> "
+		}
+		ebitenutil.DebugPrintAt(screen, prefix+label, px+150, py+206+i*20)
 	}
 }
 

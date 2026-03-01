@@ -328,9 +328,12 @@ func (s *Soldier) psychPressure() float64 {
 func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) {
 	bb := &s.blackboard
 	targetX, targetY := s.startTarget[0], s.startTarget[1]
-	if retreatToOwnLines {
-		jitter := (s.psychRoll(bb.RetreatDecisionCount+3) - 0.5) * float64(cellSize) * 6.0
-		targetY += jitter
+	if retreatToOwnLines || bb.SquadBroken {
+		// Retreat towards own lines (start position) with jitter
+		jitterX := (s.psychRoll(bb.RetreatDecisionCount+3) - 0.5) * float64(cellSize) * 4.0
+		jitterY := (s.psychRoll(bb.RetreatDecisionCount+5) - 0.5) * float64(cellSize) * 6.0
+		targetX += jitterX
+		targetY += jitterY
 	} else {
 		var cX, cY float64
 		hasContact := false
@@ -483,23 +486,41 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 
 	kineticThreat := bb.IncomingFireCount > 0 || bb.IsSuppressed()
 	combatSignal := bb.VisibleThreatCount() > 0 || bb.SquadHasContact || bb.HeardGunfire
-	battlePressure := bb.SquadStress > 0.26 || bb.SquadCasualtyRate > 0.12
 	directThreat := kineticThreat || bb.VisibleThreatCount() > 0
-	collapseEligible := directThreat || bb.SquadCasualtyRate > 0.30 || (battlePressure && combatSignal && bb.SquadCasualtyRate > 0.10)
-	disobeyEligible := collapseEligible && (directThreat || bb.SquadCasualtyRate > 0.15)
-	panicEligible := collapseEligible && (directThreat || bb.SquadCasualtyRate > 0.35)
+
+	lowMorale := s.profile.Psych.Morale < 0.42
+	veryLowMorale := s.profile.Psych.Morale < 0.25
+	meaningfulCasualties := bb.SquadCasualtyRate > 0.18
+	heavyCasualties := bb.SquadCasualtyRate > 0.32
+
+	// Refusals should occur late in the breaking process, not as an early response to
+	// first incoming rounds. Require strong pressure plus an additional "breaking"
+	// indicator (low morale, casualties, or cohesion collapse).
+	collapseEligible := combatSignal &&
+		pressure > 0.78 &&
+		(directThreat || meaningfulCasualties || bb.SquadBroken) &&
+		(lowMorale || meaningfulCasualties || bb.SquadBroken)
+
+	// Disobedience is the first stage of refusal, but still shouldn't happen immediately.
+	// Require either meaningful casualties/cohesion break, or very high squad stress
+	// combined with low morale.
+	disobeyEligible := collapseEligible &&
+		pressure > 0.87 &&
+		(directThreat || meaningfulCasualties) &&
+		(meaningfulCasualties || bb.SquadBroken || (lowMorale && bb.SquadStress > 0.58))
+	panicEligible := collapseEligible && pressure > 0.90 && directThreat && (veryLowMorale || heavyCasualties || bb.SquadBroken)
 
 	disobeyDrive := pressure - (s.profile.Skills.Discipline*0.42 + s.profile.Psych.Morale*0.22 + s.profile.Psych.Composure*0.18)
 	if bb.DisobeyingOrders {
 		if disobeyDrive < 0.08 {
 			bb.DisobeyingOrders = false
 		}
-	} else if disobeyEligible && disobeyDrive > 0.30 {
+	} else if disobeyEligible && disobeyDrive > 0.52 {
 		bb.DisobeyingOrders = true
 	}
 
 	panicDrive := pressure + bb.SquadStress*0.15 + bb.SquadCasualtyRate*0.20 - s.profile.Skills.Discipline*0.20
-	if panicEligible && (panicDrive > 0.96 || (panicDrive > 0.88 && s.psychRoll(53) < panicDrive-0.80)) {
+	if panicEligible && (panicDrive > 1.03 || (panicDrive > 0.95 && s.psychRoll(53) < panicDrive-0.88)) {
 		retreatToOwn := s.psychRoll(59) < (0.45 + s.profile.Skills.Discipline*0.35)
 		bb.PanicRetreatActive = true
 		bb.DisobeyingOrders = true
@@ -512,7 +533,7 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 		s.think("full panic retreat")
 	}
 
-	surrenderNow := panicEligible && pressure > 0.99 && (s.health < soldierMaxHP*0.40 || bb.SquadCasualtyRate > 0.60)
+	surrenderNow := panicEligible && pressure > 0.995 && (s.health < soldierMaxHP*0.30 || bb.SquadCasualtyRate > 0.65)
 	if surrenderNow {
 		bb.Surrendered = true
 		bb.PanicRetreatActive = false
@@ -1172,6 +1193,26 @@ func (s *Soldier) Update() {
 	bb.UpdateThreats(s.vision.KnownContacts, tick)
 	bb.RefreshInternalGoals(&s.profile, s.x, s.y)
 	s.updatePsychCrisis(tick)
+
+	// --- Edge-of-map fleeing: soldiers with low morale who hit the edge flee ---
+	if s.navGrid != nil {
+		mapW := float64(s.navGrid.cols * cellSize)
+		mapH := float64(s.navGrid.rows * cellSize)
+		edgeMargin := 24.0
+		atEdge := s.x < edgeMargin || s.x > mapW-edgeMargin || s.y < edgeMargin || s.y > mapH-edgeMargin
+
+		if atEdge && (bb.PanicRetreatActive || bb.Surrendered || bb.SquadBroken) {
+			morale := s.profile.Psych.Morale
+			fear := s.profile.Psych.EffectiveFear()
+			// Low morale + high fear + at edge = flee
+			if morale < 0.30 || fear > 0.75 {
+				s.state = SoldierStateDead
+				s.think("fleeing battlefield — removed from combat")
+				return
+			}
+		}
+	}
+
 	if bb.Surrendered {
 		s.executeSurrender(dt)
 		return
@@ -2531,7 +2572,8 @@ func (s *Soldier) moveAlongPath(dt float64) {
 		speed *= crawl
 	}
 	// Leader cohesion: slow down when squad is spread out.
-	if s.isLeader && s.squad != nil {
+	// Skip during panic retreat — fleeing soldiers don't wait for the squad.
+	if s.isLeader && s.squad != nil && !s.blackboard.PanicRetreatActive {
 		speed *= s.squad.LeaderCohesionSlowdown()
 	}
 	// Cover terrain slowdown: rubble and chest-walls reduce speed.
@@ -3331,10 +3373,41 @@ func (s *Soldier) reloadDurationTicks() int {
 // back to a direct dash toward the ultimate destination.
 func (s *Soldier) moveCombatDash(dt float64) {
 	bb := &s.blackboard
+	var destX, destY float64
+	setDestFromVisible := func() bool {
+		if bb.VisibleThreatCount() == 0 {
+			return false
+		}
+		best := math.MaxFloat64
+		var nearestX, nearestY float64
+		for _, t := range bb.Threats {
+			if !t.IsVisible {
+				continue
+			}
+			d := math.Hypot(t.X-s.x, t.Y-s.y)
+			if d < best {
+				best = d
+				nearestX, nearestY = t.X, t.Y
+			}
+		}
+		if best == math.MaxFloat64 {
+			return false
+		}
+		stopDist := float64(burstRange) * 0.75
+		bearing := math.Atan2(nearestY-s.y, nearestX-s.x)
+		destX = nearestX - math.Cos(bearing)*stopDist
+		destY = nearestY - math.Sin(bearing)*stopDist
+		return true
+	}
 
 	// --- Step 1: Resolve ultimate destination ---
-	var destX, destY float64
-	if bb.HasMoveOrder {
+	// Leaders with regroup intent should prioritize formation slot if far from it.
+	distToSlot := math.Hypot(s.slotTargetX-s.x, s.slotTargetY-s.y)
+	leaderRegrouping := s.isLeader && (bb.SquadIntent == IntentRegroup || bb.SquadIntent == IntentWithdraw)
+	if leaderRegrouping && distToSlot > float64(cellSize)*2 {
+		destX = s.slotTargetX
+		destY = s.slotTargetY
+	} else if bb.HasMoveOrder {
 		orderDist := math.Hypot(bb.OrderMoveX-s.x, bb.OrderMoveY-s.y)
 		if orderDist > preferredOrderArriveDist {
 			destX = bb.OrderMoveX
@@ -3342,6 +3415,7 @@ func (s *Soldier) moveCombatDash(dt float64) {
 		} else if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
 			destX = bb.BestNearbyX
 			destY = bb.BestNearbyY
+		} else if setDestFromVisible() {
 		} else if bb.SquadHasContact {
 			cBearing := math.Atan2(bb.SquadContactY-s.y, bb.SquadContactX-s.x)
 			stopDist := float64(burstRange) * 0.75
@@ -3357,6 +3431,7 @@ func (s *Soldier) moveCombatDash(dt float64) {
 			s.state = SoldierStateIdle
 			return
 		}
+	} else if setDestFromVisible() {
 	} else if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
 		destX = bb.BestNearbyX
 		destY = bb.BestNearbyY

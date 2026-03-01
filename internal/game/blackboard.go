@@ -1134,7 +1134,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	// contact area.
 	fallbackUtil := 0.0
 	{
-		if underFire && bb.SquadHasContact {
+		if underFire && anyContact {
 			if ef > 0.25 {
 				fallbackUtil = (ef-0.25)*1.4 + 0.1*float64(bb.IncomingFireCount)
 				fallbackUtil -= profile.Skills.Discipline * 0.5
@@ -1143,8 +1143,11 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 			// Sustained suppression at high levels pushes even disciplined soldiers back.
 			// This only kicks in when truly pinned (suppress > 0.6) — not on every hit.
 			if suppress > 0.60 {
-				fallbackUtil += (suppress-0.60)*0.8 - profile.Skills.Discipline*0.3
+				fallbackUtil += (suppress-0.60)*0.9 - profile.Skills.Discipline*0.3
 			}
+			// Even when fear isn't yet high, getting pinned can force a short withdrawal
+			// to break LOS and re-find cover rather than freezing in place.
+			fallbackUtil += suppress*0.10 + 0.03*float64(bb.IncomingFireCount)
 		} else if activated && visibleThreats == 0 && ef > 0.35 {
 			// Post-combat anxiety: high-fear soldiers keep retreating after a fight.
 			fallbackUtil = (ef-0.35)*1.0*mem - profile.Skills.Discipline*0.55
@@ -1185,9 +1188,17 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	// Discipline and composure resist — experienced soldiers return fire from cover
 	// rather than freezing completely.
 	if bb.IsSuppressed() {
-		suppressedCoverDrive := suppress*0.55 - profile.Skills.Discipline*0.20 - profile.Psych.Composure*0.10
+		suppressedCoverDrive := suppress*0.70 + 0.04*float64(bb.IncomingFireCount) - profile.Skills.Discipline*0.20 - profile.Psych.Composure*0.10
 		if suppressedCoverDrive > surviveUtil {
 			surviveUtil = suppressedCoverDrive
+		}
+	}
+	// Under sustained incoming rounds, allow a moderate-fear soldier to prioritize
+	// survival/cover even if they haven't crossed the hard CoverFear threshold yet.
+	if underFire && ef > 0.45 {
+		underFireCoverDrive := (ef-0.45)*1.2 + 0.03*float64(bb.IncomingFireCount)
+		if underFireCoverDrive > surviveUtil {
+			surviveUtil = underFireCoverDrive
 		}
 	}
 

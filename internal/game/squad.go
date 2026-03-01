@@ -74,15 +74,16 @@ type Squad struct {
 	boundCycleActive bool
 
 	// Cohesion collapse telemetry.
-	CasualtyRate  float64
-	Stress        float64
-	StressDelta   float64
-	AvgMorale     float64
-	MoraleDelta   float64
-	Cohesion      float64
-	CohesionDelta float64
-	Broken        bool
-	breakLockEnd  int
+	CasualtyRate       float64
+	Stress             float64
+	StressDelta        float64
+	AvgMorale          float64
+	MoraleDelta        float64
+	Cohesion           float64
+	CohesionDelta      float64
+	Broken             bool
+	breakLockEnd       int
+	breakPressureTicks int
 
 	// Cohesion shock memory: temporary hit from fresh injuries/deaths,
 	// decays over time so squads can regain backbone after contact eases.
@@ -274,7 +275,7 @@ const (
 
 	squadBreakPressureThreshold = 0.82
 	squadBreakRecoverThreshold  = 0.42
-	squadBreakLockTicks         = 180
+	squadBreakLockTicks         = 120
 
 	phaseEventSteerMinHoldTicks = 36
 	stalemateTriggerTicks       = 150
@@ -837,19 +838,31 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	sq.CohesionDelta = sq.Cohesion - prevCohesion
 	sq.prevInjuredAliveCount = injuredAliveCount
 	sq.prevCasualtyCount = casualties
-	breakPressure := clamp01(sq.Stress + spreadPressure*0.35)
+	breakPressure := clamp01(sq.Stress + spreadPressure*0.35 + casualtyRate*0.35)
 	if sq.Broken {
-		if breakPressure <= squadBreakRecoverThreshold && tick >= sq.breakLockEnd {
+		sq.breakPressureTicks = 0
+		if breakPressure <= squadBreakRecoverThreshold && sq.Cohesion >= 0.45 && tick >= sq.breakLockEnd {
 			sq.Broken = false
 			if sq.Leader != nil {
 				sq.Leader.think("squad reforming — regaining cohesion")
 			}
 		}
-	} else if breakPressure >= squadBreakPressureThreshold || (casualtyRate > 0.45 && avgFear > 0.55) {
-		sq.Broken = true
-		sq.breakLockEnd = tick + squadBreakLockTicks
-		if sq.Leader != nil {
-			sq.Leader.think("squad cohesion collapsing — break apart")
+	} else {
+		catastrophic := casualtyRate > 0.70
+		trigger := breakPressure >= squadBreakPressureThreshold && sq.Cohesion <= 0.35
+		if trigger {
+			sq.breakPressureTicks++
+		} else if sq.breakPressureTicks > 0 {
+			sq.breakPressureTicks = max(0, sq.breakPressureTicks-2)
+		}
+		sustained := sq.breakPressureTicks >= 120
+		if catastrophic || sustained {
+			sq.Broken = true
+			sq.breakLockEnd = tick + squadBreakLockTicks
+			sq.breakPressureTicks = 0
+			if sq.Leader != nil {
+				sq.Leader.think("squad cohesion collapsing — break apart")
+			}
 		}
 	}
 

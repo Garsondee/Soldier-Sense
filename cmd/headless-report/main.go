@@ -68,6 +68,9 @@ type runStats struct {
 
 	stalemate       bool
 	stalemateReason string
+
+	outcome       game.BattleOutcome
+	outcomeReason game.BattleOutcomeReason
 }
 
 func main() {
@@ -316,6 +319,22 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		blueSurvivors:        blueSurvivors,
 	}
 	rs.stalemate, rs.stalemateReason = detectStalemate(rs)
+
+	// Determine battle outcome
+	redSoldiers := ts.AllByTeam(game.TeamRed)
+	blueSoldiers := ts.AllByTeam(game.TeamBlue)
+	redSquads := []*game.Squad{}
+	blueSquads := []*game.Squad{}
+	for _, sq := range ts.Squads {
+		if sq.Team == game.TeamRed {
+			redSquads = append(redSquads, sq)
+		} else if sq.Team == game.TeamBlue {
+			blueSquads = append(blueSquads, sq)
+		}
+	}
+	rs.outcomeReason = game.DetermineBattleOutcome(redSoldiers, blueSoldiers, redSquads, blueSquads)
+	rs.outcome = rs.outcomeReason.Outcome
+
 	return rs
 }
 
@@ -341,6 +360,10 @@ func printRun(rs runStats) {
 		rs.stalledEvents, rs.detachedEvents, len(rs.affected))
 	fmt.Printf("survivors: red=%d/%d blue=%d/%d\n", rs.redSurvivors, rs.redTotal, rs.blueSurvivors, rs.blueTotal)
 	fmt.Printf("stalemate_check: verdict=%t reason=%s\n", rs.stalemate, rs.stalemateReason)
+	fmt.Printf("battle_outcome: %s (%s) red_squads_broken=%d/%d blue_squads_broken=%d/%d\n",
+		rs.outcome, rs.outcomeReason.Description,
+		rs.outcomeReason.RedSquadsBroken, rs.outcomeReason.RedSquadsTotal,
+		rs.outcomeReason.BlueSquadsBroken, rs.outcomeReason.BlueSquadsTotal)
 	fmt.Printf("psych_events: disobedience=%d panic_retreat=%d surrender=%d squad_break=%d squad_reform=%d\n",
 		rs.disobeyEvents, rs.panicEvents, rs.surrenderEvents, rs.cohesionBreakEvents, rs.cohesionReformEvents)
 	fmt.Printf("psych_refusal_transitions: disobey_on=%d disobey_off=%d panic_on=%d panic_off=%d surrender_on=%d surrender_off=%d\n",
@@ -422,6 +445,10 @@ func printAggregate(all []runStats) {
 	totalRedSoldiers := 0
 	totalBlueSoldiers := 0
 	stalemateRuns := 0
+	redVictories := 0
+	blueVictories := 0
+	draws := 0
+	inconclusives := 0
 
 	contactTicks := make([]int, 0, len(all))
 	engageTicks := make([]int, 0, len(all))
@@ -472,6 +499,16 @@ func printAggregate(all []runStats) {
 		totalBlueSoldiers += rs.blueTotal
 		if rs.stalemate {
 			stalemateRuns++
+		}
+		switch rs.outcome {
+		case game.OutcomeRedVictory:
+			redVictories++
+		case game.OutcomeBlueVictory:
+			blueVictories++
+		case game.OutcomeDraw:
+			draws++
+		case game.OutcomeInconclusive:
+			inconclusives++
 		}
 		if rs.firstContactTick >= 0 {
 			contactTicks = append(contactTicks, rs.firstContactTick)
@@ -532,6 +569,11 @@ func printAggregate(all []runStats) {
 		avgTickString(contactTicks), avgTickString(engageTicks), avgTickString(deathTicks), avgTickString(panicTicks), avgTickString(surrenderTicks), avgTickString(breakTicks))
 	fmt.Printf("unique_affected_labels=%d [%s]\n", len(affectedGlobal), joinSet(affectedGlobal))
 	fmt.Printf("stalemate_runs=%d/%d (%.1f%%)\n", stalemateRuns, len(all), avg(stalemateRuns*100, len(all)))
+	fmt.Printf("battle_outcomes: red_victories=%d blue_victories=%d draws=%d inconclusive=%d\n",
+		redVictories, blueVictories, draws, inconclusives)
+	fmt.Printf("outcome_percentages: red=%.1f%% blue=%.1f%% draw=%.1f%% inconclusive=%.1f%%\n",
+		avg(redVictories*100, len(all)), avg(blueVictories*100, len(all)),
+		avg(draws*100, len(all)), avg(inconclusives*100, len(all)))
 	if totalRedSoldiers > 0 && totalBlueSoldiers > 0 {
 		fmt.Printf("survival_rate: red=%.1f%% blue=%.1f%%\n",
 			float64(totalRedSurvivors)/float64(totalRedSoldiers)*100,
