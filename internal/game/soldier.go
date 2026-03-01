@@ -843,7 +843,7 @@ func (s *Soldier) reinforceCurrentGoal() bool {
 		}
 		dx := destX - s.x
 		dy := destY - s.y
-		if math.Sqrt(dx*dx+dy*dy) < 50 {
+		if withinRadius2(dx, dy, 50*50) {
 			return false // arrived at target — re-evaluate now
 		}
 		// Still en route with no fire: reinforce only if path is progressing.
@@ -1376,7 +1376,7 @@ func (s *Soldier) executeGoal(dt float64) {
 			if tx != 0 || ty != 0 {
 				dx := tx - s.x
 				dy := ty - s.y
-				if math.Sqrt(dx*dx+dy*dy) < 120 {
+				if withinRadius2(dx, dy, 120*120) {
 					bb.ForceAdvance = false
 				} else {
 					s.state = SoldierStateMoving
@@ -1402,7 +1402,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		if goal != GoalEngage && goal != GoalSurvive && goal != GoalFallback {
 			dx := bb.ReinforceMemberX - s.x
 			dy := bb.ReinforceMemberY - s.y
-			if math.Sqrt(dx*dx+dy*dy) < 60 {
+			if withinRadius2(dx, dy, 60*60) {
 				bb.ShouldReinforce = false
 			} else {
 				s.state = SoldierStateMoving
