@@ -213,6 +213,120 @@ func TestSquad_CasualtyCount(t *testing.T) {
 	}
 }
 
+func TestNewSquad_InitialCohesionIsFull(t *testing.T) {
+	ng := NewNavGrid(800, 600, nil, 6, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+	leader := NewSoldier(0, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	member := NewSoldier(1, 100, 120, TeamRed, [2]float64{100, 120}, [2]float64{600, 120}, ng, nil, nil, tl, &tick)
+
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
+	if math.Abs(sq.Cohesion-1.0) > 1e-9 {
+		t.Fatalf("new squad should start at full cohesion, got %.4f", sq.Cohesion)
+	}
+}
+
+func TestSquadThink_ImmediateOrderObedienceAtHighCohesion(t *testing.T) {
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 120, 360, TeamRed, [2]float64{120, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
+	member := NewSoldier(1, 120, 390, TeamRed, [2]float64{120, 390}, [2]float64{1100, 390}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
+
+	sq.Cohesion = 1.0
+	sq.SquadThink(nil)
+
+	if !member.blackboard.OfficerOrderActive {
+		t.Fatal("expected active officer order")
+	}
+	if !member.blackboard.OfficerOrderImmediate {
+		t.Fatal("expected immediate obedience at full cohesion")
+	}
+	if math.Abs(member.blackboard.OfficerOrderObedienceChance-1.0) > 1e-6 {
+		t.Fatalf("expected obedience chance near 1.0, got %.4f", member.blackboard.OfficerOrderObedienceChance)
+	}
+	if math.Abs(member.blackboard.OfficerOrderPriority-sq.ActiveOrder.Priority) > 1e-6 {
+		t.Fatalf("expected unscaled order priority at high cohesion, got %.4f vs %.4f", member.blackboard.OfficerOrderPriority, sq.ActiveOrder.Priority)
+	}
+}
+
+func TestSquadThink_ImmediateOrderObedienceDropsAtLowCohesion(t *testing.T) {
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 120, 360, TeamRed, [2]float64{120, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
+	member := NewSoldier(1, 120, 390, TeamRed, [2]float64{120, 390}, [2]float64{1100, 390}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
+
+	sq.Cohesion = 0.0
+	sq.SquadThink(nil)
+
+	if !member.blackboard.OfficerOrderActive {
+		t.Fatal("expected active officer order")
+	}
+	if member.blackboard.OfficerOrderImmediate {
+		t.Fatal("expected low cohesion to suppress immediate obedience")
+	}
+	if member.blackboard.OfficerOrderObedienceChance > 0.01 {
+		t.Fatalf("expected obedience chance to remain very low, got %.4f", member.blackboard.OfficerOrderObedienceChance)
+	}
+	expectedPriority := sq.ActiveOrder.Priority * 0.25
+	if math.Abs(member.blackboard.OfficerOrderPriority-expectedPriority) > 1e-6 {
+		t.Fatalf("expected scaled order priority %.4f, got %.4f", expectedPriority, member.blackboard.OfficerOrderPriority)
+	}
+}
+
+func TestSquadThink_MoveOrdersAssignedToFollowersNotLeader(t *testing.T) {
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 100, 340, TeamRed, [2]float64{100, 340}, [2]float64{1100, 340}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 90, 310, TeamRed, [2]float64{90, 310}, [2]float64{1100, 310}, ng, nil, nil, tl, &tick)
+	m2 := NewSoldier(2, 90, 370, TeamRed, [2]float64{90, 370}, [2]float64{1100, 370}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, m1, m2})
+
+	sq.SquadThink(nil)
+
+	if leader.blackboard.HasMoveOrder {
+		t.Fatal("leader should not receive follower move-order slot")
+	}
+	if !m1.blackboard.HasMoveOrder && !m2.blackboard.HasMoveOrder {
+		t.Fatal("expected follower move orders to be assigned")
+	}
+}
+
+func TestSquadThink_AbandonsClaimedBuildingAfterNoContactOccupancy(t *testing.T) {
+	footprint := rect{x: 220, y: 180, w: 96, h: 96}
+	ng := NewNavGrid(1280, 720, nil, 0, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	leader := NewSoldier(0, 230, 220, TeamRed, [2]float64{230, 220}, [2]float64{1100, 220}, ng, nil, nil, tl, &tick)
+	m1 := NewSoldier(1, 240, 240, TeamRed, [2]float64{240, 240}, [2]float64{1100, 240}, ng, nil, nil, tl, &tick)
+	sq := NewSquad(0, TeamRed, []*Soldier{leader, m1})
+	sq.buildingFootprints = []rect{footprint}
+	sq.ClaimedBuildingIdx = 0
+
+	for i := 0; i < 460; i++ {
+		tick++
+		leader.blackboard.AtInterior = true
+		m1.blackboard.AtInterior = true
+		leader.blackboard.SquadHasContact = false
+		m1.blackboard.SquadHasContact = false
+		leader.blackboard.HeardGunfire = false
+		m1.blackboard.HeardGunfire = false
+		sq.SquadThink(nil)
+	}
+
+	if sq.ClaimedBuildingIdx != -1 {
+		t.Fatalf("expected claimed building to be abandoned after no-contact occupancy, got %d", sq.ClaimedBuildingIdx)
+	}
+}
+
 func TestSquad_LeaderAdvances_WithFormationFollowers(t *testing.T) {
 	// Regression test: leader should not get stuck due to cohesion slowdown
 	// thresholds when the squad is in a normal wedge formation.

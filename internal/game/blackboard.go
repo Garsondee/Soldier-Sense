@@ -200,6 +200,11 @@ type Blackboard struct {
 	OfficerOrderPriority float64 // 0..1
 	OfficerOrderStrength float64 // 0..1
 	OfficerOrderActive   bool
+	// OfficerOrderImmediate is true when this soldier obeys immediately this cycle.
+	OfficerOrderImmediate bool
+	// OfficerOrderObedienceChance is the 0..1 immediate-compliance probability
+	// derived from squad cohesion and local psych state.
+	OfficerOrderObedienceChance float64
 
 	// Internal models each soldier's personal tactical drive for this tick.
 	Internal SoldierInternalGoals
@@ -209,12 +214,23 @@ type Blackboard struct {
 	SquadContactX   float64
 	SquadContactY   float64
 	SquadHasContact bool // true when the squad has an active known contact
+	// Radio-derived contact and comms metadata (Phase A).
+	RadioHasContact      bool
+	RadioContactX        float64
+	RadioContactY        float64
+	RadioContactTick     int
+	RadioLastHeardTick   int
+	RadioLastSenderID    int
+	RadioLastMessageType RadioMessageType
+	UnresponsiveMembers  int
 	// SquadBroken indicates cohesion collapse (members act more autonomously).
 	SquadBroken bool
 	// SquadCasualtyRate is dead_members / total_members.
 	SquadCasualtyRate float64
 	// SquadStress is a 0..1 aggregate stress pressure for the squad.
 	SquadStress float64
+	// SquadCohesion is the 0..1 cohesion signal from squad-level state.
+	SquadCohesion float64
 
 	// Per-member move order: leader assigns each member a spread position to
 	// advance toward during IntentEngage, rather than all converging on one point.
@@ -962,6 +978,12 @@ func officerOrderBias(goal GoalKind, bb *Blackboard, profile *SoldierProfile) fl
 
 	ef := profile.Psych.EffectiveFear()
 	compliance := (0.45 + profile.Skills.Discipline*0.55) * (1.0 - ef*0.45)
+	if bb.OfficerOrderObedienceChance > 0 {
+		compliance *= 0.35 + clamp01(bb.OfficerOrderObedienceChance)*0.65
+	}
+	if !bb.OfficerOrderImmediate {
+		compliance *= 0.70
+	}
 	if bb.DisobeyingOrders {
 		compliance *= 0.30
 	}
@@ -1330,6 +1352,12 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		case IntentWithdraw:
 			formationUtil = 0.15
 		}
+		if bb.HasMoveOrder {
+			formationUtil += 0.22
+		}
+		if !anyContact && bb.SquadIntent == IntentAdvance {
+			formationUtil += 0.20 + profile.Skills.Discipline*0.10
+		}
 	}
 	if bb.SquadBroken {
 		formationUtil *= 0.20
@@ -1339,6 +1367,9 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	advanceUtil := 0.3
 	if bb.SquadIntent == IntentAdvance {
 		advanceUtil = 0.5
+	}
+	if !isLeader && !anyContact && bb.SquadIntent == IntentAdvance {
+		advanceUtil *= 0.62
 	}
 	if bb.SquadIntent == IntentWithdraw {
 		advanceUtil *= 0.25

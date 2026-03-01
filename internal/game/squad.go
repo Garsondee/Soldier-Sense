@@ -41,6 +41,10 @@ type Squad struct {
 	ClaimedBuildingIdx int    // index into buildingFootprints, -1 = none
 	claimEvalTick      int    // tick of last building evaluation
 	buildingFootprints []rect // shared reference to game footprints
+	// Claimed-building lifecycle tracking.
+	claimedNoContactTicks      int
+	claimedOccupiedTicks       int
+	buildingClaimCooldownUntil int
 
 	// Intent hysteresis: avoid order thrash at range boundaries.
 	intentLockUntil int // tick until which non-critical intent changes are deferred
@@ -69,11 +73,43 @@ type Squad struct {
 	// Cohesion collapse telemetry.
 	CasualtyRate float64
 	Stress       float64
+	Cohesion     float64
 	Broken       bool
 	breakLockEnd int
+
+	// Phase A radio net state.
+	radioNet                   radioNet
+	radioPendingStatus         map[int]int  // memberID -> deadline tick
+	radioStatusReplyQueued     map[int]bool // memberID -> true once one reply has been queued for current request
+	radioUnresponsive          map[int]bool // memberID -> no-reply inferred
+	radioStatusRequestCursor   int
+	radioLastStatusRequestTick int
+	radioChannelBusyUntil      int
+	radioInFlight              *radioTransmission
+
+	// Radio telemetry counters.
+	RadioQueued   int
+	RadioSent     int
+	RadioReceived int
+	RadioDropped  int
+	RadioGarbled  int
+	RadioTimeouts int
+
+	// Transient render data for radio transmission effects.
+	radioVisualEvents []radioVisualEvent
+	radioChatLines    []radioChatLine
 }
 
 const stalledOrderCooldownTicks = 90
+
+func orderImmediateObedienceRoll(tick, soldierID, orderID int) float64 {
+	seed := float64((tick + 1) * (soldierID + 3) * (orderID + 5))
+	return math.Abs(math.Sin(seed*0.017 + float64(orderID)*0.11 + float64(soldierID)*0.07))
+}
+
+func shouldImmediatelyObeyOrder(tick, soldierID, orderID int, chance float64) bool {
+	return orderImmediateObedienceRoll(tick, soldierID, orderID) < clamp01(chance)
+}
 
 type SquadPhase int
 
@@ -175,7 +211,14 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 		Members:            members,
 		Formation:          FormationWedge,
 		Phase:              SquadPhaseApproach,
+		Cohesion:           1.0,
 		ClaimedBuildingIdx: -1,
+		radioNet: radioNet{
+			netID: id + 1,
+		},
+		radioPendingStatus:     make(map[int]int),
+		radioStatusReplyQueued: make(map[int]bool),
+		radioUnresponsive:      make(map[int]bool),
 		ActiveOrder: OfficerOrder{
 			Kind:  CmdNone,
 			State: OfficerOrderInactive,
@@ -638,6 +681,16 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	}
 	sq.CasualtyRate = casualtyRate
 	sq.Stress = clamp01(avgFear*0.55 + casualtyRate*0.75 + stallPressure*0.20)
+	cohesionPressure := clamp01(avgFear*0.50 + casualtyRate*0.95 + spreadPressure*0.30 + stallPressure*0.25)
+	if hasContact {
+		cohesionPressure = clamp01(cohesionPressure + 0.06)
+	}
+	cohesionDecay := cohesionPressure * 0.0085
+	cohesionRecovery := 0.0
+	if cohesionPressure < 0.18 && casualtyRate < 0.20 {
+		cohesionRecovery = (0.18 - cohesionPressure) * 0.0015
+	}
+	sq.Cohesion = clamp01(sq.Cohesion - cohesionDecay + cohesionRecovery)
 	breakPressure := clamp01(sq.Stress + spreadPressure*0.35)
 	if sq.Broken {
 		if breakPressure <= squadBreakRecoverThreshold && tick >= sq.breakLockEnd {
@@ -897,25 +950,48 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		m.blackboard.SquadBroken = sq.Broken
 		m.blackboard.SquadCasualtyRate = sq.CasualtyRate
 		m.blackboard.SquadStress = sq.Stress
+		m.blackboard.SquadCohesion = sq.Cohesion
+		m.blackboard.OfficerOrderImmediate = false
+		m.blackboard.OfficerOrderObedienceChance = 0
 		if sq.ActiveOrder.IsActiveAt(tick) {
+			obedienceChance := sq.Cohesion
+			if m.blackboard.DisobeyingOrders {
+				obedienceChance *= 0.55
+			}
+			if m.blackboard.PanicRetreatActive || m.blackboard.Surrendered {
+				obedienceChance = 0
+			}
+			obeyNow := shouldImmediatelyObeyOrder(tick, m.id, sq.ActiveOrder.ID, obedienceChance)
+			priorityScale := 1.0
+			strengthScale := 1.0
+			if !obeyNow {
+				priorityScale = 0.25
+				strengthScale = 0.35
+			}
 			m.blackboard.OfficerOrderKind = sq.ActiveOrder.Kind
 			m.blackboard.OfficerOrderTargetX = sq.ActiveOrder.TargetX
 			m.blackboard.OfficerOrderTargetY = sq.ActiveOrder.TargetY
 			m.blackboard.OfficerOrderRadius = sq.ActiveOrder.Radius
-			m.blackboard.OfficerOrderPriority = sq.ActiveOrder.Priority
-			m.blackboard.OfficerOrderStrength = sq.ActiveOrder.Strength
+			m.blackboard.OfficerOrderPriority = sq.ActiveOrder.Priority * priorityScale
+			m.blackboard.OfficerOrderStrength = sq.ActiveOrder.Strength * strengthScale
 			m.blackboard.OfficerOrderActive = true
+			m.blackboard.OfficerOrderImmediate = obeyNow
+			m.blackboard.OfficerOrderObedienceChance = clamp01(obedienceChance)
 		} else {
 			m.blackboard.OfficerOrderKind = CmdNone
 			m.blackboard.OfficerOrderActive = false
 			m.blackboard.OfficerOrderPriority = 0
 			m.blackboard.OfficerOrderStrength = 0
+			m.blackboard.OfficerOrderImmediate = false
+			m.blackboard.OfficerOrderObedienceChance = 0
 		}
 		if sq.Broken {
 			m.blackboard.OfficerOrderKind = CmdNone
 			m.blackboard.OfficerOrderActive = false
 			m.blackboard.OfficerOrderPriority = 0
 			m.blackboard.OfficerOrderStrength = 0
+			m.blackboard.OfficerOrderImmediate = false
+			m.blackboard.OfficerOrderObedienceChance = 0
 		}
 		m.blackboard.SquadHasContact = hasContact
 		m.blackboard.OutnumberedFactor = outnumberedFactor
@@ -925,7 +1001,9 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			m.blackboard.SquadContactY = contactY
 		}
 		// Assign a unique spread position for engage orders.
-		if !sq.Broken && len(moveOrders) > 0 && orderIdx < len(moveOrders) {
+		if m == sq.Leader {
+			m.blackboard.HasMoveOrder = false
+		} else if !sq.Broken && len(moveOrders) > 0 && orderIdx < len(moveOrders) {
 			m.blackboard.OrderMoveX = moveOrders[orderIdx][0]
 			m.blackboard.OrderMoveY = moveOrders[orderIdx][1]
 			m.blackboard.HasMoveOrder = true
@@ -1038,6 +1116,41 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	// --- Building takeover ---
 	// Leader periodically evaluates nearby buildings along the advance route.
 	sq.evaluateBuildings()
+	if sq.ClaimedBuildingIdx >= 0 && sq.ClaimedBuildingIdx < len(sq.buildingFootprints) {
+		occupants := 0
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			if m.blackboard.AtInterior {
+				occupants++
+			}
+		}
+		if occupants > 0 {
+			sq.claimedOccupiedTicks++
+		} else if sq.claimedOccupiedTicks > 0 {
+			sq.claimedOccupiedTicks--
+		}
+		if hasContact {
+			sq.claimedNoContactTicks = 0
+		} else {
+			sq.claimedNoContactTicks++
+		}
+		if !hasContact && sq.claimedNoContactTicks > 420 && sq.claimedOccupiedTicks > 150 {
+			sq.ClaimedBuildingIdx = -1
+			sq.claimedNoContactTicks = 0
+			sq.claimedOccupiedTicks = 0
+			sq.buildingClaimCooldownUntil = tick + 360
+			if sq.Leader != nil {
+				sq.Leader.think("building low value — abandon and continue search")
+			}
+		}
+	} else {
+		sq.claimedNoContactTicks = 0
+		if sq.claimedOccupiedTicks > 0 {
+			sq.claimedOccupiedTicks--
+		}
+	}
 	// Propagate claim to all alive members.
 	for _, m := range sq.Members {
 		if m.state == SoldierStateDead {
@@ -1178,6 +1291,9 @@ func (sq *Squad) evaluateBuildings() {
 	if sq.Leader.currentTick != nil {
 		tick = *sq.Leader.currentTick
 	}
+	if tick < sq.buildingClaimCooldownUntil {
+		return
+	}
 	b := &sq.Leader.blackboard
 	claimInterval := buildingClaimInterval
 	if b.IncomingFireCount > 0 || b.IsSuppressed() || b.SquadHasContact || b.HeardGunfire {
@@ -1236,6 +1352,19 @@ func (sq *Squad) evaluateBuildings() {
 		if dist > maxDist || dist < 1 {
 			continue
 		}
+		overlapCount := 0
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			if m.x >= float64(fp.x)-float64(cellSize) && m.x <= float64(fp.x+fp.w)+float64(cellSize) &&
+				m.y >= float64(fp.y)-float64(cellSize) && m.y <= float64(fp.y+fp.h)+float64(cellSize) {
+				overlapCount++
+			}
+		}
+		if dist > 240 && overlapCount == 0 {
+			continue
+		}
 		// Dot product: how much the building is "ahead" of the squad.
 		dot := (dx*advX + dy*advY) / dist
 		if dot < 0.1 {
@@ -1263,6 +1392,9 @@ func (sq *Squad) evaluateBuildings() {
 		if b.IncomingFireCount > 0 || b.IsSuppressed() {
 			score += math.Max(0, 0.30-dist/maxDist*0.25)
 		}
+		if overlapCount > 0 {
+			score += 0.20
+		}
 
 		if score > bestScore {
 			bestScore = score
@@ -1273,6 +1405,8 @@ func (sq *Squad) evaluateBuildings() {
 	if bestIdx >= 0 && bestScore > 0.1 {
 		if bestIdx != sq.ClaimedBuildingIdx {
 			sq.ClaimedBuildingIdx = bestIdx
+			sq.claimedNoContactTicks = 0
+			sq.claimedOccupiedTicks = 0
 			fp := sq.buildingFootprints[bestIdx]
 			sq.Leader.think(fmt.Sprintf("claiming building at (%d,%d)", fp.x, fp.y))
 		}
@@ -1371,7 +1505,14 @@ func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 // cover, or direct engagement positions.
 func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY float64) [][2]float64 {
 	alive := sq.Alive()
-	n := len(alive)
+	followers := make([]*Soldier, 0, len(alive))
+	for _, m := range alive {
+		if m == sq.Leader {
+			continue
+		}
+		followers = append(followers, m)
+	}
+	n := len(followers)
 	if n == 0 || sq.Leader == nil {
 		return nil
 	}
@@ -1425,7 +1566,7 @@ func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY flo
 
 	assigned := make(map[int][2]float64, n)
 	positions := make([][2]float64, n)
-	for i, m := range alive {
+	for i, m := range followers {
 		flankRank := (i + 1) / 2
 		lateral := 0.0
 		if i > 0 {
@@ -1436,10 +1577,8 @@ func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY flo
 			lateral = side * flankSpacing * float64(flankRank)
 		}
 
-		depth := forward
-		if i == 0 {
-			depth += 14
-		} else if flankRank > 1 {
+		depth := forward + 14
+		if flankRank > 1 {
 			depth -= float64(flankRank-1) * 14
 		}
 
@@ -1541,7 +1680,10 @@ func (sq *Squad) UpdateFormation() {
 		// Don't clobber paths for members who are actively engaging or closing on contact.
 		// Their paths are managed by moveToContact / GoalEngage logic.
 		g := m.blackboard.CurrentGoal
-		if g == GoalMoveToContact || g == GoalEngage || g == GoalFallback || g == GoalFlank || g == GoalOverwatch {
+		if g == GoalEngage || g == GoalFallback || g == GoalFlank || g == GoalOverwatch {
+			continue
+		}
+		if g == GoalMoveToContact && (m.blackboard.VisibleThreatCount() > 0 || m.blackboard.SquadHasContact || m.blackboard.HeardGunfire) {
 			continue
 		}
 		// If a member has completed their current path, force a repath to the

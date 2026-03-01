@@ -174,6 +174,44 @@ func TestScenario_MutualAdvance(t *testing.T) {
 	}
 }
 
+func TestScenario_MutualAdvance_NoPsychCollapseBeforeFiringRange(t *testing.T) {
+	t.Log("=== TestScenario_MutualAdvance_NoPsychCollapseBeforeFiringRange ===")
+	t.Log("--- Setup: 6 red vs 6 blue at long range; verify no panic/disobedience before weapon range ---")
+
+	ts := NewTestSim(
+		WithMapSize(1280, 720),
+		WithSeed(42),
+		WithRedSoldier(0, 50, 350, 1200, 350),
+		WithRedSoldier(1, 50, 322, 1200, 322),
+		WithRedSoldier(2, 50, 378, 1200, 378),
+		WithRedSoldier(3, 50, 294, 1200, 294),
+		WithRedSoldier(4, 50, 406, 1200, 406),
+		WithRedSoldier(5, 50, 266, 1200, 266),
+		WithBlueSoldier(6, 1200, 350, 50, 350),
+		WithBlueSoldier(7, 1200, 322, 50, 322),
+		WithBlueSoldier(8, 1200, 378, 50, 378),
+		WithBlueSoldier(9, 1200, 294, 50, 294),
+		WithBlueSoldier(10, 1200, 406, 50, 406),
+		WithBlueSoldier(11, 1200, 266, 50, 266),
+		WithRedSquad(0, 1, 2, 3, 4, 5),
+		WithBlueSquad(6, 7, 8, 9, 10, 11),
+	)
+
+	// Initial squad separation is ~1150px (> maxFireRange=900), so this window should
+	// stay pre-fire while squads are only manoeuvring toward each other.
+	ts.RunTicks(120)
+
+	if ts.SimLog.HasEntry("psych", "disobedience", "disobeying") {
+		t.Fatal("unexpected pre-fire disobedience during long-range approach")
+	}
+	if ts.SimLog.HasEntry("psych", "panic_retreat", "panic_retreat_on") {
+		t.Fatal("unexpected pre-fire panic retreat during long-range approach")
+	}
+	if ts.SimLog.HasEntry("psych", "surrender", "surrender_on") {
+		t.Fatal("unexpected pre-fire surrender during long-range approach")
+	}
+}
+
 // --- Scenario: Fearful Soldier ---
 
 func TestScenario_FearfulSoldier(t *testing.T) {
@@ -855,7 +893,7 @@ func TestScenario_PsychCollapseAndCohesionTelemetry(t *testing.T) {
 	}
 }
 
-func TestSoldier_PanicRetreat_ReconsidersAndCanRecover(t *testing.T) {
+func TestPanicRetreat_ReconsiderCanRecover(t *testing.T) {
 	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
 	tick := 0
 	s := NewSoldier(99, 200, 200, TeamRed, [2]float64{50, 200}, [2]float64{600, 200}, ng, nil, nil, nil, &tick)
@@ -884,6 +922,33 @@ func TestSoldier_PanicRetreat_ReconsidersAndCanRecover(t *testing.T) {
 	}
 	if s.blackboard.RetreatRecoveries == 0 {
 		t.Fatal("expected retreat recovery counter to increment")
+	}
+}
+
+func TestPsychCrisis_NoPreContactCollapseFromSquadStressAlone(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tick := 0
+	s := NewSoldier(3, 140, 220, TeamRed, [2]float64{140, 220}, [2]float64{520, 220}, ng, nil, nil, nil, &tick)
+
+	s.profile.Psych.Morale = 0.75
+	s.profile.Psych.Fear = 0.18
+	s.blackboard.SquadStress = 0.90
+	s.blackboard.SquadCasualtyRate = 0.0
+	s.blackboard.IncomingFireCount = 0
+	s.blackboard.SuppressLevel = 0
+	s.blackboard.HeardGunfire = false
+	s.blackboard.SquadHasContact = false
+	s.blackboard.Threats = nil
+
+	for i := 0; i < 120; i++ {
+		tick++
+		s.updatePsychCrisis(tick)
+		if s.blackboard.PanicRetreatActive || s.blackboard.Surrendered {
+			t.Fatalf("unexpected collapse before contact at tick %d", tick)
+		}
+	}
+	if s.blackboard.DisobeyingOrders {
+		t.Fatal("unexpected order-disobedience state before any combat signal")
 	}
 }
 

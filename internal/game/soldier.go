@@ -46,6 +46,15 @@ const (
 	goalPauseBase          = 10    // base ticks to pause briefly after a non-critical goal switch
 	stressReevalPeriod     = 18    // ticks between stress-jitter re-evaluation probes
 
+	// Cognition pacing.
+	cognitionGapBase   = 42 // baseline ticks between micro deliberation windows
+	cognitionPauseBase = 4  // baseline pause ticks at each cognition window
+
+	// Reload pacing.
+	defaultMagazineCapacity = 30
+	reloadBaseTicks         = 85
+	reloadMinTicks          = 45
+
 	// Pinned-down behaviour thresholds.
 	suppressedRunThreshold = 0.65 // heavy suppression where only resilient soldiers may still run
 	pinnedSuppressionLevel = 0.82 // above this, soldiers are effectively pinned and must crawl/freeze
@@ -76,6 +85,121 @@ func (fm FireMode) String() string {
 		return "auto"
 	default:
 		return "unknown"
+	}
+}
+
+func (s *Soldier) beginStanceTransition(target Stance, urgent bool) {
+	if s.profile.Stance == target && s.stanceTransitionTimer == 0 {
+		s.pendingStance = target
+		return
+	}
+
+	if s.stanceTransitionTimer > 0 && s.pendingStance == target {
+		if urgent && s.stanceTransitionTimer > 1 {
+			s.stanceTransitionTimer--
+		}
+		return
+	}
+
+	baseMs := target.Profile().TransitionMs
+	ticks := int(math.Round(float64(baseMs) * 60.0 / 1000.0))
+	if target == StanceStanding && baseMs == 0 {
+		ticks = 10
+	}
+	if ticks <= 0 {
+		ticks = 1
+	}
+
+	ef := s.profile.Psych.EffectiveFear()
+	discipline := clamp01(s.profile.Skills.Discipline)
+	if urgent {
+		ticks = int(float64(ticks) * (0.55 - discipline*0.15))
+	}
+	if ef > 0.62 {
+		roll := math.Abs(math.Sin(float64((s.tickVal()+3)*(s.id+11)) * 0.071))
+		if roll < 0.45 {
+			ticks = int(float64(ticks) * (0.65 - discipline*0.20))
+		} else {
+			ticks = int(float64(ticks) * (1.10 + ef*0.85))
+		}
+	} else {
+		ticks = int(float64(ticks) * (0.90 + (1.0-discipline)*0.35 + ef*0.20))
+	}
+	if ticks < 1 {
+		ticks = 1
+	}
+
+	s.pendingStance = target
+	s.stanceTransitionTimer = ticks
+}
+
+func (s *Soldier) requestStance(target Stance, urgent bool) {
+	if s.profile.Stance == target && s.stanceTransitionTimer == 0 {
+		s.pendingStance = target
+		return
+	}
+	s.beginStanceTransition(target, urgent)
+}
+
+func (s *Soldier) updateStanceTransition() {
+	if s.stanceTransitionTimer <= 0 {
+		return
+	}
+	s.stanceTransitionTimer--
+	if s.stanceTransitionTimer == 0 {
+		s.profile.Stance = s.pendingStance
+	}
+}
+
+func (s *Soldier) updateCognitionPause(tick int) {
+	if tick < s.nextCognitionTick {
+		return
+	}
+
+	ef := clamp01(s.profile.Psych.EffectiveFear())
+	discipline := clamp01(s.profile.Skills.Discipline)
+	gap := cognitionGapBase + int((1.0-discipline)*34)
+	pause := cognitionPauseBase + int((1.0-discipline)*6)
+
+	if ef > 0.64 {
+		roll := math.Abs(math.Sin(float64((tick+5)*(s.id+29)) * 0.049))
+		if roll < 0.45 {
+			gap = int(float64(gap) * (0.60 + discipline*0.18))
+			pause = int(float64(pause) * (0.55 + discipline*0.20))
+		} else {
+			gap = int(float64(gap) * (1.15 + ef*0.70))
+			pause = int(float64(pause) * (1.10 + ef*0.95))
+		}
+	} else {
+		gap = int(float64(gap) * (0.95 + ef*0.35))
+		pause = int(float64(pause) * (0.90 + ef*0.45))
+	}
+
+	if s.blackboard.CurrentGoal == GoalSurvive || s.blackboard.PanicRetreatActive {
+		gap = int(float64(gap) * 0.70)
+		pause = int(float64(pause) * 0.55)
+	}
+	if s.blackboard.IncomingFireCount > 0 && ef < 0.60 {
+		gap = int(float64(gap) * 0.75)
+		pause = int(float64(pause) * 0.60)
+	}
+
+	if gap < 14 {
+		gap = 14
+	}
+	if gap > 160 {
+		gap = 160
+	}
+	if pause < 1 {
+		pause = 1
+	}
+	if pause > 36 {
+		pause = 36
+	}
+
+	s.nextCognitionTick = tick + gap
+	if pause > s.cognitionPauseTimer {
+		s.cognitionPauseTimer = pause
 	}
 }
 
@@ -260,17 +384,22 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 		return
 	}
 
+	kineticThreat := bb.IncomingFireCount > 0 || bb.IsSuppressed()
+	combatSignal := bb.VisibleThreatCount() > 0 || bb.SquadHasContact || bb.HeardGunfire || bb.IsActivated()
+	battlePressure := bb.SquadStress > 0.26 || bb.SquadCasualtyRate > 0.12
+	collapseEligible := kineticThreat || combatSignal || bb.SquadCasualtyRate > 0.25 || (battlePressure && combatSignal)
+
 	disobeyDrive := pressure - (s.profile.Skills.Discipline*0.42 + s.profile.Psych.Morale*0.22 + s.profile.Psych.Composure*0.18)
 	if bb.DisobeyingOrders {
 		if disobeyDrive < 0.10 {
 			bb.DisobeyingOrders = false
 		}
-	} else if disobeyDrive > 0.23 {
+	} else if collapseEligible && disobeyDrive > 0.23 {
 		bb.DisobeyingOrders = true
 	}
 
 	panicDrive := pressure + bb.SquadStress*0.15 + bb.SquadCasualtyRate*0.20 - s.profile.Skills.Discipline*0.20
-	if panicDrive > 0.90 || (panicDrive > 0.82 && s.psychRoll(53) < panicDrive-0.75) {
+	if collapseEligible && (panicDrive > 0.90 || (panicDrive > 0.82 && s.psychRoll(53) < panicDrive-0.75)) {
 		retreatToOwn := s.psychRoll(59) < (0.45 + s.profile.Skills.Discipline*0.35)
 		bb.PanicRetreatActive = true
 		bb.DisobeyingOrders = true
@@ -283,7 +412,7 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 		s.think("full panic retreat")
 	}
 
-	surrenderNow := pressure > 0.98 && (s.health < soldierMaxHP*0.45 || bb.SquadCasualtyRate > 0.55)
+	surrenderNow := collapseEligible && pressure > 0.98 && (s.health < soldierMaxHP*0.45 || bb.SquadCasualtyRate > 0.55)
 	if surrenderNow {
 		bb.Surrendered = true
 		bb.PanicRetreatActive = false
@@ -300,9 +429,7 @@ func (s *Soldier) executeSurrender(dt float64) {
 	s.state = SoldierStateCover
 	s.path = nil
 	s.pathIndex = 0
-	if s.profile.Stance != StanceProne {
-		s.profile.Stance = StanceProne
-	}
+	s.requestStance(StanceProne, true)
 	s.profile.Physical.AccumulateFatigue(0, dt)
 }
 
@@ -339,9 +466,7 @@ func (s *Soldier) movePanicRetreat(dt float64) {
 }
 
 func (s *Soldier) executePanicRetreat(dt float64) {
-	if s.profile.Stance != StanceStanding {
-		s.profile.Stance = StanceStanding
-	}
+	s.requestStance(StanceStanding, true)
 	s.state = SoldierStateMoving
 	s.movePanicRetreat(dt)
 }
@@ -512,6 +637,11 @@ type Soldier struct {
 	// Speech cooldown.
 	lastSpeechTick int
 
+	// Radio report pacing (Phase A comms skeleton).
+	radioLastContactReportTick int
+	radioLastStatusReportTick  int
+	radioLastFearReportTick    int
+
 	// --- Fuzzy aim ---
 	// aimSpread grows when moving and decays when still.
 	// Used in combat.go to compute physical bullet deflection.
@@ -544,9 +674,22 @@ type Soldier struct {
 	// --- Action pacing ---
 	// goalPauseTimer inserts a short pause after a non-critical goal switch.
 	goalPauseTimer int
+	// cognitionPauseTimer inserts micro "thinking" stalls to avoid ant-like movement.
+	cognitionPauseTimer int
+	// nextCognitionTick schedules the next cognition micro-pause window.
+	nextCognitionTick int
+	// pendingStance is the requested posture; profile.Stance updates when stanceTransitionTimer reaches 0.
+	pendingStance Stance
+	// stanceTransitionTimer counts down while changing posture.
+	stanceTransitionTimer int
 	// mobilityStallTicks counts consecutive combat-mobility ticks where the
 	// soldier is idle with a missing/terminal path; used to force recovery.
 	mobilityStallTicks int
+
+	// Reload pacing.
+	magCapacity int
+	magRounds   int
+	reloadTimer int
 
 	// --- Fuzzy path-reacquisition memory ---
 	// These track short-horizon movement confidence and support a human-like
@@ -614,6 +757,9 @@ func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavG
 		prevGoal:       GoalAdvance,
 		aimingTargetID: -1,
 		burstTargetID:  -1,
+		pendingStance:  StanceStanding,
+		magCapacity:    defaultMagazineCapacity,
+		magRounds:      defaultMagazineCapacity,
 	}
 	if len(tm) > 0 && tm[0] != nil {
 		s.tacticalMap = tm[0]
@@ -799,6 +945,10 @@ func (s *Soldier) Update() {
 	if s.goalPauseTimer > 0 {
 		s.goalPauseTimer--
 	}
+	if s.cognitionPauseTimer > 0 {
+		s.cognitionPauseTimer--
+	}
+	s.updateStanceTransition()
 
 	// --- Per-tick decay of commitment-based decision state ---
 	bb.DecayShatterPressure()
@@ -987,7 +1137,16 @@ func (s *Soldier) Update() {
 			bb.EvolveThresholds(goal, stress)
 
 			sameGoal := goal == s.prevGoal
-			bb.BeginCommitment(tick, sameGoal, stress)
+			commitStress := stress
+			if stress > 0.62 {
+				roll := math.Abs(math.Sin(float64((tick+3)*(s.id+7)) * 0.073))
+				if roll < 0.45 {
+					commitStress = stress * 0.70
+				} else {
+					commitStress = clamp01(stress * 1.20)
+				}
+			}
+			bb.BeginCommitment(tick, sameGoal, commitStress)
 
 			if !sameGoal {
 				s.think(fmt.Sprintf("goal: %s → %s", s.prevGoal, goal))
@@ -1026,6 +1185,18 @@ func (s *Soldier) Update() {
 	} else {
 		bb.IdleCombatTicks = 0
 		bb.ForceAdvance = false
+	}
+
+	s.updateCognitionPause(tick)
+	if s.cognitionPauseTimer > 0 {
+		freeze := bb.IncomingFireCount == 0 || ef > 0.78
+		if freeze {
+			s.state = SoldierStateIdle
+			s.profile.Physical.AccumulateFatigue(0, dt)
+			s.faceNearestThreatOrContact()
+			s.enforcePersonalSpace()
+			return
+		}
 	}
 
 	s.executeGoal(dt)
@@ -1088,7 +1259,9 @@ func (s *Soldier) shouldSeekClaimedBuilding(goal GoalKind) bool {
 
 	underFire := bb.IncomingFireCount > 0 || bb.IsSuppressed()
 	if !underFire && bb.VisibleThreatCount() == 0 {
-		return false
+		if !(bb.OfficerOrderActive && bb.OfficerOrderKind == CmdMoveTo && !bb.SquadHasContact && !bb.HeardGunfire) {
+			return false
+		}
 	}
 
 	if goal == GoalSurvive {
@@ -1102,6 +1275,9 @@ func (s *Soldier) shouldSeekClaimedBuilding(goal GoalKind) bool {
 	speed := math.Max(0.35, s.profile.EffectiveSpeed(soldierSpeed))
 	etaTicks := dist / speed
 	if underFire {
+		return etaTicks <= 260
+	}
+	if bb.OfficerOrderActive && bb.OfficerOrderKind == CmdMoveTo && !bb.SquadHasContact && !bb.HeardGunfire {
 		return etaTicks <= 260
 	}
 	return bb.VisibleThreatCount() > 0 && etaTicks <= 180
@@ -1154,9 +1330,7 @@ func (s *Soldier) moveToClaimedBuilding(dt float64) bool {
 		s.slotTargetY = targetY
 	}
 
-	if s.profile.Stance != StanceCrouching {
-		s.profile.Stance = StanceCrouching
-	}
+	s.requestStance(StanceCrouching, true)
 	s.state = SoldierStateMoving
 	s.moveAlongPath(dt)
 	return true
@@ -1204,9 +1378,7 @@ func (s *Soldier) executeGoal(dt float64) {
 					bb.ForceAdvance = false
 				} else {
 					s.state = SoldierStateMoving
-					if s.profile.Stance != StanceCrouching {
-						s.profile.Stance = StanceCrouching
-					}
+					s.requestStance(StanceCrouching, false)
 					if s.path == nil || s.pathIndex >= len(s.path) {
 						s.path = s.navGrid.FindPath(s.x, s.y, tx, ty)
 						s.pathIndex = 0
@@ -1232,9 +1404,7 @@ func (s *Soldier) executeGoal(dt float64) {
 				bb.ShouldReinforce = false
 			} else {
 				s.state = SoldierStateMoving
-				if s.profile.Stance != StanceCrouching {
-					s.profile.Stance = StanceCrouching
-				}
+				s.requestStance(StanceCrouching, false)
 				if s.path == nil || s.pathIndex >= len(s.path) {
 					s.path = s.navGrid.FindPath(s.x, s.y, bb.ReinforceMemberX, bb.ReinforceMemberY)
 					s.pathIndex = 0
@@ -1283,8 +1453,9 @@ func (s *Soldier) executeGoal(dt float64) {
 
 	forcedCrawl := s.mustCrawlWhenSuppressed()
 	if forcedCrawl {
-		if s.profile.Stance != StanceProne {
-			s.profile.Stance = StanceProne
+		wasProne := s.profile.Stance == StanceProne && s.stanceTransitionTimer == 0
+		s.requestStance(StanceProne, true)
+		if !wasProne {
 			s.think("PINNED DOWN — dropping prone")
 		}
 		if s.pinnedFreezeThisTick() {
@@ -1300,21 +1471,23 @@ func (s *Soldier) executeGoal(dt float64) {
 	switch goal {
 	case GoalSurvive:
 		if forcedCrawl {
-			if s.profile.Stance != StanceProne {
-				s.profile.Stance = StanceProne
+			wasProne := s.profile.Stance == StanceProne && s.stanceTransitionTimer == 0
+			s.requestStance(StanceProne, true)
+			if !wasProne {
 				s.think("prone — pinned and seeking cover")
 			}
-		} else if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
-			s.think("crouching — seeking cover")
+		} else {
+			wasCrouched := s.profile.Stance == StanceCrouching && s.stanceTransitionTimer == 0
+			s.requestStance(StanceCrouching, true)
+			if !wasCrouched {
+				s.think("crouching — seeking cover")
+			}
 		}
 		s.state = SoldierStateCover
 		s.seekCoverFromThreat(dt)
 
 	case GoalEngage:
-		if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
-		}
+		s.requestStance(StanceCrouching, false)
 		bl := &s.blackboard
 		// Only advance if genuinely out of effective fire range (beyond maxFireRange).
 		// Inside accurateFireRange, always hold and use cover — stop the suicidal rush.
@@ -1340,9 +1513,7 @@ func (s *Soldier) executeGoal(dt float64) {
 			s.seekCoverFromThreat(dt)
 			break
 		}
-		if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
-		}
+		s.requestStance(StanceCrouching, false)
 
 		// --- Suppression interrupt: incoming fire aborts the dash ---
 		if bb.IncomingFireCount > 0 && s.state == SoldierStateMoving {
@@ -1405,18 +1576,14 @@ func (s *Soldier) executeGoal(dt float64) {
 			break
 		}
 		if forcedCrawl {
-			if s.profile.Stance != StanceProne {
-				s.profile.Stance = StanceProne
-			}
+			s.requestStance(StanceProne, true)
 		} else if s.canSuppressedFallbackRun() {
-			if s.profile.Stance != StanceStanding {
-				s.profile.Stance = StanceStanding
-			}
+			s.requestStance(StanceStanding, true)
 			// Running under heavy suppression is possible for resilient soldiers,
 			// but it spikes stress and can tip them into pinned crawl state.
 			s.profile.Psych.ApplyStress(0.006 + bb.SuppressLevel*0.004)
-		} else if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
+		} else {
+			s.requestStance(StanceCrouching, false)
 		}
 		s.state = SoldierStateMoving
 		s.moveFallback(dt)
@@ -1427,9 +1594,7 @@ func (s *Soldier) executeGoal(dt float64) {
 			s.seekCoverFromThreat(dt)
 			break
 		}
-		if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
-		}
+		s.requestStance(StanceCrouching, false)
 		// Dash overwatch: hold still after a dash until the timer expires.
 		if s.dashOverwatchTimer > 0 {
 			s.state = SoldierStateCover
@@ -1440,9 +1605,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		s.moveFlank(dt)
 
 	case GoalOverwatch:
-		if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
-		}
+		s.requestStance(StanceCrouching, false)
 		s.state = SoldierStateIdle
 		s.profile.Physical.AccumulateFatigue(0, dt)
 		// Face toward known contact direction or gunfire.
@@ -1460,13 +1623,9 @@ func (s *Soldier) executeGoal(dt float64) {
 			break
 		}
 		if s.blackboard.VisibleThreatCount() > 0 {
-			if s.profile.Stance != StanceCrouching {
-				s.profile.Stance = StanceCrouching
-			}
+			s.requestStance(StanceCrouching, false)
 		} else {
-			if s.profile.Stance != StanceStanding {
-				s.profile.Stance = StanceStanding
-			}
+			s.requestStance(StanceStanding, false)
 		}
 		s.state = SoldierStateMoving
 		s.moveAlongPath(dt)
@@ -1475,9 +1634,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		if s.state != SoldierStateIdle {
 			s.think("holding position")
 		}
-		if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
-		}
+		s.requestStance(StanceCrouching, false)
 		s.state = SoldierStateIdle
 		s.profile.Physical.AccumulateFatigue(0, dt)
 		if s.blackboard.VisibleThreatCount() > 0 {
@@ -1490,9 +1647,7 @@ func (s *Soldier) executeGoal(dt float64) {
 			s.seekCoverFromThreat(dt)
 			break
 		}
-		if s.profile.Stance != StanceStanding {
-			s.profile.Stance = StanceStanding
-		}
+		s.requestStance(StanceStanding, false)
 		s.state = SoldierStateMoving
 		s.moveAlongPath(dt)
 
@@ -1502,16 +1657,12 @@ func (s *Soldier) executeGoal(dt float64) {
 			s.seekCoverFromThreat(dt)
 			break
 		}
-		if s.profile.Stance != StanceStanding {
-			s.profile.Stance = StanceStanding
-		}
+		s.requestStance(StanceStanding, false)
 		s.state = SoldierStateMoving
 		s.moveAlongPath(dt)
 
 	case GoalPeek:
-		if s.profile.Stance != StanceCrouching {
-			s.profile.Stance = StanceCrouching
-		}
+		s.requestStance(StanceCrouching, false)
 		s.executePeek(dt)
 	}
 }
@@ -2862,6 +3013,32 @@ func (s *Soldier) dashOverwatchDuration(underFire bool) int {
 		d = 20
 	}
 	return d
+}
+
+func (s *Soldier) reloadDurationTicks() int {
+	ticks := float64(reloadBaseTicks)
+	discipline := clamp01(s.profile.Skills.Discipline)
+	fitness := clamp01(s.profile.Physical.EffectiveFitness())
+	stress := clamp01(s.profile.Psych.EffectiveFear() + s.blackboard.SuppressLevel*0.65)
+
+	ticks *= 0.90 + (1.0-discipline)*0.40
+	ticks *= 0.92 + (1.0-fitness)*0.28
+	ticks *= 0.92 + stress*0.35
+
+	if stress > 0.62 {
+		roll := math.Abs(math.Sin(float64((s.tickVal()+11)*(s.id+41)) * 0.053))
+		if roll < 0.45 {
+			ticks *= 0.72
+		} else {
+			ticks *= 1.20
+		}
+	}
+
+	reloadTicks := int(math.Round(ticks))
+	if reloadTicks < reloadMinTicks {
+		reloadTicks = reloadMinTicks
+	}
+	return reloadTicks
 }
 
 // moveCombatDash moves the soldier in a cover-to-cover bounding pattern:
