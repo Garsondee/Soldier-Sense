@@ -46,6 +46,14 @@ const (
 
 	// CQB distance: below this, damage and stress are boosted.
 	cqbRange = autoRange // 160px — inside this is lethal
+
+	// Gunfire hearing model.
+	// Sounds beyond this distance are ignored.
+	gunfireHearingMaxRange = 1400.0
+	// Buildings strongly muffle gunfire but do not fully block it.
+	gunfireOccludedMul = 0.40
+	// Below this heard strength, soldiers ignore the signal.
+	gunfireMinHeardStrength = 0.12
 )
 
 // shotRangePenalty returns accuracy loss for the given shot distance.
@@ -229,9 +237,9 @@ func (cm *CombatManager) ResetFireCounts(soldiers []*Soldier) {
 	cm.Gunfires = cm.Gunfires[:0]
 }
 
-// BroadcastGunfire writes heard-gunfire info to all enemy soldiers AND
-// stamps their persistent combat memory so they remain activated for ~60s.
-// Sound is infinite range, no bouncing — every enemy hears every shot.
+// BroadcastGunfire writes heard-gunfire info to enemy soldiers using a
+// distance + occlusion + fieldcraft hearing model, then stamps persistent
+// combat memory so they remain activated for ~60s.
 func (cm *CombatManager) BroadcastGunfire(red, blue []*Soldier, tick int) {
 	for _, ev := range cm.Gunfires {
 		var listeners []*Soldier
@@ -244,13 +252,17 @@ func (cm *CombatManager) BroadcastGunfire(red, blue []*Soldier, tick int) {
 			if s.state == SoldierStateDead {
 				continue
 			}
+			heardStrength := gunfireHeardStrength(ev.X, ev.Y, s, red, blue)
+			if heardStrength < gunfireMinHeardStrength {
+				continue
+			}
 			// Single-tick flag — used by immediate decision logic.
 			s.blackboard.HeardGunfireX = ev.X
 			s.blackboard.HeardGunfireY = ev.Y
 			s.blackboard.HeardGunfire = true
 			s.blackboard.HeardGunfireTick = tick
 			// Persistent memory — keeps soldier activated for ~60s after last shot.
-			s.blackboard.RecordGunfire(ev.X, ev.Y)
+			s.blackboard.RecordGunfireWithStrength(ev.X, ev.Y, heardStrength)
 		}
 		// Shooters also remember they fired (self-activation).
 		var shooters []*Soldier
@@ -263,9 +275,55 @@ func (cm *CombatManager) BroadcastGunfire(red, blue []*Soldier, tick int) {
 			if s.state == SoldierStateDead {
 				continue
 			}
-			s.blackboard.RecordGunfire(ev.X, ev.Y)
+			s.blackboard.RecordGunfireWithStrength(ev.X, ev.Y, 1.0)
 		}
 	}
+}
+
+func gunfireHeardStrength(srcX, srcY float64, listener *Soldier, red, blue []*Soldier) float64 {
+	dx := srcX - listener.x
+	dy := srcY - listener.y
+	dist := math.Hypot(dx, dy)
+	if dist > gunfireHearingMaxRange {
+		return 0
+	}
+
+	// Distance falloff with a small floor inside range.
+	distanceFactor := 1.0 - dist/gunfireHearingMaxRange
+	if distanceFactor < 0.10 {
+		distanceFactor = 0.10
+	}
+
+	// Building occlusion muffles sound strongly.
+	occlusionFactor := 1.0
+	if !HasLineOfSightWithCover(srcX, srcY, listener.x, listener.y, listener.buildings, listener.covers) {
+		occlusionFactor = gunfireOccludedMul
+	}
+
+	// Fieldcraft slightly improves auditory cue extraction.
+	fieldcraft := 0.0
+	if listener.profile.Skills.Fieldcraft > 0 {
+		fieldcraft = listener.profile.Skills.Fieldcraft
+	}
+	fieldcraftFactor := 0.85 + fieldcraft*0.30
+
+	// Nearby allied listeners reinforce confidence in the heard direction.
+	allies := red
+	if listener.team == TeamBlue {
+		allies = blue
+	}
+	nearbyAllies := 0
+	for _, a := range allies {
+		if a == nil || a == listener || a.state == SoldierStateDead {
+			continue
+		}
+		if math.Hypot(a.x-listener.x, a.y-listener.y) <= 220 {
+			nearbyAllies++
+		}
+	}
+	allyBoost := 1.0 + math.Min(0.12, float64(nearbyAllies)*0.04)
+
+	return clamp01(distanceFactor * occlusionFactor * fieldcraftFactor * allyBoost)
 }
 
 // ResolveCombat runs fire decisions for one set of shooters against a set of targets.

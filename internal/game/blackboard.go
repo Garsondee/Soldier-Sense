@@ -802,9 +802,24 @@ const combatMemoryDecayPerTick = 1.0 / 3600.0
 
 // RecordGunfire stamps the persistent combat memory with fresh strength=1.
 func (bb *Blackboard) RecordGunfire(x, y float64) {
-	bb.CombatMemoryStrength = 1.0
-	bb.CombatMemoryX = x
-	bb.CombatMemoryY = y
+	bb.RecordGunfireWithStrength(x, y, 1.0)
+}
+
+// RecordGunfireWithStrength stamps persistent combat memory with a bounded
+// strength in [0,1]. We keep the strongest recent memory and only move the
+// remembered position when the new signal is at least as strong.
+func (bb *Blackboard) RecordGunfireWithStrength(x, y, strength float64) {
+	strength = clamp01(strength)
+	if strength <= 0 {
+		return
+	}
+	if strength >= bb.CombatMemoryStrength {
+		bb.CombatMemoryX = x
+		bb.CombatMemoryY = y
+	}
+	if strength > bb.CombatMemoryStrength {
+		bb.CombatMemoryStrength = strength
+	}
 }
 
 // DecayCombatMemory should be called once per tick per soldier.

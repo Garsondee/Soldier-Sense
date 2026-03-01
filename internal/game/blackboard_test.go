@@ -122,6 +122,36 @@ func TestBlackboard_ClosestVisibleThreatDist_NoThreats(t *testing.T) {
 	}
 }
 
+func TestBlackboard_RecordGunfireWithStrength_PrefersStrongerSignal(t *testing.T) {
+	bb := &Blackboard{}
+
+	bb.RecordGunfireWithStrength(100, 200, 0.75)
+	if math.Abs(bb.CombatMemoryStrength-0.75) > 1e-6 {
+		t.Fatalf("expected memory strength 0.75, got %.3f", bb.CombatMemoryStrength)
+	}
+	if math.Abs(bb.CombatMemoryX-100) > 1e-6 || math.Abs(bb.CombatMemoryY-200) > 1e-6 {
+		t.Fatalf("expected memory position (100,200), got (%.1f,%.1f)", bb.CombatMemoryX, bb.CombatMemoryY)
+	}
+
+	// Weaker signal should not overwrite stronger memory.
+	bb.RecordGunfireWithStrength(900, 900, 0.20)
+	if math.Abs(bb.CombatMemoryStrength-0.75) > 1e-6 {
+		t.Fatalf("weaker signal should not reduce memory strength, got %.3f", bb.CombatMemoryStrength)
+	}
+	if math.Abs(bb.CombatMemoryX-100) > 1e-6 || math.Abs(bb.CombatMemoryY-200) > 1e-6 {
+		t.Fatalf("weaker signal should not replace memory position, got (%.1f,%.1f)", bb.CombatMemoryX, bb.CombatMemoryY)
+	}
+
+	// Stronger signal should replace memory.
+	bb.RecordGunfireWithStrength(500, 600, 0.95)
+	if math.Abs(bb.CombatMemoryStrength-0.95) > 1e-6 {
+		t.Fatalf("stronger signal should raise memory strength, got %.3f", bb.CombatMemoryStrength)
+	}
+	if math.Abs(bb.CombatMemoryX-500) > 1e-6 || math.Abs(bb.CombatMemoryY-600) > 1e-6 {
+		t.Fatalf("stronger signal should replace memory position, got (%.1f,%.1f)", bb.CombatMemoryX, bb.CombatMemoryY)
+	}
+}
+
 // --- Goal Selection ---
 
 func TestSelectGoal_NoThreats_AdvancingIntent(t *testing.T) {
