@@ -13,11 +13,11 @@ type biomeConfig struct {
 	MoistureScale   float64
 
 	// Vegetation density thresholds (noise value 0–1).
-	TreeThreshold    float64 // above this → place tree
-	BushThreshold    float64 // above this → place bush
-	HedgeThreshold   float64 // above this → place hedgerow run
-	LongGrassThresh  float64 // above this → long grass ground
-	ScrubThreshold   float64 // above this → scrub ground
+	TreeThreshold   float64 // above this → place tree
+	BushThreshold   float64 // above this → place bush
+	HedgeThreshold  float64 // above this → place hedgerow run
+	LongGrassThresh float64 // above this → long grass ground
+	ScrubThreshold  float64 // above this → scrub ground
 
 	// Roughness thresholds.
 	GravelThreshold float64
@@ -242,9 +242,9 @@ func valueNoise2D(x, y float64, seed int64) float64 {
 // latticeValue returns a pseudo-random value in [0,1] for integer coordinates.
 func latticeValue(x, y int, seed int64) float64 {
 	// Hash combine x, y, seed into a deterministic value.
-	h := uint64(seed)
-	h ^= uint64(x) * 0x517cc1b727220a95
-	h ^= uint64(y) * 0x6c62272e07bb0142
+	h := uint64(seed)                   // #nosec G115 -- intentional bit-mixing in hash function
+	h ^= uint64(x) * 0x517cc1b727220a95 // #nosec G115 -- intentional bit-mixing in hash function
+	h ^= uint64(y) * 0x6c62272e07bb0142 // #nosec G115 -- intentional bit-mixing in hash function
 	h = h*0x2545f4914f6cdd1d + 0x14057b7ef767814f
 	h ^= h >> 16
 	h *= 0xd6e8feb86659fd93

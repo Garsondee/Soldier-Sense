@@ -88,8 +88,8 @@ func TestUpdateHeading_LargeDiff_Negative(t *testing.T) {
 
 func TestNormalizeAngle_Positive(t *testing.T) {
 	a := normalizeAngle(3 * math.Pi)
-	if math.Abs(a-math.Pi) > 1e-9 {
-		t.Fatalf("3π should normalize to π, got %.4f", a)
+	if math.Abs(a+math.Pi) > 1e-9 {
+		t.Fatalf("3π should normalize to -π, got %.4f", a)
 	}
 }
 

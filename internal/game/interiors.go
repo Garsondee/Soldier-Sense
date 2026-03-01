@@ -42,7 +42,7 @@ func furnishBuilding(tm *TileMap, rng *rand.Rand, fp rect, rooms []interiorRoom)
 
 // interiorRoom represents a rectangular room within a building.
 type interiorRoom struct {
-	rx, ry, rw, rh int // pixel coordinates
+	rx, ry, rw, rh int  // pixel coordinates
 	hasDoorway     bool // true if this room has an identified doorway gap
 	doorX, doorY   int  // pixel position of the doorway (if hasDoorway)
 }

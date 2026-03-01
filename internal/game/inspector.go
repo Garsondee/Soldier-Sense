@@ -38,7 +38,8 @@ func (g *Game) handleInspectorClick(mx, my int) bool {
 
 	// Pick radius: 16 screen pixels expressed in world space.
 	clickRadius := 16.0 / g.camZoom
-	best := math.MaxFloat64
+	clickRadius2 := sqr(clickRadius)
+	best2 := math.MaxFloat64
 	var hit *Soldier
 	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
 	for _, s := range all {
@@ -47,9 +48,10 @@ func (g *Game) handleInspectorClick(mx, my int) bool {
 		}
 		dx := s.x - wx
 		dy := s.y - wy
-		d := math.Sqrt(dx*dx + dy*dy)
-		if d < clickRadius && d < best {
-			best = d
+		// Avoid sqrt by comparing squared distances to the squared click radius.
+		d2 := dx*dx + dy*dy
+		if d2 < clickRadius2 && d2 < best2 {
+			best2 = d2
 			hit = s
 		}
 	}

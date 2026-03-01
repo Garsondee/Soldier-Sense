@@ -33,8 +33,11 @@ func NewVisionState(initialHeading float64) VisionState {
 func (v *VisionState) InCone(ox, oy, px, py float64) bool {
 	dx := px - ox
 	dy := py - oy
-	dist := math.Sqrt(dx*dx + dy*dy)
-	if dist > v.MaxRange || dist < 1e-6 {
+	// Quick check: is the target within max range? Uses squared distance to avoid sqrt.
+	dist2 := dx*dx + dy*dy
+	maxRange2 := v.MaxRange * v.MaxRange
+	// 1e-12 is the square of 1e-6, a small distance to prevent treating near-zero distances as in-cone.
+	if dist2 > maxRange2 || dist2 < 1e-12 {
 		return false
 	}
 
@@ -64,13 +67,7 @@ func HeadingTo(ox, oy, tx, ty float64) float64 {
 
 // normalizeAngle wraps an angle to [-pi, pi].
 func normalizeAngle(a float64) float64 {
-	for a > math.Pi {
-		a -= 2 * math.Pi
-	}
-	for a < -math.Pi {
-		a += 2 * math.Pi
-	}
-	return a
+	return math.Remainder(a, 2*math.Pi)
 }
 
 // PerformVisionScan clears known contacts and checks all candidates

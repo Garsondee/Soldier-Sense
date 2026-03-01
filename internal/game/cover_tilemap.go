@@ -114,7 +114,7 @@ func directionalObjectFactor(tm *TileMap, col, row int, obj ObjectType, inX, inY
 	hasU := row > 0 && tm.ObjectAt(col, row-1) == obj
 	hasD := row < tm.Rows-1 && tm.ObjectAt(col, row+1) == obj
 
-	perp := 0.75 // default for isolated/ambiguous pieces
+	var perp float64 // set by switch below
 	horizontal := (hasL || hasR) && !(hasU || hasD)
 	vertical := (hasU || hasD) && !(hasL || hasR)
 	switch {

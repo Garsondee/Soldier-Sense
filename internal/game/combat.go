@@ -969,7 +969,7 @@ func (cm *CombatManager) applyWitnessStress(target *Soldier, friendlies []*Soldi
 		}
 		dx := f.x - target.x
 		dy := f.y - target.y
-		if math.Sqrt(dx*dx+dy*dy) <= witnessRadius {
+		if withinRadius2(dx, dy, witnessRadius*witnessRadius) {
 			f.profile.Psych.ApplyStress(witnessStress)
 		}
 	}

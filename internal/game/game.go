@@ -2131,7 +2131,7 @@ func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) {
 				omt := 1.0 - t
 				arcX := omt*omt*sx + 2*omt*t*cx + t*t*rx
 				arcY := omt*omt*sy + 2*omt*t*cy + t*t*ry
-				phase := float64(ev.MessageID*31+uint64(i*17)+uint64(g.tick*7)) * 0.11
+				phase := float64(ev.MessageID*31+uint64(i*17)+uint64(g.tick*7)) * 0.11 // #nosec G115 -- intentional bit-mixing for deterministic noise
 				jitter := float32(math.Sin(phase)) * float32(grain*(1.0-life)*0.9)
 				jx := arcX + nx*jitter
 				jy := arcY + ny*jitter

@@ -442,7 +442,7 @@ func (sq *Squad) resolveDelivery(msg RadioMessage, tick int) (RadioMessage, radi
 }
 
 func (sq *Squad) radioDeterministicNoise(msg RadioMessage, tick int) float64 {
-	phase := float64(msg.ID*17+uint64(msg.SenderID*31)+uint64(msg.ReceiverID*13)+uint64(tick*7)+uint64(sq.ID*19)) * 0.071
+	phase := float64(msg.ID*17+uint64(msg.SenderID*31)+uint64(msg.ReceiverID*13)+uint64(tick*7)+uint64(sq.ID*19)) * 0.071 // #nosec G115 -- intentional bit-mixing for deterministic noise
 	v := math.Sin(phase)
 	return (v + 1.0) * 0.5
 }
