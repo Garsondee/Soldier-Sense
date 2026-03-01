@@ -148,6 +148,12 @@ build-macos:
 run: build
     go run ./cmd/game
 
+# Run headless mutual-advance simulation N times and print AAR-ready report lines.
+# Supports overrides in KEY=VALUE form, e.g.:
+#   just headless-report RUNS=20 TICKS=3600 SEED_BASE=42 SEED_STEP=1
+headless-report *OVERRIDES:
+    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/headless-report.ps1 {{OVERRIDES}}
+
 install:
     go install ./cmd/soldier-sense
 

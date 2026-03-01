@@ -244,6 +244,41 @@ func TestSelectGoal_LongRangeMissMomentumPrefersMoveToContact(t *testing.T) {
 	}
 }
 
+func TestSelectGoal_EngageIntentNoLOS_PrefersMoveToContactOverOverwatch(t *testing.T) {
+	// Regression guard: when the squad is actively engaged, members without LOS
+	// should move to support rather than remain in static overwatch.
+	bb := &Blackboard{
+		SquadIntent:         IntentEngage,
+		SquadHasContact:     true,
+		SquadContactX:       520,
+		SquadContactY:       0,
+		LocalSightlineScore: 0.95,
+		AtWindowAdj:         true,
+		AtInterior:          true,
+		VisibleAllyCount:    1,
+	}
+
+	p := DefaultProfile()
+	p.Skills.Discipline = 0.7
+	p.Skills.Fieldcraft = 0.9
+	p.Psych.Fear = 0.08
+
+	bb.RefreshInternalGoals(&p, 0, 0)
+
+	if moveU := goalUtilSingle(bb, &p, false, true, GoalMoveToContact); moveU <= 0 {
+		t.Fatalf("expected positive move-to-contact utility, got %.3f", moveU)
+	}
+	if overU := goalUtilSingle(bb, &p, false, true, GoalOverwatch); overU >= goalUtilSingle(bb, &p, false, true, GoalMoveToContact) {
+		t.Fatalf("engage intent without LOS should favor moving to contact over overwatch: move=%.3f overwatch=%.3f",
+			goalUtilSingle(bb, &p, false, true, GoalMoveToContact), overU)
+	}
+
+	goal := SelectGoal(bb, &p, false, true)
+	if goal != GoalMoveToContact {
+		t.Fatalf("expected GoalMoveToContact while squad engaged without LOS, got %s", goal)
+	}
+}
+
 func TestOverwatchDistanceFactor_AttenuatesFarContact(t *testing.T) {
 	near := overwatchDistanceFactor(float64(maxFireRange) * 0.9)
 	far := overwatchDistanceFactor(float64(maxFireRange) * 1.8)

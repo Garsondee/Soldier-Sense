@@ -2,28 +2,100 @@ package game
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 )
+
+const (
+	effectivenessStillDistEpsilon   = 0.20
+	effectivenessStalledTicks       = 180
+	effectivenessDetachedTicks      = 180
+	effectivenessDetachedLeaderDist = 220.0
+)
+
+type effectivenessProbe struct {
+	lastX float64
+	lastY float64
+
+	stalledTicks  int
+	detachedTicks int
+}
 
 // TestSim is a headless simulation harness used exclusively by tests.
 // It mirrors Game.Update but has no Ebiten dependency and supports
 // deterministic seeding and structured logging.
 type TestSim struct {
-	Width     int
-	Height    int
-	buildings []rect
-	NavGrid   *NavGrid
-	Soldiers  []*Soldier // all soldiers across both teams
-	Squads    []*Squad
-	SimLog    *SimLog
-	Reporter  *SimReporter
-	Tick      int
-	rng       *rand.Rand
-	combat    *CombatManager
+	Width        int
+	Height       int
+	buildings    []rect
+	NavGrid      *NavGrid
+	Soldiers     []*Soldier // all soldiers across both teams
+	Squads       []*Squad
+	SimLog       *SimLog
+	Reporter     *SimReporter
+	Tick         int
+	rng          *rand.Rand
+	combat       *CombatManager
+	effProbes    map[int]*effectivenessProbe
+	PerfTrackers map[int]*PerfTracker
 
 	// internal counters
 	nextID int
 	tick   int // pointer target for soldiers
+}
+
+func (ts *TestSim) logCombatEffectiveness(tick int, s *Soldier) {
+	probe, ok := ts.effProbes[s.id]
+	if !ok {
+		probe = &effectivenessProbe{lastX: s.x, lastY: s.y}
+		ts.effProbes[s.id] = probe
+	}
+
+	moved := math.Hypot(s.x-probe.lastX, s.y-probe.lastY)
+	probe.lastX, probe.lastY = s.x, s.y
+
+	combatContext := s.blackboard.VisibleThreatCount() > 0 || s.blackboard.SquadHasContact || s.blackboard.IsActivated()
+	if combatContext && moved < effectivenessStillDistEpsilon {
+		probe.stalledTicks++
+		if probe.stalledTicks > 0 && probe.stalledTicks%effectivenessStalledTicks == 0 {
+			ts.SimLog.Add(tick, s.label, teamLabel(s.team), "effectiveness", "stalled_in_combat",
+				fmt.Sprintf("stalled=%dt goal=%s intent=%s moved=%.2f", probe.stalledTicks, s.blackboard.CurrentGoal, s.blackboard.SquadIntent, moved),
+				float64(probe.stalledTicks))
+		}
+	} else {
+		probe.stalledTicks = 0
+	}
+
+	if s.squad == nil || s.squad.Leader == nil || s.squad.Leader == s {
+		probe.detachedTicks = 0
+		return
+	}
+
+	leaderDist := math.Hypot(s.squad.Leader.x-s.x, s.squad.Leader.y-s.y)
+	squadEngaged := squadHasContact(s.squad)
+	detached := squadEngaged && s.blackboard.VisibleThreatCount() == 0 && leaderDist > effectivenessDetachedLeaderDist
+	if detached {
+		probe.detachedTicks++
+		if probe.detachedTicks > 0 && probe.detachedTicks%effectivenessDetachedTicks == 0 {
+			ts.SimLog.Add(tick, s.label, teamLabel(s.team), "effectiveness", "detached_from_engagement",
+				fmt.Sprintf("detached=%dt leader_dist=%.1f goal=%s intent=%s", probe.detachedTicks, leaderDist, s.blackboard.CurrentGoal, s.squad.Intent),
+				leaderDist)
+		}
+	} else {
+		probe.detachedTicks = 0
+	}
+}
+
+func squadHasContact(sq *Squad) bool {
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			continue
+		}
+		if m.blackboard.VisibleThreatCount() > 0 || m.blackboard.SquadHasContact {
+			return true
+		}
+	}
+	return false
 }
 
 // simOptionKind controls the pass in which an option is applied.
@@ -105,10 +177,12 @@ func WithBlueSquad(ids ...int) SimOption {
 //  4. Squads
 func NewTestSim(opts ...SimOption) *TestSim {
 	ts := &TestSim{
-		Width:  1280,
-		Height: 720,
-		SimLog: NewSimLog(false),
-		rng:    rand.New(rand.NewSource(1)), // #nosec G404 -- test harness default
+		Width:        1280,
+		Height:       720,
+		SimLog:       NewSimLog(false),
+		rng:          rand.New(rand.NewSource(1)), // #nosec G404 -- test harness default
+		effProbes:    make(map[int]*effectivenessProbe),
+		PerfTrackers: make(map[int]*PerfTracker),
 	}
 	for _, o := range opts {
 		if o.kind == simOptInfra {
@@ -128,6 +202,10 @@ func NewTestSim(opts ...SimOption) *TestSim {
 	}
 	ts.combat = NewCombatManager(ts.rng.Int63())
 	ts.Reporter = NewSimReporter(reportWindowTicks, true)
+	hasBuildings := len(ts.buildings) > 0
+	for _, s := range ts.Soldiers {
+		ts.PerfTrackers[s.id] = NewPerfTracker(s, hasBuildings)
+	}
 	return ts
 }
 
@@ -148,6 +226,8 @@ func (ts *TestSim) addSoldier(id int, x, y float64, team Team, start, end [2]flo
 	tl := NewThoughtLog() // per-sim log; not rendered
 	s := NewSoldier(id, x, y, team, start, end, ts.NavGrid, nil, ts.buildings, tl, &ts.tick)
 	ts.Soldiers = append(ts.Soldiers, s)
+	ts.effProbes[s.id] = &effectivenessProbe{lastX: s.x, lastY: s.y}
+	ts.PerfTrackers[s.id] = NewPerfTracker(s, len(ts.buildings) > 0)
 	if id >= ts.nextID {
 		ts.nextID = id + 1
 	}
@@ -334,6 +414,12 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 		// Verbose: fear.
 		ts.SimLog.AddVerbose(tick, s.label, tStr, "stats", "fear",
 			fmt.Sprintf("%.3f", s.profile.Psych.Fear), s.profile.Psych.Fear)
+
+		ts.logCombatEffectiveness(tick, s)
+
+		if pt, ok := ts.PerfTrackers[s.id]; ok {
+			pt.Update(s)
+		}
 	}
 
 	// Analytics: collect behaviour report every ~1s.
@@ -348,6 +434,16 @@ func teamLabel(t Team) string {
 		return "red"
 	}
 	return "blue"
+}
+
+// SoldierGrades finalizes performance trackers and returns computed grades.
+func (ts *TestSim) SoldierGrades() []SoldierGrade {
+	for _, s := range ts.Soldiers {
+		if pt, ok := ts.PerfTrackers[s.id]; ok {
+			pt.Finalize(s)
+		}
+	}
+	return GradePerformance(ts.PerfTrackers)
 }
 
 // CurrentTick returns the current simulation tick.

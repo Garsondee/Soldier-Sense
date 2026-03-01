@@ -312,6 +312,7 @@ const (
 const (
 	personalSpaceRadius = float64(cellSize) * 1.1
 	cellOverlapEpsilon  = 0.35
+	separationDeadband  = 0.06
 )
 
 // NewSoldier creates a soldier at (x,y) that will advance toward end.
@@ -1791,14 +1792,43 @@ func (s *Soldier) resolveCellOverlapPair(other *Soldier) {
 	if d < 1e-6 {
 		return
 	}
-	nx := dx / d
-	ny := dy / d
+	nx, ny := s.separationNormal(other, dx, dy, d)
 	push := float64(cellSize)*0.55 + cellOverlapEpsilon
 	half := push * 0.5
 	s.x += nx * half
 	s.y += ny * half
 	other.x -= nx * half
 	other.y -= ny * half
+}
+
+func (s *Soldier) separationNormal(other *Soldier, dx, dy, d float64) (float64, float64) {
+	if d < 1e-6 {
+		return 0, 0
+	}
+
+	// Head-on movers should sidestep each other instead of repeatedly shoving
+	// backward/forward along their travel direction, which causes bounce jitter.
+	if s.state == SoldierStateMoving && other.state == SoldierStateMoving {
+		hx1, hy1 := math.Cos(s.vision.Heading), math.Sin(s.vision.Heading)
+		hx2, hy2 := math.Cos(other.vision.Heading), math.Sin(other.vision.Heading)
+		alignment := hx1*hx2 + hy1*hy2
+		towardOther1 := (other.x-s.x)*hx1 + (other.y-s.y)*hy1
+		towardOther2 := (s.x-other.x)*hx2 + (s.y-other.y)*hy2
+		headOn := alignment < -0.35 && towardOther1 > 0 && towardOther2 > 0
+		if headOn {
+			lx, ly := -hy1, hx1
+			if math.Abs(lx)+math.Abs(ly) < 1e-6 {
+				lx, ly = -hy2, hx2
+			}
+			sign := 1.0
+			if ((s.id + other.id) & 1) == 1 {
+				sign = -1.0
+			}
+			return lx * sign, ly * sign
+		}
+	}
+
+	return dx / d, dy / d
 }
 
 func (s *Soldier) applySeparationPair(other *Soldier) {
@@ -1809,12 +1839,11 @@ func (s *Soldier) applySeparationPair(other *Soldier) {
 		return
 	}
 	pressure := (personalSpaceRadius - d) / personalSpaceRadius
-	nx := dx / d
-	ny := dy / d
-	push := pressure * 0.55
-	if push < 0.05 {
-		push = 0.05
+	if pressure < separationDeadband {
+		return
 	}
+	nx, ny := s.separationNormal(other, dx, dy, d)
+	push := pressure * 0.55
 	half := push * 0.5
 	s.x += nx * half
 	s.y += ny * half

@@ -13,33 +13,36 @@ const reportWindowTicks = 600
 
 // SquadReport captures a single squad's state at one point in time.
 type SquadReport struct {
-	Team              Team
-	SquadID           int
-	Alive             int
-	Dead              int
-	Intent            SquadIntentKind
-	OutnumberedFactor float64
-	Posture           float64 // -1 defensive .. +1 offensive
+	Team               Team
+	SquadID            int
+	Alive              int
+	Dead               int
+	Intent             SquadIntentKind
+	OutnumberedFactor  float64
+	Posture            float64 // -1 defensive .. +1 offensive
 	MembersWithContact int
-	TotalEnemiesSeen  int
-	AvgFear           float64
-	AvgMorale         float64
+	TotalEnemiesSeen   int
+	AvgFear            float64
+	AvgMorale          float64
 }
 
 // SoldierReport captures a single soldier's state.
 type SoldierReport struct {
-	ID       int
-	Label    string
-	Team     Team
-	Goal     GoalKind
-	State    SoldierState
-	Health   float64
-	Fear     float64
-	Morale   float64
-	AtCorner bool
-	AtWall   bool
-	AtDoor   bool
-	Posture  float64
+	ID                          int
+	Label                       string
+	Team                        Team
+	Goal                        GoalKind
+	State                       SoldierState
+	Health                      float64
+	Fear                        float64
+	Morale                      float64
+	AtCorner                    bool
+	AtWall                      bool
+	AtDoor                      bool
+	Posture                     float64
+	StalledInCombat             bool
+	DetachedFromSquadEngagement bool
+	LeaderDistance              float64
 }
 
 // SimReport is a full snapshot of the simulation at one tick.
@@ -51,8 +54,8 @@ type SimReport struct {
 	BlueGoals map[GoalKind]int
 
 	// Per-team aggregate stats.
-	RedAlive, BlueAlive int
-	RedDead, BlueDead   int
+	RedAlive, BlueAlive     int
+	RedDead, BlueDead       int
 	RedInjured, BlueInjured int // health < max but > 0
 
 	// Visibility ratios.
@@ -60,6 +63,10 @@ type SimReport struct {
 	BlueMembersWithContact int
 	RedTotalEnemiesSeen    int // total enemy sightings across red
 	BlueTotalEnemiesSeen   int
+	RedStalledInCombat     int
+	BlueStalledInCombat    int
+	RedDetached            int
+	BlueDetached           int
 
 	// Squad-level summaries.
 	Squads []SquadReport
@@ -214,21 +221,58 @@ func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) {
 		}
 	}
 
+	leaderDist := 0.0
+	detached := false
+	if s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
+		leaderDist = math.Hypot(s.squad.Leader.x-s.x, s.squad.Leader.y-s.y)
+		detached = squadHasContact(s.squad) && s.blackboard.VisibleThreatCount() == 0 && leaderDist > effectivenessDetachedLeaderDist
+	}
+	stalled := (s.blackboard.VisibleThreatCount() > 0 || s.blackboard.SquadHasContact || s.blackboard.IsActivated()) &&
+		s.state == SoldierStateIdle &&
+		reporterMobilityGoal(s.blackboard.CurrentGoal)
+
+	if stalled {
+		if team == TeamRed {
+			report.RedStalledInCombat++
+		} else {
+			report.BlueStalledInCombat++
+		}
+	}
+	if detached {
+		if team == TeamRed {
+			report.RedDetached++
+		} else {
+			report.BlueDetached++
+		}
+	}
+
 	if r.verbose {
 		report.Soldiers = append(report.Soldiers, SoldierReport{
-			ID:       s.id,
-			Label:    s.label,
-			Team:     team,
-			Goal:     s.blackboard.CurrentGoal,
-			State:    s.state,
-			Health:   s.health,
-			Fear:     s.profile.Psych.EffectiveFear(),
-			Morale:   s.profile.Psych.Morale,
-			AtCorner: s.blackboard.AtCorner,
-			AtWall:   s.blackboard.AtWall,
-			AtDoor:   s.blackboard.AtDoorway,
-			Posture:  s.blackboard.SquadPosture,
+			ID:                          s.id,
+			Label:                       s.label,
+			Team:                        team,
+			Goal:                        s.blackboard.CurrentGoal,
+			State:                       s.state,
+			Health:                      s.health,
+			Fear:                        s.profile.Psych.EffectiveFear(),
+			Morale:                      s.profile.Psych.Morale,
+			AtCorner:                    s.blackboard.AtCorner,
+			AtWall:                      s.blackboard.AtWall,
+			AtDoor:                      s.blackboard.AtDoorway,
+			Posture:                     s.blackboard.SquadPosture,
+			StalledInCombat:             stalled,
+			DetachedFromSquadEngagement: detached,
+			LeaderDistance:              leaderDist,
 		})
+	}
+}
+
+func reporterMobilityGoal(g GoalKind) bool {
+	switch g {
+	case GoalAdvance, GoalMaintainFormation, GoalMoveToContact, GoalRegroup, GoalFallback, GoalFlank:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -264,11 +308,11 @@ func (r *SimReporter) WindowSummary() *WindowReport {
 
 	n := float64(len(window))
 	wr := &WindowReport{
-		FromTick:     window[len(window)-1].Tick,
-		ToTick:       window[0].Tick,
-		SampleCount:  len(window),
-		RedGoalPct:   make(map[GoalKind]float64),
-		BlueGoalPct:  make(map[GoalKind]float64),
+		FromTick:    window[len(window)-1].Tick,
+		ToTick:      window[0].Tick,
+		SampleCount: len(window),
+		RedGoalPct:  make(map[GoalKind]float64),
+		BlueGoalPct: make(map[GoalKind]float64),
 	}
 
 	redGoalTotal := make(map[GoalKind]float64)
@@ -295,6 +339,10 @@ func (r *SimReporter) WindowSummary() *WindowReport {
 		wr.AvgBlueEnemiesSeen += float64(rpt.BlueTotalEnemiesSeen)
 		wr.AvgRedPosture += rpt.RedAvgPosture
 		wr.AvgBluePosture += rpt.BlueAvgPosture
+		wr.AvgRedStalledInCombat += float64(rpt.RedStalledInCombat)
+		wr.AvgBlueStalledInCombat += float64(rpt.BlueStalledInCombat)
+		wr.AvgRedDetached += float64(rpt.RedDetached)
+		wr.AvgBlueDetached += float64(rpt.BlueDetached)
 		wr.TotalRedDead += rpt.RedDead
 		wr.TotalBlueDead += rpt.BlueDead
 	}
@@ -322,6 +370,10 @@ func (r *SimReporter) WindowSummary() *WindowReport {
 	wr.AvgBlueEnemiesSeen /= n
 	wr.AvgRedPosture /= n
 	wr.AvgBluePosture /= n
+	wr.AvgRedStalledInCombat /= n
+	wr.AvgBlueStalledInCombat /= n
+	wr.AvgRedDetached /= n
+	wr.AvgBlueDetached /= n
 
 	return wr
 }
@@ -336,11 +388,13 @@ type WindowReport struct {
 	BlueGoalPct map[GoalKind]float64
 
 	// Averages over the window.
-	AvgRedAlive, AvgBlueAlive           float64
-	AvgRedInjured, AvgBlueInjured       float64
-	AvgRedWithContact, AvgBlueWithContact float64
-	AvgRedEnemiesSeen, AvgBlueEnemiesSeen float64
-	AvgRedPosture, AvgBluePosture       float64
+	AvgRedAlive, AvgBlueAlive                     float64
+	AvgRedInjured, AvgBlueInjured                 float64
+	AvgRedWithContact, AvgBlueWithContact         float64
+	AvgRedEnemiesSeen, AvgBlueEnemiesSeen         float64
+	AvgRedPosture, AvgBluePosture                 float64
+	AvgRedStalledInCombat, AvgBlueStalledInCombat float64
+	AvgRedDetached, AvgBlueDetached               float64
 
 	// Cumulative.
 	TotalRedDead, TotalBlueDead int
@@ -394,6 +448,13 @@ func (wr *WindowReport) Format() string {
 	fmt.Fprintf(&sb, "  Blue: avg posture=%+.2f (%s)\n",
 		wr.AvgBluePosture, postureLabel(wr.AvgBluePosture))
 
+	// Combat effectiveness.
+	sb.WriteString("\n--- Combat Effectiveness Alerts ---\n")
+	fmt.Fprintf(&sb, "  Red:  stalled_in_combat=%.1f  detached_from_engagement=%.1f\n",
+		wr.AvgRedStalledInCombat, wr.AvgRedDetached)
+	fmt.Fprintf(&sb, "  Blue: stalled_in_combat=%.1f  detached_from_engagement=%.1f\n",
+		wr.AvgBlueStalledInCombat, wr.AvgBlueDetached)
+
 	return sb.String()
 }
 
@@ -423,9 +484,11 @@ func (r *SimReporter) FormatLatest() string {
 	fmt.Fprintf(&sb, "Red:  alive=%d dead=%d injured=%d  contact=%d enemies_seen=%d  posture=%+.2f\n",
 		rpt.RedAlive, rpt.RedDead, rpt.RedInjured,
 		rpt.RedMembersWithContact, rpt.RedTotalEnemiesSeen, rpt.RedAvgPosture)
+	fmt.Fprintf(&sb, "      stalled_in_combat=%d detached=%d\n", rpt.RedStalledInCombat, rpt.RedDetached)
 	fmt.Fprintf(&sb, "Blue: alive=%d dead=%d injured=%d  contact=%d enemies_seen=%d  posture=%+.2f\n",
 		rpt.BlueAlive, rpt.BlueDead, rpt.BlueInjured,
 		rpt.BlueMembersWithContact, rpt.BlueTotalEnemiesSeen, rpt.BlueAvgPosture)
+	fmt.Fprintf(&sb, "      stalled_in_combat=%d detached=%d\n", rpt.BlueStalledInCombat, rpt.BlueDetached)
 
 	sb.WriteString("Red goals:  ")
 	for g, c := range rpt.RedGoals {

@@ -22,6 +22,12 @@ func dumpLog(t *testing.T, ts *TestSim) {
 func dumpSummary(t *testing.T, ts *TestSim) {
 	t.Helper()
 	t.Log(ts.SimLog.Summary(ts.CurrentTick(), ts.Soldiers, ts.Squads))
+	if ts.Reporter != nil {
+		t.Log(ts.Reporter.FormatLatest())
+		if wr := ts.Reporter.WindowSummary(); wr != nil {
+			t.Log(wr.Format())
+		}
+	}
 }
 
 // --- Scenario: Advance No Contact ---
@@ -698,6 +704,32 @@ func TestMoveAlongPath_ProneSuppressedIsPainfullySlow(t *testing.T) {
 	proneStep := math.Hypot(proneSuppressed.x-100, proneSuppressed.y-120)
 	if proneStep >= standingStep*0.35 {
 		t.Fatalf("expected pinned prone crawl to be much slower; standing=%.3f prone=%.3f", standingStep, proneStep)
+	}
+}
+
+func TestSoldier_SeparationNormal_HeadOnUsesLateral(t *testing.T) {
+	ng := NewNavGrid(640, 480, nil, soldierRadius, nil, nil)
+	tl := NewThoughtLog()
+	tick := 0
+
+	a := NewSoldier(10, 100, 100, TeamRed, [2]float64{100, 100}, [2]float64{600, 100}, ng, nil, nil, tl, &tick)
+	b := NewSoldier(11, 116, 100, TeamRed, [2]float64{116, 100}, [2]float64{0, 100}, ng, nil, nil, tl, &tick)
+	a.state = SoldierStateMoving
+	b.state = SoldierStateMoving
+
+	dx := a.x - b.x
+	dy := a.y - b.y
+	d := math.Hypot(dx, dy)
+	nx, ny := a.separationNormal(b, dx, dy, d)
+
+	// Head-on movers should get a lateral separation vector (side-step),
+	// not a push parallel to current forward heading.
+	forwardDot := math.Abs(nx*math.Cos(a.vision.Heading) + ny*math.Sin(a.vision.Heading))
+	if forwardDot > 0.25 {
+		t.Fatalf("expected lateral separation for head-on movement, got forwardDot=%.3f normal=(%.3f,%.3f)", forwardDot, nx, ny)
+	}
+	if math.Abs(math.Hypot(nx, ny)-1.0) > 1e-6 {
+		t.Fatalf("expected unit normal, got (%.3f,%.3f)", nx, ny)
 	}
 }
 

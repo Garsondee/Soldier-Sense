@@ -1150,6 +1150,11 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		if posture > 0 {
 			moveToContactUtil += posture * 0.12
 		}
+		// Squad is actively fighting: members without LOS should bias toward
+		// closing distance to support, rather than staying static in overwatch.
+		if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
+			moveToContactUtil += 0.35
+		}
 	}
 
 	// --- Flank: move perpendicular to enemy direction. ---
@@ -1214,6 +1219,9 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	}
 	if anyContact && visibleThreats == 0 {
 		overwatchUtil *= overwatchDistanceFactor(internal.LastContactRange)
+	}
+	if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
+		overwatchUtil -= 0.25
 	}
 
 	// --- Regroup: cohesion emergency.
@@ -1312,6 +1320,11 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 			// Activated soldiers peek more deliberately.
 			if anyContact && visibleThreats == 0 {
 				peekUtil += 0.10
+			}
+			// During active squad engagement, no-LOS members should avoid prolonged
+			// local peeking and instead rejoin the fight.
+			if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
+				peekUtil *= 0.25
 			}
 		}
 	}
@@ -1530,6 +1543,9 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 			if posture > 0 {
 				u += posture * 0.12
 			}
+			if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
+				u += 0.35
+			}
 		}
 		if anyContact {
 			u += supportPush
@@ -1593,6 +1609,9 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 		}
 		if anyContact && visibleThreats == 0 {
 			u *= overwatchDistanceFactor(internal.LastContactRange)
+		}
+		if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
+			u -= 0.25
 		}
 		u -= isolationPush * 0.55
 		u -= supportPush * 0.25
@@ -1702,6 +1721,9 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 				}
 				if anyContact && visibleThreats == 0 {
 					u += 0.10
+				}
+				if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
+					u *= 0.25
 				}
 			}
 		}
