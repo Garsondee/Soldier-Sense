@@ -192,6 +192,8 @@ type Blackboard struct {
 	OrderReceived     bool            // true if an order was written this cycle
 	IncomingFireCount int             // shots received (hit or miss) this tick — reset each tick
 
+	IrrelevantCoverTicks int // ticks spent in safe cover with poor contribution while squad is in combat motion
+
 	// Active officer-order signal propagated from squad leader.
 	OfficerOrderKind     OfficerCommandKind
 	OfficerOrderTargetX  float64

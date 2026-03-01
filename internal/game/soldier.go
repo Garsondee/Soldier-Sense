@@ -1172,6 +1172,33 @@ func (s *Soldier) Update() {
 
 	// --- Malingerer override ---
 	if bb.SquadHasContact || bb.IsActivated() {
+		// --- Irrelevant cover detection ---
+		// Soldiers can get stuck in tactically irrelevant "safe" cover (often inside
+		// buildings) that has no useful sightlines on the fight. This is distinct
+		// from passive overwatch: it's cover that cannot contribute while the squad
+		// is pressing forward.
+		underFire := bb.IncomingFireCount > 0 || bb.IsSuppressed()
+		isCampingGoal := bb.CurrentGoal == GoalSurvive || bb.CurrentGoal == GoalHoldPosition || bb.CurrentGoal == GoalOverwatch
+		intentPressing := bb.SquadIntent == IntentAdvance || bb.SquadIntent == IntentEngage
+		noLOS := bb.VisibleThreatCount() == 0
+		poorSightlines := bb.LocalSightlineScore < 0.28
+		inCoverLike := bb.AtInterior || s.isInCover()
+		farBehindLeader := false
+		if intentPressing && s.squad != nil && s.squad.Leader != nil && s.squad.Leader != s {
+			leaderDist := math.Hypot(s.squad.Leader.x-s.x, s.squad.Leader.y-s.y)
+			farBehindLeader = leaderDist > 220
+		}
+		if intentPressing && isCampingGoal && noLOS && !underFire && poorSightlines && inCoverLike && farBehindLeader {
+			bb.IrrelevantCoverTicks++
+		} else {
+			bb.IrrelevantCoverTicks = 0
+		}
+		if bb.IrrelevantCoverTicks > 180 {
+			bb.ForceAdvance = true
+			bb.IrrelevantCoverTicks = 0
+			s.think("irrelevant cover — forced to advance")
+		}
+
 		isPassive := bb.CurrentGoal == GoalAdvance ||
 			bb.CurrentGoal == GoalMaintainFormation ||
 			bb.CurrentGoal == GoalHoldPosition ||
@@ -1190,6 +1217,7 @@ func (s *Soldier) Update() {
 	} else {
 		bb.IdleCombatTicks = 0
 		bb.ForceAdvance = false
+		bb.IrrelevantCoverTicks = 0
 	}
 
 	s.updateCognitionPause(tick)

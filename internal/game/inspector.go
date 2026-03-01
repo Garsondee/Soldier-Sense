@@ -190,6 +190,9 @@ func (g *Game) drawInspectorCurated(buf *ebiten.Image, s *Soldier, lx, ly int) {
 	if bb.SquadHasContact {
 		line(fmt.Sprintf("contact:(%.0f,%.0f)", bb.SquadContactX, bb.SquadContactY))
 	}
+	if bb.IrrelevantCoverTicks > 0 {
+		line(fmt.Sprintf("irrelevant_cover:%dt", bb.IrrelevantCoverTicks))
+	}
 	if bb.IsActivated() {
 		line(fmt.Sprintf("mem:%.0f%% @(%.0f,%.0f)",
 			bb.CombatMemoryStrength*100, bb.CombatMemoryX, bb.CombatMemoryY))

@@ -5,6 +5,6 @@ description: When work on a feature has been finished or at regular intervals an
 
 Use something like this to check code regularly.
 
-just fmt-check
-
-just fmt
+just lint
+just gosec
+just test
