@@ -487,7 +487,7 @@ func (sq *Squad) issueOfficerOrder(tick int, kind OfficerCommandKind, targetX, t
 	if sq.ActiveOrder.Kind == kind && sq.ActiveOrder.State == OfficerOrderActive {
 		dx := sq.ActiveOrder.TargetX - targetX
 		dy := sq.ActiveOrder.TargetY - targetY
-		if math.Sqrt(dx*dx+dy*dy) < 16 && sq.ActiveOrder.Formation == formation {
+		if sq.ActiveOrder.Formation == formation && withinRadius2(dx, dy, 16*16) {
 			sq.ActiveOrder.ExpiresTick = tick + ttl
 			sq.ActiveOrder.Priority = priority
 			sq.ActiveOrder.Strength = strength
