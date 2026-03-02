@@ -289,7 +289,9 @@ func extractFloatField(value, prefix string) float64 {
 		return 0
 	}
 	var f float64
-	fmt.Sscanf(s, "%f", &f)
+	if _, err := fmt.Sscanf(s, "%f", &f); err != nil {
+		return 0
+	}
 	return f
 }
 
