@@ -3,7 +3,7 @@
 # Install it from https://github.com/casey/just/releases 
 #   Windows: winget install --id=Casey.Just -e  (then use Git Bash as your shell)
 
-set shell := ["sh", "-cu"]
+set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-cu"]
 
 [private]
 default:
@@ -15,24 +15,21 @@ unittest:
     go test ./...
 
 lint:
-    #!/usr/bin/env sh
-    echo "Running linter..."
-    if command -v golangci-lint >/dev/null 2>&1; then
-      golangci-lint run
-    else
-      echo "golangci-lint not found, falling back to go vet"
-      echo "To install golangci-lint: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
-      go vet ./...
+    echo "Running linter..." ; \
+    if command -v golangci-lint >/dev/null 2>&1; then \
+      golangci-lint run ; \
+    else \
+      echo "golangci-lint not found, falling back to go vet" ; \
+      echo "To install golangci-lint: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest" ; \
+      go vet ./... ; \
     fi
 
 gosec:
-    #!/usr/bin/env sh
-    echo "Running security scanner..."
-    if command -v gosec >/dev/null 2>&1; then
-      gosec -quiet -fmt=text ./...
-    else
-      echo "gosec not found, skipping security scan"
-      echo "To install gosec: go install github.com/securego/gosec/v2/cmd/gosec@latest"
+    if command -v gosec >/dev/null 2>&1; then \
+      gosec -quiet -fmt=text ./... ; \
+    else \
+      echo "gosec not found, skipping security scan" ; \
+      echo "To install gosec: go install github.com/securego/gosec/v2/cmd/gosec@latest" ; \
     fi
 
 # Install golangci-lint via go install (ensure ~/go/bin is in your PATH)
@@ -44,27 +41,21 @@ fmt:
 
 # Check formatting without modifying files
 fmt-check:
-    #!/usr/bin/env sh
-    unformatted_files="$(gofmt -l ./cmd ./internal)"
-    if [ -n "$unformatted_files" ]; then
-      echo "Files need formatting:"
-      echo "$unformatted_files"
-      echo "Run 'just fmt' to fix formatting"
-      exit 1
-    fi
+    unformatted_files="$(gofmt -l ./cmd ./internal)" ; \
+    if [ -n "$unformatted_files" ]; then \
+      echo "Files need formatting:" ; \
+      echo "$unformatted_files" ; \
+      echo "Run 'just fmt' to fix formatting" ; \
+      exit 1 ; \
+    fi ; \
     echo "All files are properly formatted"
 
 tidy:
     go mod tidy
 
 build:
-    #!/usr/bin/env sh
     mkdir -p bin
-    case "$(uname -s)" in
-      MINGW*|MSYS*|CYGWIN*) OUT=bin/soldier-sense.exe ;;
-      *) OUT=bin/soldier-sense ;;
-    esac
-    go build -ldflags "-X github.com/Garsondee/Soldier-Sense/pkg/commands.Source=https://github.com/Garsondee/Soldier-Sense" -o "$OUT" ./cmd/game
+    go build -ldflags "-X github.com/Garsondee/Soldier-Sense/pkg/commands.Source=https://github.com/Garsondee/Soldier-Sense" -o "bin/soldier-sense$(go env GOEXE)" ./cmd/game
 
 run: build
     go run ./cmd/game
