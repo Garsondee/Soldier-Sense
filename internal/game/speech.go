@@ -428,9 +428,11 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 		bgW := textW + float32(padX*2)*invZoom
 		bgH := float32(lines*lineH+padY*2) * invZoom
 
-		// Base position above soldier.
+		// Position bubble much further from soldier (60px base distance).
 		sx := ox + float32(s.x)
-		baseY := oy + float32(s.y) - float32(soldierRadius)*invZoom - bgH - 6*invZoom
+		sy := oy + float32(s.y)
+		baseDistance := float32(60) * invZoom
+		baseY := sy - float32(soldierRadius)*invZoom - bgH - baseDistance
 
 		// Push up if there's already a bubble on this soldier.
 		if prevY, ok := occupied[s.id]; ok {
@@ -439,9 +441,30 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 			}
 		}
 		baseY += b.yOff * invZoom
-		occupied[s.id] = baseY
 
+		// Smart horizontal positioning to avoid overlapping other soldiers.
 		bgX := sx - bgW/2
+		// Check if bubble would overlap any nearby soldiers and shift horizontally if needed.
+		all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+		for _, other := range all {
+			if other == s || other.state == SoldierStateDead {
+				continue
+			}
+			// Check if other soldier is in the bubble's area.
+			otherX := ox + float32(other.x)
+			otherY := oy + float32(other.y)
+			// If other soldier is within bubble bounds, shift bubble horizontally.
+			if otherX > bgX-20 && otherX < bgX+bgW+20 && otherY > baseY-20 && otherY < baseY+bgH+20 {
+				// Shift bubble to the side opposite of the other soldier.
+				if otherX < sx {
+					bgX = sx + 30*invZoom // shift right
+				} else {
+					bgX = sx - bgW - 30*invZoom // shift left
+				}
+			}
+		}
+
+		occupied[s.id] = baseY
 		bgY := baseY
 
 		// Background: darker, more readable, with mood accent.
@@ -474,8 +497,12 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 			ebitenutil.DebugPrintAt(screen, b.detail, textX, textY+int(float32(lineH)*invZoom))
 		}
 
-		// Connector line from bubble to soldier.
-		vector.StrokeLine(screen, sx, bgY+bgH, sx, oy+float32(s.y)-float32(soldierRadius),
-			1.0*invZoom, color.RGBA{R: 80, G: 100, B: 80, A: uint8(50 * alpha)}, false)
+		// Connector line from bubble to soldier (always visible, clearer).
+		// Draw from bottom-center of bubble to top of soldier.
+		bubbleCenterX := bgX + bgW/2
+		bubbleBottomY := bgY + bgH
+		soldierTopY := sy - float32(soldierRadius)*invZoom
+		vector.StrokeLine(screen, bubbleCenterX, bubbleBottomY, sx, soldierTopY,
+			1.2*invZoom, color.RGBA{R: 100, G: 120, B: 100, A: uint8(120 * alpha)}, false)
 	}
 }

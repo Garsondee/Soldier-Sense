@@ -19,6 +19,62 @@ func (s *Soldier) executeHelpCasualty(dt float64) {
 		return
 	}
 
+	// If we are already dragging this casualty, keep dragging until we reach the drag target.
+	if casualty.casualty.BeingDragged && casualty.casualty.Dragger == s {
+		dx := casualty.casualty.DragTargetX - s.x
+		dy := casualty.casualty.DragTargetY - s.y
+		if math.Hypot(dx, dy) < 20 {
+			stopDraggingCasualty(casualty)
+		} else {
+			s.state = SoldierStateMoving
+			s.requestStance(StanceCrouching, false)
+			if s.navGrid != nil {
+				tick := s.tickVal()
+				if s.path == nil || s.pathIndex >= len(s.path) || tick%15 == 0 {
+					s.path = s.navGrid.FindPath(s.x, s.y, casualty.casualty.DragTargetX, casualty.casualty.DragTargetY)
+					s.pathIndex = 0
+				}
+			}
+			s.moveAlongPath(dt)
+			// Pull casualty along.
+			casualty.x = s.x
+			casualty.y = s.y
+			return
+		}
+	}
+
+	// If the casualty is incapacitated and the helper is under threat, drag first.
+	bb := &s.blackboard
+	if s.isMedic && !casualty.casualty.BeingDragged && casualty.state.IsIncapacitated() && (bb.IncomingFireCount > 0 || bb.VisibleThreatCount() > 0) {
+		// Pick a drag destination away from the closest visible threat.
+		best := math.MaxFloat64
+		var tx, ty float64
+		for _, t := range bb.Threats {
+			if !t.IsVisible {
+				continue
+			}
+			dx := s.x - t.X
+			dy := s.y - t.Y
+			d := dx*dx + dy*dy
+			if d < best {
+				best = d
+				// Drag ~200px directly away from threat.
+				len := math.Hypot(dx, dy)
+				if len < 1 {
+					len = 1
+				}
+				nx := dx / len
+				ny := dy / len
+				tx = s.x + nx*200
+				ty = s.y + ny*200
+			}
+		}
+		if best < math.MaxFloat64 {
+			s.startDraggingCasualty(casualty, tx, ty)
+			s.think("dragging casualty")
+		}
+	}
+
 	dx := casualty.x - s.x
 	dy := casualty.y - s.y
 	dist := math.Sqrt(dx*dx + dy*dy)
@@ -104,6 +160,8 @@ func integrateBuddyAidTick(soldiers []*Soldier, tick int) {
 
 		// Tick any active treatment.
 		tickProvidedAid(s, tick)
+		// If the casualty no longer needs aid, release all providers.
+		stopAllProvidersIfNoAidNeeded(s)
 
 		// Check if providers should stop (under fire, etc).
 		for i := len(s.casualty.Providers) - 1; i >= 0; i-- {

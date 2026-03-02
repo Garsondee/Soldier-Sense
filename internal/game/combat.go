@@ -18,6 +18,7 @@ const (
 	maxFireRange        = 900.0              // px, max rifle range (last half is pot-shot territory)
 	potShotMaxFireRange = maxFireRange * 2.0 // px, extended pot-shot engagement envelope
 	tracerLifetime      = 10                 // ticks a tracer persists
+	tracerSpeed         = 3.0                // bullet travels full distance in this many ticks (faster = more visible)
 	nearMissStress      = 0.08               // fear added to target on miss
 	hitStress           = 0.20               // fear added to target on hit
 	witnessStress       = 0.03               // fear added to nearby friendlies seeing a hit
@@ -128,12 +129,14 @@ func cqbDamageMul(dist float64) float64 {
 // --- Tracer ---
 
 // Tracer is a short-lived visual representing a bullet flight path.
+// Uses sub-tick interpolation for smooth animation between game ticks.
 type Tracer struct {
-	fromX, fromY float64
-	toX, toY     float64
-	hit          bool
-	team         Team
-	age          int // ticks since spawn
+	fromX, fromY  float64
+	toX, toY      float64
+	hit           bool
+	team          Team
+	age           int     // ticks since spawn
+	fractionalAge float64 // smooth sub-tick interpolation for rendering
 }
 
 // TracerDone returns true when the tracer should be removed.
@@ -149,59 +152,81 @@ type MuzzleFlash struct {
 	age   int
 }
 
-// DrawTracer renders a bullet tracer as a thin, fast line with a hot bright
-// tip at the head and a cool dim tail that fades to transparent.
-// Hits get a tiny impact flare; misses are purely the line.
+// DrawTracer renders a bullet tracer with smooth sub-tick interpolation,
+// thin anti-aliased lines, and soft gradient halos.
 func (t *Tracer) DrawTracer(screen *ebiten.Image, offX, offY int) {
-	progress := float64(t.age) / float64(tracerLifetime)
+	// Use fractional age for smooth interpolation between ticks.
+	progress := t.fractionalAge / float64(tracerLifetime)
 	if progress > 1.0 {
 		return
 	}
 
 	ox, oy := float32(offX), float32(offY)
 
-	// Head advances quickly; short tight tail follows behind.
-	headT := math.Min(1.0, progress*2.0)
-	tailLen := 0.10 // very short tail — bullet moves fast
+	// Bullet travel: moves quickly to target, then lingers briefly.
+	travelProgress := math.Min(1.0, t.fractionalAge/tracerSpeed)
+	fadeProgress := math.Max(0.0, (t.fractionalAge-tracerSpeed)/(float64(tracerLifetime)-tracerSpeed))
+	globalFade := float32(1.0 - fadeProgress)
+
+	// Bullet position along flight path.
+	headT := travelProgress
+	tailLen := 0.15 // short tail for fast-moving bullet
 	tailT := math.Max(0.0, headT-tailLen)
 
 	hx := float32(t.fromX + (t.toX-t.fromX)*headT)
 	hy := float32(t.fromY + (t.toY-t.fromY)*headT)
-	// Split the tail into 4 segments for a per-segment fade from hot→cold.
-	const nSeg = 4
-	globalFade := float32(1.0 - progress*progress)
+	tx := float32(t.fromX + (t.toX-t.fromX)*tailT)
+	ty := float32(t.fromY + (t.toY-t.fromY)*tailT)
 
-	var hotR, hotG, hotB uint8 // team-tinted body colour
+	// Team colors.
+	var coreR, coreG, coreB uint8
+	var glowR, glowG, glowB uint8
 	if t.team == TeamRed {
-		hotR, hotG, hotB = 255, 210, 100
+		coreR, coreG, coreB = 255, 210, 100
+		glowR, glowG, glowB = 255, 180, 80
 	} else {
-		hotR, hotG, hotB = 100, 220, 255
+		coreR, coreG, coreB = 100, 220, 255
+		glowR, glowG, glowB = 80, 200, 255
 	}
 
-	for i := 0; i < nSeg; i++ {
-		t0 := tailT + (headT-tailT)*float64(i)/float64(nSeg)
-		t1 := tailT + (headT-tailT)*float64(i+1)/float64(nSeg)
-		sx0 := float32(t.fromX + (t.toX-t.fromX)*t0)
-		sy0 := float32(t.fromY + (t.toY-t.fromY)*t0)
-		sx1 := float32(t.fromX + (t.toX-t.fromX)*t1)
-		sy1 := float32(t.fromY + (t.toY-t.fromY)*t1)
+	// Soft gradient halo - multiple layers with very low alpha for smooth falloff.
+	// Layer 1: Outermost soft glow (widest, most transparent).
+	vector.StrokeLine(screen, ox+tx, oy+ty, ox+hx, oy+hy, 4.0,
+		color.RGBA{R: glowR, G: glowG, B: glowB, A: uint8(float32(15) * globalFade)}, false)
+	// Layer 2: Mid glow.
+	vector.StrokeLine(screen, ox+tx, oy+ty, ox+hx, oy+hy, 2.5,
+		color.RGBA{R: glowR, G: glowG, B: glowB, A: uint8(float32(30) * globalFade)}, false)
+	// Layer 3: Inner glow.
+	vector.StrokeLine(screen, ox+tx, oy+ty, ox+hx, oy+hy, 1.5,
+		color.RGBA{R: glowR, G: glowG, B: glowB, A: uint8(float32(60) * globalFade)}, false)
 
-		// Intensity: head segment is brightest (i=nSeg-1), tail is dimmest (i=0).
-		intensity := float32(i+1) / float32(nSeg) // 0.25→1.0
-		a := uint8(float32(210) * intensity * globalFade)
-		vector.StrokeLine(screen, ox+sx0, oy+sy0, ox+sx1, oy+sy1, 0.7,
-			color.RGBA{R: hotR, G: hotG, B: hotB, A: a}, false)
-	}
+	// Core tracer line - thin and anti-aliased.
+	vector.StrokeLine(screen, ox+tx, oy+ty, ox+hx, oy+hy, 0.8,
+		color.RGBA{R: coreR, G: coreG, B: coreB, A: uint8(float32(220) * globalFade)}, false)
 
-	// Bright white-hot tip dot at the head.
-	tipA := uint8(float32(220) * globalFade)
-	vector.FillCircle(screen, ox+hx, oy+hy, 0.9,
-		color.RGBA{R: 255, G: 255, B: 230, A: tipA}, false)
+	// Bright tip - small and intense.
+	// Soft outer glow.
+	vector.FillCircle(screen, ox+hx, oy+hy, 2.0,
+		color.RGBA{R: glowR, G: glowG, B: glowB, A: uint8(float32(40) * globalFade)}, false)
+	// Bright core.
+	vector.FillCircle(screen, ox+hx, oy+hy, 1.0,
+		color.RGBA{R: 255, G: 255, B: 240, A: uint8(float32(240) * globalFade)}, false)
 
-	// On hit: tiny spark/flash at impact point (first tick only).
-	if t.hit && t.age <= 1 {
-		vector.FillCircle(screen, ox+float32(t.toX), oy+float32(t.toY), 2.5,
-			color.RGBA{R: 255, G: 240, B: 180, A: 180}, false)
+	// Impact flash - simple and visible.
+	if t.hit && t.age <= 3 {
+		impactX := float32(t.toX)
+		impactY := float32(t.toY)
+		flashFade := 1.0 - float32(t.age)/3.0
+
+		// Soft outer flash.
+		vector.FillCircle(screen, ox+impactX, oy+impactY, 6.0*flashFade+2.0,
+			color.RGBA{R: 255, G: 240, B: 200, A: uint8(80 * flashFade)}, false)
+		// Mid flash.
+		vector.FillCircle(screen, ox+impactX, oy+impactY, 3.5*flashFade+1.0,
+			color.RGBA{R: 255, G: 250, B: 220, A: uint8(160 * flashFade)}, false)
+		// Bright core.
+		vector.FillCircle(screen, ox+impactX, oy+impactY, 1.5*flashFade+0.5,
+			color.RGBA{R: 255, G: 255, B: 255, A: uint8(240 * flashFade)}, false)
 	}
 }
 
@@ -1041,11 +1066,21 @@ func (cm *CombatManager) applyWitnessStress(target *Soldier, friendlies []*Soldi
 	}
 }
 
+// UpdateTracerInterpolation updates fractional ages for smooth sub-tick rendering.
+// Called every frame with interpolation value [0, 1) representing progress to next tick.
+func (cm *CombatManager) UpdateTracerInterpolation(interpolation float64) {
+	for _, t := range cm.tracers {
+		t.fractionalAge = float64(t.age) + interpolation
+	}
+}
+
 // UpdateTracers ages and prunes tracers and muzzle flashes.
+// Increments both integer age (for logic) and fractional age (for smooth rendering).
 func (cm *CombatManager) UpdateTracers() {
 	kept := cm.tracers[:0]
 	for _, t := range cm.tracers {
 		t.age++
+		t.fractionalAge = float64(t.age)
 		if !t.TracerDone() {
 			kept = append(kept, t)
 		}
@@ -1069,36 +1104,52 @@ func (cm *CombatManager) DrawTracers(screen *ebiten.Image, offX, offY int) {
 	}
 }
 
-// DrawMuzzleFlashes renders muzzle flash effects at the firing position.
+// DrawMuzzleFlashes renders muzzle flash effects with soft gradient halos
+// and directional indicators showing where shots are coming from.
 func (cm *CombatManager) DrawMuzzleFlashes(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
 	for _, f := range cm.flashes {
 		progress := float64(f.age) / float64(flashLifetime)
-		alpha := uint8(255 * (1.0 - progress))
+		fade := 1.0 - progress
 
 		sx, sy := ox+float32(f.x), oy+float32(f.y)
 
-		// Outer glow.
-		glowR := float32(8.0) * float32(1.0-progress*0.6)
-		var glowCol color.RGBA
+		// Team-specific colors.
+		var teamR, teamG, teamB uint8
 		if f.team == TeamRed {
-			glowCol = color.RGBA{R: 255, G: 180, B: 40, A: uint8(float64(alpha) * 0.3)}
+			teamR, teamG, teamB = 255, 180, 60
 		} else {
-			glowCol = color.RGBA{R: 100, G: 200, B: 255, A: uint8(float64(alpha) * 0.3)}
+			teamR, teamG, teamB = 100, 200, 255
 		}
-		vector.FillCircle(screen, sx, sy, glowR, glowCol, false)
 
-		// Bright core flash.
-		coreR := float32(3.5) * float32(1.0-progress*0.5)
-		coreCol := color.RGBA{R: 255, G: 255, B: 220, A: alpha}
-		vector.FillCircle(screen, sx, sy, coreR, coreCol, false)
+		// Soft gradient halo - multiple layers with low alpha for smooth falloff.
+		// Outermost glow.
+		glowR := float32(12.0) * float32(fade*0.7+0.3)
+		vector.FillCircle(screen, sx, sy, glowR,
+			color.RGBA{R: teamR, G: teamG, B: teamB, A: uint8(float64(40) * fade)}, false)
+		// Mid glow.
+		midR := float32(7.0) * float32(fade*0.6+0.4)
+		vector.FillCircle(screen, sx, sy, midR,
+			color.RGBA{R: teamR, G: teamG, B: teamB, A: uint8(float64(80) * fade)}, false)
+		// Inner glow.
+		innerR := float32(4.0) * float32(fade*0.5+0.5)
+		vector.FillCircle(screen, sx, sy, innerR,
+			color.RGBA{R: teamR, G: teamG, B: teamB, A: uint8(float64(140) * fade)}, false)
+		// Bright core.
+		coreR := float32(2.0) * float32(fade*0.4+0.6)
+		vector.FillCircle(screen, sx, sy, coreR,
+			color.RGBA{R: 255, G: 255, B: 240, A: uint8(float64(240) * fade)}, false)
 
-		// Short flash line in firing direction.
-		lineLen := float64(12.0) * (1.0 - progress*0.7)
+		// Directional indicator - thin line showing firing direction.
+		lineLen := float64(15.0) * fade
 		ex := float32(f.x + math.Cos(f.angle)*lineLen)
 		ey := float32(f.y + math.Sin(f.angle)*lineLen)
-		vector.StrokeLine(screen, sx, sy, ox+ex, oy+ey, 1.5,
-			color.RGBA{R: 255, G: 240, B: 160, A: uint8(float64(alpha) * 0.7)}, false)
+		// Soft outer line.
+		vector.StrokeLine(screen, sx, sy, ox+ex, oy+ey, 2.5,
+			color.RGBA{R: 255, G: 240, B: 200, A: uint8(float64(50) * fade)}, false)
+		// Bright core line.
+		vector.StrokeLine(screen, sx, sy, ox+ex, oy+ey, 1.0,
+			color.RGBA{R: 255, G: 250, B: 220, A: uint8(float64(200) * fade)}, false)
 	}
 }
 

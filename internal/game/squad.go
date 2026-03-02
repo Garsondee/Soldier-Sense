@@ -131,6 +131,9 @@ type Squad struct {
 	// Transient render data for radio transmission effects.
 	radioVisualEvents []radioVisualEvent
 	radioChatLines    []radioChatLine
+
+	// Flow-field navigation controller (hierarchical: strategic + tactical layers)
+	flowController *SquadFlowController
 }
 
 const stalledOrderCooldownTicks = 90
@@ -277,7 +280,13 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 			m.profile.Skills.FirstAid = 0.85 // medics have high first aid skill
 		}
 	}
+	// Note: flowController will be initialized via InitializeFlowField after navGrid is available
 	return sq
+}
+
+// InitializeFlowField sets up the flow-field navigation system for this squad
+func (sq *Squad) InitializeFlowField(navGrid *NavGrid, tacticalMap *TacticalMap) {
+	sq.flowController = NewSquadFlowController(sq, navGrid, tacticalMap)
 }
 
 // successionDelayTicks is the base delay (in ticks) for command succession.
@@ -285,8 +294,8 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 const successionDelayTicks = 180 // 3 seconds at 60TPS base
 
 const (
-	engageEnterDist = 300.0 // must be this close to enter engage
-	engageExitDist  = 360.0 // can stay engaged until this distance
+	engageEnterDist = 500.0 // must be this close to enter engage (within accurateFireRange)
+	engageExitDist  = 600.0 // can stay engaged until this distance
 	stalemateRange  = accurateFireRange * 1.05
 
 	leaderPreferredForwardMin = 72.0
@@ -699,6 +708,25 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		sq.Leader.isLeader = true
 		sq.leaderSucceeding = false
 		candidate.think("command established")
+	}
+
+	// Update flow-field controller with enemy positions for threat costs
+	if sq.flowController != nil {
+		enemies := make([]*Soldier, 0, 32)
+		for _, m := range sq.Members {
+			if m.state == SoldierStateDead {
+				continue
+			}
+			for _, t := range m.blackboard.Threats {
+				// Collect visible threats for flow-field threat cost
+				// Note: This is a simplified approach - in production we'd track actual soldier references
+				if t.IsVisible {
+					// We don't have direct soldier references from threats, so we'll update
+					// the flow controller in the game update loop instead
+				}
+			}
+		}
+		sq.flowController.Update(enemies)
 	}
 
 	// Gather contact info across ALL alive members, not just leader.
@@ -1150,6 +1178,27 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 	// Log intent changes.
 	if sq.Intent != oldIntent {
 		sq.Leader.think(fmt.Sprintf("squad: %s → %s", oldIntent, sq.Intent))
+	}
+
+	// Update flow-field strategic goal based on intent
+	if sq.flowController != nil && sq.Leader != nil {
+		switch sq.Intent {
+		case IntentEngage, IntentAdvance:
+			if hasContact {
+				sq.flowController.SetStrategicGoal(contactX, contactY)
+			} else {
+				sq.flowController.SetStrategicGoal(sq.Leader.endTarget[0], sq.Leader.endTarget[1])
+			}
+		case IntentRegroup:
+			// Regroup toward leader position
+			sq.flowController.SetStrategicGoal(sq.Leader.x, sq.Leader.y)
+		case IntentWithdraw:
+			// Withdraw toward start position
+			sq.flowController.SetStrategicGoal(sq.Leader.startTarget[0], sq.Leader.startTarget[1])
+		case IntentHold:
+			// Hold current position
+			sq.flowController.SetStrategicGoal(sq.Leader.x, sq.Leader.y)
+		}
 	}
 
 	// Compute enemy bearing from squad centroid toward contact.

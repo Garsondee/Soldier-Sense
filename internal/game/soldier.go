@@ -766,6 +766,7 @@ type Soldier struct {
 
 	// World reference for sightline queries.
 	buildings          []rect
+	intel              *IntelStore
 	buildingFootprints []rect
 	tacticalMap        *TacticalMap
 	tileMap            *TileMap
@@ -790,8 +791,10 @@ type Soldier struct {
 	// dashOverwatchTimer: >0 means soldier just dashed and is now overwatch-stopped.
 	dashOverwatchTimer int
 	// boundHoldTicks: consecutive ticks held as non-mover during buddy bounding.
-	// Used to periodically allow micro-reposition so overwatchers don't freeze indefinitely.
 	boundHoldTicks int
+
+	// Flow-field navigation
+	steeringBehavior *SteeringBehavior
 
 	// --- Cover-to-cover bounding ---
 	// boundDestX/Y is the ultimate destination of a multi-bound advance.
@@ -906,6 +909,10 @@ func NewSoldier(id int, x, y float64, team Team, start, end [2]float64, ng *NavG
 	}
 	s.recomputePath()
 	return s
+}
+
+func (s *Soldier) setIntel(intel *IntelStore) {
+	s.intel = intel
 }
 
 // health returns a scalar HP value derived from the body map for backward
@@ -1377,7 +1384,43 @@ func (s *Soldier) Update() {
 			if s.buildingFootprints != nil {
 				footprints = s.buildingFootprints
 			}
+			// Compute a local search-drive signal from intel heatmaps.
+			// High when there is nearby uncertainty/danger but also some friendly-cleared territory.
+			bb.SearchDrive = 0
+			if s.intel != nil {
+				if im := s.intel.For(s.team); im != nil {
+					lx, ly := s.x, s.y
+					unexp := float64(im.Layer(IntelUnexplored).SumInRadius(lx, ly, 220))
+					thr := float64(im.Layer(IntelThreatDensity).SumInRadius(lx, ly, 260))
+					cas := float64(im.Layer(IntelCasualtyDanger).SumInRadius(lx, ly, 260))
+					danger := float64(im.Layer(IntelDangerZone).SumInRadius(lx, ly, 220))
+					safe := float64(im.Layer(IntelSafeTerritory).SumInRadius(lx, ly, 260))
+					open := float64(im.Layer(IntelOpenGround).SampleAt(lx, ly))
+					// Normalize sums by approximate area so the signal is stable across radii.
+					unexp = clamp01(unexp / 85.0)
+					thr = clamp01(thr / 70.0)
+					cas = clamp01(cas / 60.0)
+					danger = clamp01(danger / 55.0)
+					safe = clamp01(safe / 95.0)
+					drive := clamp01(unexp*0.55 + thr*0.55 + cas*0.45 + danger*0.25)
+					// Searching is more meaningful when you have a "home" safe territory nearby.
+					drive *= 0.35 + safe*0.65
+					// Don't encourage searching while currently standing in open ground.
+					drive *= 1.0 - open*0.75
+					bb.SearchDrive = drive
+				}
+			}
 			bx, by, bscore := s.tacticalMap.ScanBestNearby(s.x, s.y, 10, bearing, hasEnemy, claimedIdx, footprints, nil)
+			if s.intel != nil {
+				if im := s.intel.For(s.team); im != nil {
+					danger := float64(im.Layer(IntelDangerZone).SampleAt(bx, by))
+					cas := float64(im.Layer(IntelCasualtyDanger).SampleAt(bx, by))
+					open := float64(im.Layer(IntelOpenGround).SampleAt(bx, by))
+					safe := float64(im.Layer(IntelSafeTerritory).SampleAt(bx, by))
+					// Penalize danger/open/casualty; bonus for safe territory.
+					bscore += safe*0.55 - danger*0.45 - cas*0.35 - open*0.25
+				}
+			}
 			if bscore > bb.PositionDesirability+0.15 {
 				bb.BestNearbyX = bx
 				bb.BestNearbyY = by
@@ -1460,6 +1503,9 @@ func (s *Soldier) Update() {
 				s.think(fmt.Sprintf("goal: %s → %s", s.prevGoal, goal))
 				s.prevGoal = goal
 				s.goalPauseTimer = s.goalSwitchPauseDuration(stress, bb.IncomingFireCount > 0)
+				if goal != GoalSearch {
+					bb.HasSearchTarget = false
+				}
 				// Don't clear FlankComplete on goal switch - let it persist until cooldown expires
 				// or soldier moves significantly. This prevents flank→overwatch→flank loops.
 				if goal != GoalFlank && bb.FlankCompleteCooldown == 0 {
@@ -1661,6 +1707,15 @@ func (s *Soldier) moveToClaimedBuilding(dt float64) bool {
 			s.x, s.y, 14, bearing, hasEnemy,
 			bb.ClaimedBuildingIdx, s.buildingFootprints, nil,
 		)
+		if s.intel != nil {
+			if im := s.intel.For(s.team); im != nil {
+				danger := float64(im.Layer(IntelDangerZone).SampleAt(bx, by))
+				cas := float64(im.Layer(IntelCasualtyDanger).SampleAt(bx, by))
+				open := float64(im.Layer(IntelOpenGround).SampleAt(bx, by))
+				safe := float64(im.Layer(IntelSafeTerritory).SampleAt(bx, by))
+				bscore += safe*0.55 - danger*0.45 - cas*0.35 - open*0.25
+			}
+		}
 		if bscore > -0.30 {
 			targetX, targetY = bx, by
 		}
@@ -1913,6 +1968,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 
 		// --- Buddy bounding: overwatchers hold position, movers advance ---
+		// Only apply bounding during MoveToContact goal - other goals need free movement.
 		if !bb.BoundMover {
 			s.boundHoldTicks++
 			leaderDist := 0.0
@@ -2006,7 +2062,7 @@ func (s *Soldier) executeGoal(dt float64) {
 			s.requestStance(StanceStanding, false)
 		}
 		s.state = SoldierStateMoving
-		s.moveAlongPath(dt)
+		s.moveWithFlowField(dt)
 
 	case GoalHoldPosition:
 		if s.state != SoldierStateIdle {
@@ -2014,12 +2070,6 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 		s.requestStance(StanceCrouching, false)
 		s.state = SoldierStateIdle
-		s.profile.Physical.AccumulateFatigue(0, dt)
-		if s.blackboard.VisibleThreatCount() > 0 {
-			s.faceNearestThreat()
-		}
-
-	case GoalMaintainFormation:
 		if forcedCrawl {
 			s.state = SoldierStateCover
 			s.seekCoverFromThreat(dt)
@@ -2027,7 +2077,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 		s.requestStance(StanceStanding, false)
 		s.state = SoldierStateMoving
-		s.moveAlongPath(dt)
+		s.moveWithFlowField(dt)
 
 	case GoalAdvance:
 		if forcedCrawl {
@@ -2037,7 +2087,7 @@ func (s *Soldier) executeGoal(dt float64) {
 		}
 		s.requestStance(StanceStanding, false)
 		s.state = SoldierStateMoving
-		s.moveAlongPath(dt)
+		s.moveWithFlowField(dt)
 
 	case GoalPeek:
 		s.requestStance(StanceCrouching, false)
@@ -2045,7 +2095,153 @@ func (s *Soldier) executeGoal(dt float64) {
 
 	case GoalHelpCasualty:
 		s.executeHelpCasualty(dt)
+
+	case GoalSearch:
+		s.executeSearch(dt)
 	}
+}
+
+func (s *Soldier) executeSearch(dt float64) {
+	bb := &s.blackboard
+
+	// Abort immediately if contact returns.
+	if bb.VisibleThreatCount() > 0 || bb.SquadHasContact || bb.HeardGunfire || bb.IncomingFireCount > 0 || bb.IsSuppressed() {
+		bb.HasSearchTarget = false
+		bb.ShatterEvent = true
+		s.state = SoldierStateIdle
+		s.faceNearestThreatOrContact()
+		return
+	}
+	// Too stressed: don't search.
+	if s.profile.Psych.EffectiveFear() >= 0.62 || bb.SquadStress >= 0.65 || bb.SquadBroken {
+		bb.HasSearchTarget = false
+		s.state = SoldierStateIdle
+		s.profile.Physical.AccumulateFatigue(0, dt)
+		return
+	}
+	if s.intel == nil {
+		bb.HasSearchTarget = false
+		s.state = SoldierStateIdle
+		s.profile.Physical.AccumulateFatigue(0, dt)
+		return
+	}
+	im := s.intel.For(s.team)
+	if im == nil {
+		bb.HasSearchTarget = false
+		s.state = SoldierStateIdle
+		s.profile.Physical.AccumulateFatigue(0, dt)
+		return
+	}
+
+	// Acquire or refresh a search waypoint.
+	chooseTarget := func() {
+		bestScore := -999.0
+		bestX, bestY := 0.0, 0.0
+		lx, ly := s.x, s.y
+		// Evaluate candidate cells around the soldier.
+		radiusCells := 18
+		cx, cy := WorldToCell(lx, ly)
+		for dy := -radiusCells; dy <= radiusCells; dy++ {
+			for dx := -radiusCells; dx <= radiusCells; dx++ {
+				nx, ny := cx+dx, cy+dy
+				wx, wy := CellToWorld(nx, ny)
+				dxw := wx - lx
+				dyw := wy - ly
+				d2 := dxw*dxw + dyw*dyw
+				if d2 < float64(cellSize*cellSize)*6 {
+					continue
+				}
+				if d2 > 520*520 {
+					continue
+				}
+
+				// Prefer nearby dangerous/uncertain areas but approach from safe territory.
+				unexp := float64(im.Layer(IntelUnexplored).At(ny, nx))
+				thr := float64(im.Layer(IntelThreatDensity).At(ny, nx))
+				cas := float64(im.Layer(IntelCasualtyDanger).At(ny, nx))
+				safe := float64(im.Layer(IntelSafeTerritory).At(ny, nx))
+				open := float64(im.Layer(IntelOpenGround).At(ny, nx))
+				danger := float64(im.Layer(IntelDangerZone).At(ny, nx))
+
+				// Skip very open high-risk cells.
+				if open > 0.90 {
+					continue
+				}
+
+				d := math.Sqrt(d2)
+				score := 0.0
+				// Search value: unexplored + threat density + casualties.
+				score += unexp*0.75 + thr*0.95 + cas*0.90
+				// Approach bias: some safe territory nearby is desirable.
+				score += safe * 0.35
+				// Penalize open ground + direct danger zones.
+				score -= open*0.55 + danger*0.85
+				// Distance shaping: prefer not-too-far.
+				score -= d * 0.0011
+				// If this cell is still unexplored (fog), it is a valid candidate.
+				// If it is explored, require some hazard value to justify searching it.
+				if unexp <= 0.05 && thr <= 0.10 && cas <= 0.10 {
+					score -= 0.45
+				}
+
+				// Tactical desirability helps avoid selecting doorways/chokepoints.
+				if s.tacticalMap != nil {
+					score += s.tacticalMap.DesirabilityAt(wx, wy) * 0.12
+					if s.tacticalMap.IsDoorway(wx, wy) {
+						score -= 0.45
+					}
+				}
+
+				if score > bestScore {
+					bestScore = score
+					bestX, bestY = wx, wy
+				}
+			}
+		}
+		if bestScore > 0.35 {
+			bb.SearchTargetX = bestX
+			bb.SearchTargetY = bestY
+			bb.HasSearchTarget = true
+		} else {
+			bb.HasSearchTarget = false
+		}
+	}
+
+	if bb.HasSearchTarget {
+		// If we've basically arrived or drifted, pick a new one.
+		if math.Hypot(bb.SearchTargetX-s.x, bb.SearchTargetY-s.y) < float64(cellSize)*2.0 {
+			bb.HasSearchTarget = false
+		}
+	}
+	if !bb.HasSearchTarget {
+		chooseTarget()
+	}
+	if !bb.HasSearchTarget {
+		s.state = SoldierStateIdle
+		s.profile.Physical.AccumulateFatigue(0, dt)
+		return
+	}
+
+	// Navigate toward the search target.
+	targetX, targetY := bb.SearchTargetX, bb.SearchTargetY
+	drift := math.Hypot(targetX-s.slotTargetX, targetY-s.slotTargetY)
+	if s.path == nil || s.pathIndex >= len(s.path) || drift > contactRepathDist {
+		newPath := s.navGrid.FindPath(s.x, s.y, targetX, targetY)
+		if newPath == nil {
+			bb.HasSearchTarget = false
+			s.state = SoldierStateIdle
+			return
+		}
+		s.path = newPath
+		s.pathIndex = 0
+		s.slotTargetX = targetX
+		s.slotTargetY = targetY
+	}
+
+	// Move cautiously.
+	s.requestStance(StanceCrouching, false)
+	s.state = SoldierStateMoving
+	s.moveAlongPath(dt)
 }
 
 // faceNearestThreat turns the soldier toward the closest visible threat.
@@ -2245,6 +2441,40 @@ func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
 	s.recoveryNoPathStreak++
 	s.recoveryRouteFailEMA = emaBlend(s.recoveryRouteFailEMA, 1, 0.30)
 	s.recoveryStallEMA = emaBlend(s.recoveryStallEMA, 1, 0.25)
+
+	// Extreme pathfinding failure: if we've failed to find a path for 200+ consecutive
+	// attempts, abandon pathfinding entirely and move directly toward the target.
+	// This prevents soldiers from becoming permanently stuck due to navgrid issues.
+	if s.recoveryNoPathStreak >= 200 {
+		distToTarget := math.Hypot(targetX-s.x, targetY-s.y)
+		if distToTarget > float64(cellSize) {
+			s.state = SoldierStateMoving
+			s.requestStance(StanceCrouching, false)
+			speed := s.profile.EffectiveSpeed(soldierSpeed) * s.body.MobilityMul()
+			if s.profile.Stance == StanceProne && bb.IsSuppressed() {
+				crawl := pinnedCrawlSpeedMul * (0.75 + s.profile.Skills.Discipline*0.25)
+				speed *= crawl
+			}
+			dx := targetX - s.x
+			dy := targetY - s.y
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist > 1e-6 {
+				targetHeading := math.Atan2(dy, dx)
+				s.vision.UpdateHeading(targetHeading, turnRate)
+				moveX := (dx / dist) * speed
+				moveY := (dy / dist) * speed
+				s.x += moveX
+				s.y += moveY
+				s.profile.Physical.AccumulateFatigue(speed/soldierSpeed, dt)
+			}
+			if s.recoveryNoPathStreak%60 == 0 {
+				s.think("EXTREME PATHFINDING FAILURE - direct movement")
+			}
+			return
+		} else {
+			s.recoveryNoPathStreak = 0
+		}
+	}
 
 	switch action {
 	case RecoveryActionDirect:

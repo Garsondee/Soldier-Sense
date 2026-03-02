@@ -11,6 +11,9 @@ const (
 	IntelThreatDensity                        // accumulated contact heat — persistent hot zones
 	IntelFriendlyPresence                     // where friendlies currently are
 	IntelDangerZone                           // cells where friendlies are receiving fire
+	IntelCasualtyDanger                       // where friendlies were injured/killed (persistent hazard)
+	IntelOpenGround                           // open ground with poor cover (structural hazard)
+	IntelSafeTerritory                        // explored, low-threat cells representing team "territory"
 	IntelUnexplored                           // cells no friendly has ever seen (cleared on sight)
 	intelMapCount                             // sentinel — total layer count
 )
@@ -28,6 +31,12 @@ func IntelMapKindName(k IntelMapKind) string {
 		return "Friendly"
 	case IntelDangerZone:
 		return "DangerZone"
+	case IntelCasualtyDanger:
+		return "Casualty"
+	case IntelOpenGround:
+		return "OpenGround"
+	case IntelSafeTerritory:
+		return "SafeTerritory"
 	case IntelUnexplored:
 		return "Unexplored"
 	default:
@@ -38,18 +47,24 @@ func IntelMapKindName(k IntelMapKind) string {
 // heatDecayRates are the per-tick decay rates for each layer (subtracted each tick).
 // At 60 TPS:
 //
-//	IntelContact          0.05  → ~1.2s to zero from 1.0
-//	IntelRecentContact    0.003 → ~30s
-//	IntelThreatDensity    0.0005→ ~3.5 min
-//	IntelFriendlyPresence 0.10  → ~0.7s
-//	IntelDangerZone       0.002 → ~45s
-//	IntelUnexplored       0.0   → never (cleared by sight)
+//	IntelContact          0.05   → ~1.2s to zero from 1.0
+//	IntelRecentContact    0.003  → ~30s
+//	IntelThreatDensity    0.0005 → ~3.5 min
+//	IntelFriendlyPresence 0.10   → ~0.7s
+//	IntelDangerZone       0.002  → ~45s
+//	IntelCasualtyDanger   0.0008 → ~3.5 min
+//	IntelOpenGround       0.0    → structural (no decay)
+//	IntelSafeTerritory    0.0    → derived (no decay)
+//	IntelUnexplored       0.0    → never (cleared by sight)
 var heatDecayRates = [intelMapCount]float32{
 	0.05,
 	0.003,
 	0.0005,
 	0.10,
 	0.002,
+	0.0008,
+	0.0,
+	0.0,
 	0.0,
 }
 
@@ -308,11 +323,12 @@ func (m *IntelMap) AccumulateThreatDensity() {
 
 // IntelStore owns all intelligence maps for all teams.
 type IntelStore struct {
-	maps map[Team]*IntelMap
-	rows int
-	cols int
-	mapW int // playfield width in pixels
-	mapH int // playfield height in pixels
+	maps    map[Team]*IntelMap
+	rows    int
+	cols    int
+	mapW    int // playfield width in pixels
+	mapH    int // playfield height in pixels
+	tileMap *TileMap
 }
 
 // NewIntelStore creates maps for TeamRed and TeamBlue sized to the given
@@ -330,6 +346,32 @@ func NewIntelStore(mapW, mapH int) *IntelStore {
 	s.maps[TeamRed] = newIntelMap(TeamRed, rows, cols)
 	s.maps[TeamBlue] = newIntelMap(TeamBlue, rows, cols)
 	return s
+}
+
+// SetTileMap provides the authoritative terrain map. When set, IntelOpenGround
+// is (re)computed for all teams.
+func (s *IntelStore) SetTileMap(tm *TileMap) {
+	s.tileMap = tm
+	s.recomputeOpenGround()
+}
+
+func (s *IntelStore) recomputeOpenGround() {
+	if s.tileMap == nil {
+		return
+	}
+	// OpenGround is structural and identical for both teams.
+	for _, im := range s.maps {
+		layer := im.Layer(IntelOpenGround)
+		for row := 0; row < s.rows; row++ {
+			for col := 0; col < s.cols; col++ {
+				cover := s.tileMap.CoverValue(col, row)
+				// High value when cover is low. Threshold tuned so normal grass is "open"
+				// but tall grass/scrub/rubble/fortifications reduce the open-ground penalty.
+				v := clamp01((0.10 - cover) / 0.10)
+				layer.Set(row, col, float32(v))
+			}
+		}
+	}
 }
 
 // For returns the IntelMap for the given team. Returns nil for unknown teams.
@@ -361,6 +403,31 @@ func (s *IntelStore) Update(redSoldiers, blueSoldiers []*Soldier, buildings []re
 	// Accumulate derived ThreatDensity from contact heat.
 	for _, m := range s.maps {
 		m.AccumulateThreatDensity()
+		s.computeSafeTerritory(m)
+	}
+}
+
+func (s *IntelStore) computeSafeTerritory(m *IntelMap) {
+	if m == nil {
+		return
+	}
+	safe := m.Layer(IntelSafeTerritory)
+	unexp := m.Layer(IntelUnexplored)
+	contact := m.Layer(IntelContact)
+	recent := m.Layer(IntelRecentContact)
+	density := m.Layer(IntelThreatDensity)
+
+	for i := range safe.cells {
+		explored := 1.0 - float64(unexp.cells[i])
+		if explored <= 0 {
+			safe.cells[i] = 0
+			continue
+		}
+		// Combine enemy heat sources into a "threat" scalar.
+		thr := float64(contact.cells[i])*1.00 + float64(recent.cells[i])*0.85 + float64(density.cells[i])*0.65
+		thr = clamp01(thr)
+		// Safe territory is explored and low threat.
+		safe.cells[i] = float32(clamp01(explored * (1.0 - thr)))
 	}
 }
 
@@ -371,6 +438,12 @@ func (s *IntelStore) writeSoldiers(soldiers, _ []*Soldier, _ []rect) {
 		return
 	}
 	team := soldiers[0].team
+	for _, sol := range soldiers {
+		if sol != nil {
+			team = sol.team
+			break
+		}
+	}
 	m := s.maps[team]
 	if m == nil {
 		return
@@ -387,6 +460,13 @@ func (s *IntelStore) writeSoldiers(soldiers, _ []*Soldier, _ []rect) {
 		// Danger zone — soldier is being shot at.
 		if sol.blackboard.IncomingFireCount > 0 {
 			m.WriteDangerZone(sol.x, sol.y, sol.blackboard.IncomingFireCount)
+		}
+
+		// Casualty danger — injured/incapacitated friendlies mark hazardous areas
+		// that should be approached cautiously (and later searched).
+		if sol.state == SoldierStateWoundedAmbulatory || sol.state == SoldierStateWoundedNonAmbulatory || sol.state == SoldierStateUnconscious {
+			col, row := WorldToCell(sol.x, sol.y)
+			m.Layer(IntelCasualtyDanger).Add(row, col, 0.9)
 		}
 
 		// Contact heat — from live vision contacts.

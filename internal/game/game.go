@@ -46,6 +46,9 @@ var overlayColors = [intelMapCount]color.RGBA{
 	IntelThreatDensity:    {R: 200, G: 0, B: 200, A: 120},  // purple
 	IntelFriendlyPresence: {R: 30, G: 160, B: 255, A: 130}, // sky blue
 	IntelDangerZone:       {R: 255, G: 220, B: 0, A: 140},  // yellow
+	IntelCasualtyDanger:   {R: 255, G: 110, B: 0, A: 140},  // amber
+	IntelOpenGround:       {R: 255, G: 255, B: 255, A: 90}, // white
+	IntelSafeTerritory:    {R: 0, G: 220, B: 90, A: 120},   // green
 	IntelUnexplored:       {R: 20, G: 20, B: 20, A: 160},   // dark grey
 }
 
@@ -274,6 +277,10 @@ type Game struct {
 	simSpeed  float64 // multiplier: 0=paused, 0.5, 1, 2, 4
 	tickAccum float64 // fractional tick accumulator for sub-1x speeds
 
+	// Frame-rate independent interpolation for smooth visuals.
+	lastUpdateTime time.Time // timestamp of last Update call
+	interpolation  float64   // sub-tick interpolation [0, 1) for smooth rendering
+
 	// ESC menu state.
 	menuOpen        bool
 	menuSelection   int
@@ -377,6 +384,13 @@ func New() *Game {
 	g.randomiseProfiles()
 	g.combat = NewCombatManager(time.Now().UnixNano() + 7777)
 	g.intel = NewIntelStore(g.gameWidth, g.gameHeight)
+	g.intel.SetTileMap(g.tileMap)
+	for _, s := range g.soldiers {
+		s.setIntel(g.intel)
+	}
+	for _, s := range g.opfor {
+		s.setIntel(g.intel)
+	}
 	g.visionBuf = ebiten.NewImage(battleW, battleH)
 	g.worldBuf = ebiten.NewImage(battleW, battleH)
 	// HUD buffer: 1/hudScale of screen so it renders crisply when scaled up.
@@ -1012,6 +1026,7 @@ func (g *Game) initSquads() {
 		sq := NewSquad(len(g.squads), TeamRed, g.soldiers[i:end])
 		sq.buildingFootprints = g.buildingFootprints
 		sq.buildingQualities = g.buildingQualities
+		sq.InitializeFlowField(g.navGrid, g.tacticalMap)
 		g.squads = append(g.squads, sq)
 	}
 	for i := 0; i < len(g.opfor); i += sqSz {
@@ -1022,7 +1037,16 @@ func (g *Game) initSquads() {
 		sq := NewSquad(len(g.squads), TeamBlue, g.opfor[i:end])
 		sq.buildingFootprints = g.buildingFootprints
 		sq.buildingQualities = g.buildingQualities
+		sq.InitializeFlowField(g.navGrid, g.tacticalMap)
 		g.squads = append(g.squads, sq)
+	}
+
+	// Initialize steering behaviors for all soldiers
+	for _, s := range g.soldiers {
+		s.steeringBehavior = NewSteeringBehavior(s)
+	}
+	for _, s := range g.opfor {
+		s.steeringBehavior = NewSteeringBehavior(s)
 	}
 }
 
@@ -1065,6 +1089,14 @@ func (g *Game) Update() error {
 		g.tickAccum -= 1.0
 		g.simTick()
 	}
+
+	// Update interpolation for smooth sub-tick rendering.
+	// tickAccum represents progress toward the next tick [0, 1).
+	g.interpolation = g.tickAccum
+
+	// Update tracer fractional ages for smooth rendering every frame.
+	g.combat.UpdateTracerInterpolation(g.interpolation)
+
 	return nil
 }
 
@@ -1265,10 +1297,11 @@ func (g *Game) handleInput() {
 		return
 	}
 
-	// Layer toggles for active team: 1-6.
+	// Layer toggles for active team: 1-9.
 	layerKeys := [intelMapCount]ebiten.Key{
 		ebiten.Key1, ebiten.Key2, ebiten.Key3,
 		ebiten.Key4, ebiten.Key5, ebiten.Key6,
+		ebiten.Key7, ebiten.Key8, ebiten.Key9,
 	}
 	for i, k := range layerKeys {
 		currentKeys[k] = ebiten.IsKeyPressed(k)
@@ -1847,10 +1880,6 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	// Cover objects.
 	g.drawCoverObjects(screen, 0, 0)
 
-	// Vision cones (rendered to offscreen buffer then composited; world-space).
-	g.drawVisionConesBuffered(screen, g.soldiers, color.RGBA{R: 180, G: 40, B: 30, A: 255}, 0.06)
-	g.drawVisionConesBuffered(screen, g.opfor, color.RGBA{R: 30, G: 60, B: 180, A: 255}, 0.06)
-
 	for _, s := range g.soldiers {
 		s.Draw(screen, 0, 0)
 	}
@@ -1866,9 +1895,6 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 
 	// Active officer orders (leader-issued command markers).
 	g.drawOfficerOrders(screen)
-
-	// Squad intent labels near leaders.
-	g.drawSquadIntentLabels(screen)
 
 	// Selection ring for inspector target (world-space).
 	if g.inspector.selected != nil {
@@ -2342,7 +2368,7 @@ func (g *Game) drawSpottedIndicators(screen *ebiten.Image, offX, offY int) {
 
 func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) {
 	const segments = 22
-	const baseOpacity = 0.25 // requested: 25% opacity
+	const baseOpacity = 0.08 // very faint/transparent
 	for _, sq := range g.squads {
 		sq.pruneRadioVisualEvents(g.tick)
 		for _, ev := range sq.radioVisualEvents {

@@ -375,6 +375,61 @@ func stopProvidingAid(provider *Soldier, casualty *Soldier) {
 	}
 }
 
+func casualtyNeedsAid(c *Soldier) bool {
+	if c == nil {
+		return false
+	}
+	if c.state == SoldierStateDead {
+		return false
+	}
+	if !c.body.IsInjured() {
+		return false
+	}
+	// Unconscious soldiers always need aid (monitoring / airway management).
+	if c.state == SoldierStateUnconscious {
+		return true
+	}
+	// Otherwise, only need aid if there are untreated wounds.
+	return c.body.HasUntreatedWounds()
+}
+
+func stopAllProvidersIfNoAidNeeded(casualty *Soldier) {
+	if casualty == nil {
+		return
+	}
+	if casualtyNeedsAid(casualty) {
+		return
+	}
+	for i := len(casualty.casualty.Providers) - 1; i >= 0; i-- {
+		p := casualty.casualty.Providers[i]
+		stopProvidingAid(p, casualty)
+		if p != nil {
+			p.think("ending aid - casualty stabilized")
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Casualty Drag
 // ---------------------------------------------------------------------------
+
+func (s *Soldier) startDraggingCasualty(casualty *Soldier, targetX, targetY float64) {
+	if s == nil || casualty == nil {
+		return
+	}
+	if casualty.casualty.BeingDragged {
+		return
+	}
+	casualty.casualty.BeingDragged = true
+	casualty.casualty.Dragger = s
+	casualty.casualty.DragTargetX = targetX
+	casualty.casualty.DragTargetY = targetY
+}
+
+func stopDraggingCasualty(casualty *Soldier) {
+	if casualty == nil {
+		return
+	}
+	casualty.casualty.BeingDragged = false
+	casualty.casualty.Dragger = nil
+}

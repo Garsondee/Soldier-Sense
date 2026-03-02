@@ -15,6 +15,65 @@ const (
 	stalemateMinFrictionPerSoldier = 2.0
 )
 
+type soldierPerformance struct {
+	label                string
+	team                 game.Team
+	startX               float64
+	startY               float64
+	lastX                float64
+	lastY                float64
+	totalTicks           int
+	stationaryTicks      int
+	movingTicks          int
+	sawEnemyTicks        int
+	inRangeTicks         int
+	farFromLeaderTicks   int
+	maxDistFromLeader    float64
+	neverSawEnemy        bool
+	neverInRange         bool
+	immobile             bool
+	excessivelySeparated bool
+	immobilityPct        float64
+	separationPct        float64
+	positionSamples      int
+
+	// Diagnostic information
+	goalChanges      []goalChange
+	stateChanges     []stateChange
+	stalledEvents    []stalledEvent
+	detachedEvents   []detachedEvent
+	proximityPartner string
+	proximityPct     float64
+	pathFailures     int
+	boundHoldTicks   int
+}
+
+type goalChange struct {
+	tick     int
+	fromGoal string
+	toGoal   string
+}
+
+type stateChange struct {
+	tick      int
+	fromState string
+	toState   string
+}
+
+type stalledEvent struct {
+	tick   int
+	goal   string
+	intent string
+	moved  float64
+}
+
+type detachedEvent struct {
+	tick       int
+	leaderDist float64
+	goal       string
+	intent     string
+}
+
 type runStats struct {
 	runIndex int
 	seed     int64
@@ -77,6 +136,229 @@ type runStats struct {
 
 	outcome       game.BattleOutcome
 	outcomeReason game.BattleOutcomeReason
+
+	soldierPerf         []soldierPerformance
+	problematicSoldiers []soldierPerformance
+}
+
+const (
+	immobilityThreshold        = 0.50
+	separationThreshold        = 0.30
+	maxLeaderDistance          = 300.0
+	maxFireRange               = 800.0
+	positionChangeThreshold    = 5.0
+	effectivenessStalledTicks  = 180
+	effectivenessDetachedTicks = 180
+)
+
+func analyzeSoldierPerformance(entries []game.SimLogEntry, grades []game.SoldierGrade, ticks int) []soldierPerformance {
+	perfMap := make(map[string]*soldierPerformance)
+
+	for _, g := range grades {
+		perfMap[g.Label] = &soldierPerformance{
+			label:      g.Label,
+			team:       g.Team,
+			totalTicks: ticks,
+		}
+	}
+
+	stalledByLabel := make(map[string]int)
+	detachedByLabel := make(map[string]int)
+	contactByLabel := make(map[string]int)
+	prevGoal := make(map[string]string)
+	prevState := make(map[string]string)
+
+	for _, e := range entries {
+		perf, ok := perfMap[e.Soldier]
+		if !ok {
+			continue
+		}
+
+		switch e.Category {
+		case "effectiveness":
+			if e.Key == "stalled_in_combat" {
+				stalledByLabel[e.Soldier]++
+				// Parse stalled event details
+				goal := extractField(e.Value, "goal=")
+				intent := extractField(e.Value, "intent=")
+				moved := extractFloatField(e.Value, "moved=")
+				perf.stalledEvents = append(perf.stalledEvents, stalledEvent{
+					tick:   e.Tick,
+					goal:   goal,
+					intent: intent,
+					moved:  moved,
+				})
+			} else if e.Key == "detached_from_engagement" {
+				detachedByLabel[e.Soldier]++
+				goal := extractField(e.Value, "goal=")
+				intent := extractField(e.Value, "intent=")
+				leaderDist := extractFloatField(e.Value, "leader_dist=")
+				perf.detachedEvents = append(perf.detachedEvents, detachedEvent{
+					tick:       e.Tick,
+					leaderDist: leaderDist,
+					goal:       goal,
+					intent:     intent,
+				})
+			}
+		case "vision":
+			if e.Key == "contact_new" {
+				contactByLabel[e.Soldier]++
+				perf.sawEnemyTicks++
+			}
+		case "goal":
+			if e.Key == "change" {
+				parts := strings.Split(e.Value, " → ")
+				if len(parts) == 2 {
+					from := strings.TrimSpace(parts[0])
+					to := strings.TrimSpace(parts[1])
+					if prev, exists := prevGoal[e.Soldier]; exists && prev != from {
+						from = prev
+					}
+					perf.goalChanges = append(perf.goalChanges, goalChange{
+						tick:     e.Tick,
+						fromGoal: from,
+						toGoal:   to,
+					})
+					prevGoal[e.Soldier] = to
+				}
+			}
+		case "state":
+			if e.Key == "change" {
+				parts := strings.Split(e.Value, " → ")
+				if len(parts) == 2 {
+					from := strings.TrimSpace(parts[0])
+					to := strings.TrimSpace(parts[1])
+					if prev, exists := prevState[e.Soldier]; exists && prev != from {
+						from = prev
+					}
+					perf.stateChanges = append(perf.stateChanges, stateChange{
+						tick:      e.Tick,
+						fromState: from,
+						toState:   to,
+					})
+					prevState[e.Soldier] = to
+				}
+			}
+		}
+	}
+
+	// Analyze proximity patterns
+	analyzeProximity(entries, perfMap, ticks)
+
+	result := make([]soldierPerformance, 0, len(perfMap))
+	for label, perf := range perfMap {
+		stalledEvents := stalledByLabel[label]
+		detachedEvents := detachedByLabel[label]
+		contactEvents := contactByLabel[label]
+
+		perf.stationaryTicks = stalledEvents * effectivenessStalledTicks
+		perf.farFromLeaderTicks = detachedEvents * effectivenessDetachedTicks
+
+		if perf.totalTicks > 0 {
+			perf.immobilityPct = float64(perf.stationaryTicks) / float64(perf.totalTicks) * 100
+			perf.separationPct = float64(perf.farFromLeaderTicks) / float64(perf.totalTicks) * 100
+		}
+
+		perf.immobile = perf.immobilityPct >= immobilityThreshold*100
+		perf.neverSawEnemy = contactEvents == 0
+		perf.neverInRange = contactEvents == 0
+		perf.excessivelySeparated = perf.separationPct >= separationThreshold*100
+
+		result = append(result, *perf)
+	}
+
+	return result
+}
+
+func extractField(value, prefix string) string {
+	idx := strings.Index(value, prefix)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(prefix)
+	end := strings.IndexAny(value[start:], " \t")
+	if end < 0 {
+		return value[start:]
+	}
+	return value[start : start+end]
+}
+
+func extractFloatField(value, prefix string) float64 {
+	s := extractField(value, prefix)
+	if s == "" {
+		return 0
+	}
+	var f float64
+	fmt.Sscanf(s, "%f", &f)
+	return f
+}
+
+func analyzeProximity(entries []game.SimLogEntry, perfMap map[string]*soldierPerformance, ticks int) {
+	// Track which soldiers are frequently near each other during stalled periods
+	// This helps identify soldiers bouncing off each other
+	type proximityKey struct {
+		soldier1 string
+		soldier2 string
+	}
+	proximityCount := make(map[proximityKey]int)
+
+	// For now, we'll use stalled events as a proxy for proximity issues
+	// In a full implementation, we'd track actual position data
+	for label, perf := range perfMap {
+		if len(perf.stalledEvents) == 0 {
+			continue
+		}
+
+		// Check if this soldier's stalled events coincide with another soldier's
+		for otherLabel, otherPerf := range perfMap {
+			if label == otherLabel || perf.team != otherPerf.team {
+				continue
+			}
+
+			// Count overlapping stalled periods
+			overlap := 0
+			for _, se := range perf.stalledEvents {
+				for _, ose := range otherPerf.stalledEvents {
+					if abs(se.tick-ose.tick) < 60 { // Within 1 second
+						overlap++
+					}
+				}
+			}
+
+			if overlap > 0 {
+				key := proximityKey{soldier1: label, soldier2: otherLabel}
+				if label > otherLabel {
+					key = proximityKey{soldier1: otherLabel, soldier2: label}
+				}
+				proximityCount[key] += overlap
+			}
+		}
+	}
+
+	// Assign proximity partners to soldiers
+	for key, count := range proximityCount {
+		perf1 := perfMap[key.soldier1]
+		perf2 := perfMap[key.soldier2]
+
+		pct1 := float64(count) / float64(len(perf1.stalledEvents)) * 100
+		pct2 := float64(count) / float64(len(perf2.stalledEvents)) * 100
+
+		if pct1 > 50 && pct1 > perf1.proximityPct {
+			perf1.proximityPartner = key.soldier2
+			perf1.proximityPct = pct1
+		}
+		if pct2 > 50 && pct2 > perf2.proximityPct {
+			perf2.proximityPartner = key.soldier1
+			perf2.proximityPct = pct2
+		}
+	}
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func main() {
@@ -286,6 +568,14 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 	grades := ts.SoldierGrades()
 	redTotal, blueTotal, redSurvivors, blueSurvivors := teamSurvivalCounts(grades)
 
+	soldierPerf := analyzeSoldierPerformance(entries, grades, ticks)
+	var problematicSoldiers []soldierPerformance
+	for _, perf := range soldierPerf {
+		if perf.immobile || perf.neverSawEnemy || perf.neverInRange || perf.excessivelySeparated {
+			problematicSoldiers = append(problematicSoldiers, perf)
+		}
+	}
+
 	rs := runStats{
 		runIndex:             runIndex,
 		seed:                 seed,
@@ -332,6 +622,8 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		blueTotal:            blueTotal,
 		redSurvivors:         redSurvivors,
 		blueSurvivors:        blueSurvivors,
+		soldierPerf:          soldierPerf,
+		problematicSoldiers:  problematicSoldiers,
 		setupDur:             setupDur,
 		simDur:               simDur,
 	}
@@ -368,6 +660,170 @@ func firstTick(entries []game.SimLogEntry, category, key, contains string) int {
 		}
 	}
 	return -1
+}
+
+func printProblematicSoldiers(rs runStats) {
+	if len(rs.problematicSoldiers) == 0 {
+		return
+	}
+
+	fmt.Printf("\n=== PROBLEMATIC SOLDIERS (Run %d, seed=%d) ===\n", rs.runIndex, rs.seed)
+	fmt.Printf("Found %d soldiers with significant performance issues:\n\n", len(rs.problematicSoldiers))
+
+	for i, perf := range rs.problematicSoldiers {
+		issues := []string{}
+		if perf.immobile {
+			issues = append(issues, fmt.Sprintf("IMMOBILE(%.1f%%)", perf.immobilityPct))
+		}
+		if perf.neverSawEnemy {
+			issues = append(issues, "NEVER_SAW_ENEMY")
+		}
+		if perf.neverInRange {
+			issues = append(issues, "NEVER_IN_RANGE")
+		}
+		if perf.excessivelySeparated {
+			issues = append(issues, fmt.Sprintf("SEPARATED(%.1f%%)", perf.separationPct))
+		}
+
+		fmt.Printf("[%d] %s [%s] - %s\n", i+1, perf.label, teamLabel(perf.team), strings.Join(issues, ", "))
+
+		// Basic metrics
+		fmt.Printf("  Engagement: saw_enemy=%dt in_range=%dt stationary=%dt (%.1f%%) far_from_leader=%dt (%.1f%%)\n",
+			perf.sawEnemyTicks, perf.inRangeTicks, perf.stationaryTicks, perf.immobilityPct,
+			perf.farFromLeaderTicks, perf.separationPct)
+
+		// Proximity analysis - soldiers stuck together
+		if perf.proximityPartner != "" {
+			fmt.Printf("  PROXIMITY ISSUE: Spent %.1f%% of stalled time near %s (possible collision/bouncing)\n",
+				perf.proximityPct, perf.proximityPartner)
+		}
+
+		// Goal pattern analysis
+		if len(perf.goalChanges) > 0 {
+			goalFreq := make(map[string]int)
+			for _, gc := range perf.goalChanges {
+				goalFreq[gc.toGoal]++
+			}
+
+			// Find most common goals
+			topGoals := []string{}
+			for goal, count := range goalFreq {
+				if count > 2 || len(goalFreq) <= 3 {
+					topGoals = append(topGoals, fmt.Sprintf("%s(%d)", goal, count))
+				}
+			}
+
+			if len(topGoals) > 0 {
+				fmt.Printf("  Goal pattern: %d changes, frequent: %s\n", len(perf.goalChanges), strings.Join(topGoals, ", "))
+			}
+
+			// Detect thrashing (rapid goal changes)
+			if len(perf.goalChanges) > 10 {
+				thrashCount := 0
+				for j := 1; j < len(perf.goalChanges); j++ {
+					if perf.goalChanges[j].tick-perf.goalChanges[j-1].tick < 30 {
+						thrashCount++
+					}
+				}
+				if thrashCount > 5 {
+					fmt.Printf("  GOAL THRASHING: %d rapid goal changes detected (possible decision loop)\n", thrashCount)
+				}
+			}
+		}
+
+		// State pattern analysis
+		if len(perf.stateChanges) > 0 {
+			stateFreq := make(map[string]int)
+			for _, sc := range perf.stateChanges {
+				stateFreq[sc.toState]++
+			}
+
+			// Detect idle/cover loops
+			idleCount := stateFreq["idle"]
+			coverCount := stateFreq["cover"]
+			if idleCount > 5 && coverCount > 5 {
+				fmt.Printf("  IDLE/COVER LOOP: %d idle, %d cover transitions (possible stuck behavior)\n", idleCount, coverCount)
+			}
+		}
+
+		// Stalled event analysis
+		if len(perf.stalledEvents) > 0 {
+			fmt.Printf("  Stalled events: %d occurrences\n", len(perf.stalledEvents))
+
+			// Sample first, middle, and last stalled events
+			samples := []stalledEvent{}
+			if len(perf.stalledEvents) <= 3 {
+				samples = perf.stalledEvents
+			} else {
+				samples = append(samples, perf.stalledEvents[0])
+				samples = append(samples, perf.stalledEvents[len(perf.stalledEvents)/2])
+				samples = append(samples, perf.stalledEvents[len(perf.stalledEvents)-1])
+			}
+
+			for _, se := range samples {
+				fmt.Printf("    tick=%d goal=%s intent=%s moved=%.2f\n", se.tick, se.goal, se.intent, se.moved)
+			}
+
+			if len(perf.stalledEvents) > 3 {
+				fmt.Printf("    ... (%d more stalled events)\n", len(perf.stalledEvents)-3)
+			}
+		}
+
+		// Detached event analysis
+		if len(perf.detachedEvents) > 0 {
+			fmt.Printf("  Detached events: %d occurrences\n", len(perf.detachedEvents))
+
+			// Sample detached events
+			samples := []detachedEvent{}
+			if len(perf.detachedEvents) <= 3 {
+				samples = perf.detachedEvents
+			} else {
+				samples = append(samples, perf.detachedEvents[0])
+				samples = append(samples, perf.detachedEvents[len(perf.detachedEvents)/2])
+				samples = append(samples, perf.detachedEvents[len(perf.detachedEvents)-1])
+			}
+
+			for _, de := range samples {
+				fmt.Printf("    tick=%d leader_dist=%.1f goal=%s intent=%s\n", de.tick, de.leaderDist, de.goal, de.intent)
+			}
+
+			if len(perf.detachedEvents) > 3 {
+				fmt.Printf("    ... (%d more detached events)\n", len(perf.detachedEvents)-3)
+			}
+		}
+
+		// Root cause summary
+		fmt.Printf("  DIAGNOSIS: ")
+		diagnoses := []string{}
+
+		if perf.neverSawEnemy && len(perf.stalledEvents) > 0 {
+			diagnoses = append(diagnoses, "Stuck before reaching combat")
+		}
+		if perf.proximityPartner != "" {
+			diagnoses = append(diagnoses, fmt.Sprintf("Collision with %s", perf.proximityPartner))
+		}
+		if len(perf.goalChanges) > 15 {
+			diagnoses = append(diagnoses, "Decision thrashing")
+		}
+		if len(perf.stalledEvents) > 0 && perf.stalledEvents[0].goal == "regroup" {
+			diagnoses = append(diagnoses, "Stuck during regroup")
+		}
+		if len(perf.stalledEvents) > 0 && perf.stalledEvents[0].goal == "move_to_contact" {
+			diagnoses = append(diagnoses, "Pathfinding/movement failure")
+		}
+		if len(diagnoses) == 0 {
+			diagnoses = append(diagnoses, "Unknown - review event patterns above")
+		}
+
+		fmt.Printf("%s\n\n", strings.Join(diagnoses, "; "))
+	}
+}
+
+func teamLabel(team game.Team) string {
+	if team == game.TeamRed {
+		return "red"
+	}
+	return "blue"
 }
 
 func printRun(rs runStats) {
@@ -440,6 +896,7 @@ func printRun(rs runStats) {
 		)
 	}
 	fmt.Print(game.FormatGrades(rs.grades))
+	printProblematicSoldiers(rs)
 	fmt.Println()
 }
 

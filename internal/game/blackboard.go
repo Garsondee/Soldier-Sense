@@ -20,6 +20,7 @@ const (
 	GoalOverwatch                         // hold a high-sightline position, scan for threats
 	GoalPeek                              // cautious peek around a corner or through a window
 	GoalHelpCasualty                      // render medical aid to wounded squad member
+	GoalSearch                            // cautious search of nearby dangerous/uncertain areas when not in contact
 )
 
 func (g GoalKind) String() string {
@@ -48,6 +49,8 @@ func (g GoalKind) String() string {
 		return "peek"
 	case GoalHelpCasualty:
 		return "help_casualty"
+	case GoalSearch:
+		return "search"
 	default:
 		return "unknown"
 	}
@@ -85,6 +88,7 @@ const (
 	CmdForm
 	CmdFanOut
 	CmdAssault
+	CmdSearch
 )
 
 func (oc OfficerCommandKind) String() string {
@@ -103,6 +107,8 @@ func (oc OfficerCommandKind) String() string {
 		return "fan_out"
 	case CmdAssault:
 		return "assault"
+	case CmdSearch:
+		return "search"
 	default:
 		return "none"
 	}
@@ -307,6 +313,15 @@ type Blackboard struct {
 	CombatMemoryStrength float64 // 0-1, how strongly combat is remembered
 	CombatMemoryX        float64 // last gunfire position stored in memory
 	CombatMemoryY        float64
+
+	// --- Search behaviour ---
+	// SearchDrive is a 0..1 scalar populated from intel layers indicating how
+	// worthwhile it is to search nearby dangerous/uncertain areas.
+	SearchDrive float64
+	// Search target waypoint (world coords) used during GoalSearch.
+	SearchTargetX   float64
+	SearchTargetY   float64
+	HasSearchTarget bool
 
 	// --- Flanking state ---
 	FlankComplete         bool    // true when the perpendicular leg is done
@@ -1079,6 +1094,10 @@ func officerOrderBias(goal GoalKind, bb *Blackboard, profile *SoldierProfile) fl
 		case GoalFlank:
 			return base * 0.55
 		}
+	case CmdSearch:
+		if goal == GoalSearch {
+			return base * 1.25
+		}
 	}
 
 	return 0
@@ -1499,6 +1518,25 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		regroupUtil *= 0.55
 	}
 
+	// --- Search: cautious exploration of nearby danger boundaries when calm. ---
+	// Search is only available when not in direct contact and not under heavy stress.
+	searchUtil := 0.0
+	if !anyContact && visibleThreats == 0 && !underFire && !bb.IsSuppressed() {
+		// SquadStress is often the best proxy for the overall "safe to search" condition.
+		// Keep this conservative so searching doesn't happen during shaky fights.
+		if ef < 0.62 && bb.SquadStress < 0.65 && !bb.SquadBroken {
+			// bb.SearchDrive is populated from intel layers in Soldier.Update.
+			searchUtil = 0.15 + clamp01(bb.SearchDrive)*0.95
+			searchUtil += profile.Skills.Fieldcraft * 0.15
+			// Fear discourages searching; disciplined calm soldiers are more willing.
+			searchUtil -= ef * 0.35
+			// Don't search if isolated; instead rejoin.
+			if bb.VisibleAllyCount == 0 {
+				searchUtil *= 0.35
+			}
+		}
+	}
+
 	// --- Peek: cautious look around a corner or through a window. ---
 	// Very attractive when near a tactically interesting cell and not under fire.
 	// Each empty peek decays the utility so soldiers eventually move on.
@@ -1577,6 +1615,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	moveToContactUtil += officerOrderBias(GoalMoveToContact, bb, profile)
 	flankUtil += officerOrderBias(GoalFlank, bb, profile)
 	overwatchUtil += officerOrderBias(GoalOverwatch, bb, profile)
+	searchUtil += officerOrderBias(GoalSearch, bb, profile)
 
 	// --- Pick highest utility ---
 	best := GoalAdvance
@@ -1600,6 +1639,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	check(GoalSurvive, surviveUtil)
 	check(GoalPeek, peekUtil)
 	check(GoalHelpCasualty, helpCasualtyUtil)
+	check(GoalSearch, searchUtil)
 
 	return best
 }
@@ -1969,6 +2009,19 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 			}
 		}
 		return u
+	case GoalSearch:
+		u := 0.0
+		if !anyContact && visibleThreats == 0 && !underFire && !bb.IsSuppressed() {
+			if ef < 0.62 && bb.SquadStress < 0.65 && !bb.SquadBroken {
+				u = 0.15 + clamp01(bb.SearchDrive)*0.95
+				u += profile.Skills.Fieldcraft * 0.15
+				u -= ef * 0.35
+				if bb.VisibleAllyCount == 0 {
+					u *= 0.35
+				}
+			}
+		}
+		return u + orderBias
 	}
 	return 0
 }

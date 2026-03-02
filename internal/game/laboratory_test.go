@@ -539,3 +539,147 @@ func printInjuryObservation(t *testing.T, tc InjuryTestCase, obs InjuryObservati
 	}
 	t.Logf("%s\n", sep)
 }
+
+// ===== BEHAVIORAL LABORATORY TESTS =====
+
+func TestLaboratory_SuppressionResponse(t *testing.T) {
+	test := SuppressionResponseTest()
+	obs := RunLaboratoryTest(test)
+
+	printBehavioralTestResult(t, test, obs)
+
+	passed, reason := test.Validate(obs)
+	if !passed {
+		t.Errorf("Test failed: %s", reason)
+	}
+}
+
+func TestLaboratory_FearThreshold(t *testing.T) {
+	test := FearThresholdTest()
+	obs := RunLaboratoryTest(test)
+
+	printBehavioralTestResult(t, test, obs)
+
+	passed, reason := test.Validate(obs)
+	if !passed {
+		t.Errorf("Test failed: %s", reason)
+	}
+}
+
+func TestLaboratory_FormationMaintenance(t *testing.T) {
+	test := FormationMaintenanceTest()
+	obs := RunLaboratoryTest(test)
+
+	printBehavioralTestResult(t, test, obs)
+
+	passed, reason := test.Validate(obs)
+	if !passed {
+		t.Errorf("Test failed: %s", reason)
+	}
+}
+
+func TestLaboratory_FirstContactResponse(t *testing.T) {
+	test := FirstContactResponseTest()
+	obs := RunLaboratoryTest(test)
+
+	printBehavioralTestResult(t, test, obs)
+
+	passed, reason := test.Validate(obs)
+	if !passed {
+		t.Errorf("Test failed: %s", reason)
+	}
+}
+
+func TestLaboratory_CohesionCollapse(t *testing.T) {
+	test := CohesionCollapseTest()
+	obs := RunLaboratoryTest(test)
+
+	printBehavioralTestResult(t, test, obs)
+
+	passed, reason := test.Validate(obs)
+	if !passed {
+		t.Errorf("Test failed: %s", reason)
+	}
+}
+
+func printBehavioralTestResult(t *testing.T, test *LaboratoryTest, obs *LaboratoryObservation) {
+	sep := strings.Repeat("=", 80)
+	t.Logf("\n%s", sep)
+	t.Logf("LABORATORY BEHAVIORAL TEST: %s", test.Name)
+	t.Logf("%s", sep)
+	t.Logf("Description: %s", test.Description)
+	t.Logf("Expected: %s", test.Expected)
+	t.Logf("Duration: %d ticks (%.1f seconds)", test.DurationTicks, float64(test.DurationTicks)/60.0)
+	t.Logf("")
+
+	t.Logf("KEY OBSERVATIONS:")
+	if obs.FirstContactTick >= 0 {
+		t.Logf("  First Contact: tick %d (%.1f sec)", obs.FirstContactTick, float64(obs.FirstContactTick)/60.0)
+	}
+	if obs.FirstFearIncreaseTick >= 0 {
+		t.Logf("  First Fear Increase: tick %d", obs.FirstFearIncreaseTick)
+	}
+	if obs.FirstGoalChangeTick >= 0 {
+		t.Logf("  First Goal Change: tick %d", obs.FirstGoalChangeTick)
+	}
+	if obs.FirstStanceChangeTick >= 0 {
+		t.Logf("  First Stance Change: tick %d", obs.FirstStanceChangeTick)
+	}
+	if obs.FirstPanicTick >= 0 {
+		t.Logf("  First Panic: tick %d", obs.FirstPanicTick)
+	}
+	if obs.FirstDisobeyTick >= 0 {
+		t.Logf("  First Disobedience: tick %d", obs.FirstDisobeyTick)
+	}
+	if obs.CohesionBreakTick >= 0 {
+		t.Logf("  Cohesion Break: tick %d", obs.CohesionBreakTick)
+	}
+	t.Logf("")
+
+	t.Logf("STATISTICS:")
+	t.Logf("  Max Fear: %.3f (at tick %d)", obs.MaxFear, obs.MaxFearTick)
+	t.Logf("  Final Fear: %.3f", obs.FinalFear)
+	t.Logf("  Goal Changes: %d", obs.GoalChanges)
+	t.Logf("  Stance Changes: %d", obs.StanceChanges)
+	if obs.FormationSpreadMax > 0 {
+		t.Logf("  Max Formation Spread: %.1f px", obs.FormationSpreadMax)
+		t.Logf("  Final Formation Spread: %.1f px", obs.FormationSpreadFinal)
+	}
+	t.Logf("")
+
+	if len(obs.Metrics) > 0 {
+		t.Logf("CUSTOM METRICS:")
+		for key, val := range obs.Metrics {
+			t.Logf("  %s: %.3f", key, val)
+		}
+		t.Logf("")
+	}
+
+	if len(obs.Flags) > 0 {
+		t.Logf("FLAGS:")
+		for key, val := range obs.Flags {
+			t.Logf("  %s: %t", key, val)
+		}
+		t.Logf("")
+	}
+
+	t.Logf("EVENTS (%d total):", len(obs.Events))
+	for i, evt := range obs.Events {
+		if i >= 20 {
+			t.Logf("  ... (%d more events)", len(obs.Events)-20)
+			break
+		}
+		t.Logf("  [T=%03d] %s: %s", evt.Tick, evt.SoldierLabel, evt.Description)
+	}
+	t.Logf("")
+
+	passed, reason := test.Validate(obs)
+	if passed {
+		t.Logf("RESULT: PASSED")
+		t.Logf("  %s", reason)
+	} else {
+		t.Logf("RESULT: FAILED")
+		t.Logf("  %s", reason)
+	}
+	t.Logf("%s\n", sep)
+}
