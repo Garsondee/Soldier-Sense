@@ -5,7 +5,7 @@ import "math"
 const (
 	// Default vision parameters.
 	defaultFOVDeg   = 120.0              // field of view in degrees
-	defaultViewDist = maxFireRange * 2.0 // detect threats at ~2x long-range shot distance
+	defaultViewDist = maxFireRange * 4.0 // detect threats at ~2x long-range shot distance
 )
 
 // VisionState tracks a soldier's current look direction and what they see.

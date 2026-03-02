@@ -2844,8 +2844,65 @@ const (
 	peekRange  = 120.0 // reduced range for cautious glance (pixels)
 )
 
+// UpdateVisionSpatial performs vision scan using spatial hash for performance.
+// Only checks enemies within vision range instead of all enemies.
+func (s *Soldier) UpdateVisionSpatial(enemyHash *SpatialHash, buildings []rect) {
+	if s.state == SoldierStateDead {
+		return
+	}
+
+	// Query only enemies within vision range using spatial hash.
+	// This is much faster than checking all enemies on the map.
+	effectiveRange := s.vision.DegradeRange(s.profile.Physical.Fatigue)
+	nearbyEnemies := enemyHash.QueryRadius(s.x, s.y, effectiveRange)
+
+	s.vision.PerformVisionScan(s.x, s.y, nearbyEnemies, buildings, s.covers)
+
+	// Corner/doorway peek: if wall-adjacent and at a corner, perform a
+	// supplementary narrow-FOV scan in peek directions.
+	if s.tacticalMap != nil && s.blackboard.AtWall {
+		peekDirs := s.tacticalMap.CornerPeekDirections(s.x, s.y)
+		if len(peekDirs) > 0 {
+			peekFOV := peekFOVDeg * math.Pi / 180.0
+			for _, dir := range peekDirs {
+				s.peekScan(dir, peekFOV, peekRange, nearbyEnemies, buildings)
+			}
+		}
+	}
+
+	// Seeing enemies increases fear, but should not permanently prevent recovery
+	// when contact is distant and no rounds are landing.
+	if len(s.vision.KnownContacts) > 0 {
+		minDist := math.MaxFloat64
+		for _, e := range s.vision.KnownContacts {
+			dx := e.x - s.x
+			dy := e.y - s.y
+			d := math.Sqrt(dx*dx + dy*dy)
+			if d < minDist {
+				minDist = d
+			}
+		}
+		// Near threats create meaningful stress; far threats create minimal pressure.
+		nearFactor := clamp01(1.0 - minDist/(maxFireRange*1.25))
+		stress := 0.004 * float64(len(s.vision.KnownContacts)) * nearFactor
+		if s.blackboard.IncomingFireCount > 0 {
+			stress += 0.004
+		}
+		if stress > 0 {
+			s.profile.Psych.ApplyStress(stress)
+		}
+	}
+
+	// A corner that reveals enemies is considered high value — reinforce staying.
+	if s.blackboard.AtCorner && len(s.vision.KnownContacts) > 0 {
+		// Boost position desirability when the corner provides tactical advantage.
+		s.blackboard.PositionDesirability = math.Min(1.0, s.blackboard.PositionDesirability+0.3)
+	}
+}
+
 // UpdateVision performs vision scan against enemies.
 // When at a corner or doorway, soldiers also get a limited peek scan.
+// DEPRECATED: Use UpdateVisionSpatial for better performance.
 func (s *Soldier) UpdateVision(enemies []*Soldier, buildings []rect) {
 	if s.state == SoldierStateDead {
 		return

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Garsondee/Soldier-Sense/internal/game"
 )
@@ -18,6 +19,11 @@ type runStats struct {
 	runIndex int
 	seed     int64
 	ticks    int
+
+	setupDur time.Duration
+	simDur   time.Duration
+	postDur  time.Duration
+	totalDur time.Duration
 
 	firstContactTick     int
 	firstEngageTick      int
@@ -115,25 +121,34 @@ func main() {
 }
 
 func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
+	t0 := time.Now()
+	setupStart := time.Now()
+	bf := game.NewHeadlessBattlefield(seed, 3072, 1728)
 	ts := game.NewTestSim(
-		game.WithMapSize(1280, 720),
+		game.WithHeadlessBattlefield(bf),
 		game.WithSeed(seed),
-		game.WithRedSoldier(0, 50, 350, 1200, 350),
-		game.WithRedSoldier(1, 50, 322, 1200, 322),
-		game.WithRedSoldier(2, 50, 378, 1200, 378),
-		game.WithRedSoldier(3, 50, 294, 1200, 294),
-		game.WithRedSoldier(4, 50, 406, 1200, 406),
-		game.WithRedSoldier(5, 50, 266, 1200, 266),
-		game.WithBlueSoldier(6, 1200, 350, 50, 350),
-		game.WithBlueSoldier(7, 1200, 322, 50, 322),
-		game.WithBlueSoldier(8, 1200, 378, 50, 378),
-		game.WithBlueSoldier(9, 1200, 294, 50, 294),
-		game.WithBlueSoldier(10, 1200, 406, 50, 406),
-		game.WithBlueSoldier(11, 1200, 266, 50, 266),
+		game.WithRedSoldier(0, 80, 864, 2992, 864),
+		game.WithRedSoldier(1, 80, 836, 2992, 836),
+		game.WithRedSoldier(2, 80, 892, 2992, 892),
+		game.WithRedSoldier(3, 80, 808, 2992, 808),
+		game.WithRedSoldier(4, 80, 920, 2992, 920),
+		game.WithRedSoldier(5, 80, 780, 2992, 780),
+		game.WithBlueSoldier(6, 2992, 864, 80, 864),
+		game.WithBlueSoldier(7, 2992, 836, 80, 836),
+		game.WithBlueSoldier(8, 2992, 892, 80, 892),
+		game.WithBlueSoldier(9, 2992, 808, 80, 808),
+		game.WithBlueSoldier(10, 2992, 920, 80, 920),
+		game.WithBlueSoldier(11, 2992, 780, 80, 780),
 		game.WithRedSquad(0, 1, 2, 3, 4, 5),
 		game.WithBlueSquad(6, 7, 8, 9, 10, 11),
 	)
+	setupDur := time.Since(setupStart)
+
+	simStart := time.Now()
 	ts.RunTicks(ticks)
+	simDur := time.Since(simStart)
+
+	postStart := time.Now()
 
 	entries := ts.SimLog.Entries()
 	firstDeathTick := firstTick(entries, "state", "change", "→ dead")
@@ -317,6 +332,8 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		blueTotal:            blueTotal,
 		redSurvivors:         redSurvivors,
 		blueSurvivors:        blueSurvivors,
+		setupDur:             setupDur,
+		simDur:               simDur,
 	}
 	rs.stalemate, rs.stalemateReason = detectStalemate(rs)
 
@@ -335,6 +352,9 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 	rs.outcomeReason = game.DetermineBattleOutcome(redSoldiers, blueSoldiers, redSquads, blueSquads)
 	rs.outcome = rs.outcomeReason.Outcome
 
+	rs.postDur = time.Since(postStart)
+	rs.totalDur = time.Since(t0)
+
 	return rs
 }
 
@@ -352,6 +372,14 @@ func firstTick(entries []game.SimLogEntry, category, key, contains string) int {
 
 func printRun(rs runStats) {
 	fmt.Printf("--- Run %d (seed=%d) ---\n", rs.runIndex, rs.seed)
+	if rs.simDur > 0 {
+		ticksPerSec := float64(rs.ticks) / rs.simDur.Seconds()
+		usPerTick := rs.simDur.Seconds() * 1_000_000 / float64(rs.ticks)
+		fmt.Printf("perf: setup=%s sim=%s (%.0f ticks/sec, %.2f us/tick) post=%s total=%s\n",
+			rs.setupDur, rs.simDur, ticksPerSec, usPerTick, rs.postDur, rs.totalDur)
+	} else {
+		fmt.Printf("perf: setup=%s sim=%s post=%s total=%s\n", rs.setupDur, rs.simDur, rs.postDur, rs.totalDur)
+	}
 	fmt.Printf("phase_markers: contact=%d engage=%d regroup=%d first_death=%d first_panic=%d first_surrender=%d first_break=%d\n",
 		rs.firstContactTick, rs.firstEngageTick, rs.firstRegroupTick, rs.firstDeathTick, rs.firstPanicTick, rs.firstSurrenderTick, rs.firstBreakTick)
 	fmt.Printf("event_totals: intent_change=%d goal_change=%d state_change=%d contact_new=%d contact_lost=%d\n",
@@ -416,6 +444,57 @@ func printRun(rs runStats) {
 }
 
 func printAggregate(all []runStats) {
+	if len(all) > 0 {
+		setupMin, setupMax := all[0].setupDur, all[0].setupDur
+		simMin, simMax := all[0].simDur, all[0].simDur
+		postMin, postMax := all[0].postDur, all[0].postDur
+		totalMin, totalMax := all[0].totalDur, all[0].totalDur
+		var setupSum, simSum, postSum, totalSum time.Duration
+
+		for _, rs := range all {
+			setupSum += rs.setupDur
+			simSum += rs.simDur
+			postSum += rs.postDur
+			totalSum += rs.totalDur
+
+			if rs.setupDur < setupMin {
+				setupMin = rs.setupDur
+			}
+			if rs.setupDur > setupMax {
+				setupMax = rs.setupDur
+			}
+			if rs.simDur < simMin {
+				simMin = rs.simDur
+			}
+			if rs.simDur > simMax {
+				simMax = rs.simDur
+			}
+			if rs.postDur < postMin {
+				postMin = rs.postDur
+			}
+			if rs.postDur > postMax {
+				postMax = rs.postDur
+			}
+			if rs.totalDur < totalMin {
+				totalMin = rs.totalDur
+			}
+			if rs.totalDur > totalMax {
+				totalMax = rs.totalDur
+			}
+		}
+
+		setupAvg := setupSum / time.Duration(len(all))
+		simAvg := simSum / time.Duration(len(all))
+		postAvg := postSum / time.Duration(len(all))
+		totalAvg := totalSum / time.Duration(len(all))
+
+		fmt.Printf("=== Perf Summary (avg/min/max over %d runs) ===\n", len(all))
+		fmt.Printf("setup: %s / %s / %s\n", setupAvg, setupMin, setupMax)
+		fmt.Printf("sim:   %s / %s / %s\n", simAvg, simMin, simMax)
+		fmt.Printf("post:  %s / %s / %s\n", postAvg, postMin, postMax)
+		fmt.Printf("total: %s / %s / %s\n\n", totalAvg, totalMin, totalMax)
+	}
+
 	totalStalled := 0
 	totalDetached := 0
 	totalDisobey := 0

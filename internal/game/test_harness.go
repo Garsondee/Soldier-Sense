@@ -28,6 +28,8 @@ type TestSim struct {
 	Width        int
 	Height       int
 	buildings    []rect
+	covers       []*CoverObject
+	TacticalMap  *TacticalMap
 	NavGrid      *NavGrid
 	Soldiers     []*Soldier // all soldiers across both teams
 	Squads       []*Squad
@@ -128,6 +130,22 @@ func WithBuilding(x, y, w, h int) SimOption {
 	}}
 }
 
+// WithHeadlessBattlefield injects a fully generated battlefield into the sim.
+// This overrides map size, buildings, covers, navgrid, and tactical map.
+func WithHeadlessBattlefield(bf *HeadlessBattlefield) SimOption {
+	return SimOption{simOptInfra, func(ts *TestSim) {
+		if bf == nil {
+			return
+		}
+		ts.Width = bf.Width
+		ts.Height = bf.Height
+		ts.buildings = append([]rect(nil), bf.Buildings...)
+		ts.covers = append([]*CoverObject(nil), bf.Covers...)
+		ts.NavGrid = bf.NavGrid
+		ts.TacticalMap = bf.TacticalMap
+	}}
+}
+
 // WithSeed sets the RNG seed for deterministic runs.
 func WithSeed(seed int64) SimOption {
 	return SimOption{simOptInfra, func(ts *TestSim) {
@@ -189,7 +207,9 @@ func NewTestSim(opts ...SimOption) *TestSim {
 			o.fn(ts)
 		}
 	}
-	ts.buildNavGrid()
+	if ts.NavGrid == nil {
+		ts.buildNavGrid()
+	}
 	for _, o := range opts {
 		if o.kind == simOptSoldier {
 			o.fn(ts)
@@ -213,7 +233,7 @@ func NewTestSim(opts ...SimOption) *TestSim {
 // buildings have been added. Must be called before soldiers are added if you
 // want their initial paths to be correct — NewTestSim handles this automatically.
 func (ts *TestSim) buildNavGrid() {
-	ts.NavGrid = NewNavGrid(ts.Width, ts.Height, ts.buildings, soldierRadius, nil, nil)
+	ts.NavGrid = NewNavGrid(ts.Width, ts.Height, ts.buildings, soldierRadius, ts.covers, nil)
 	// Re-path any soldiers that were added before the grid was built.
 	for _, s := range ts.Soldiers {
 		s.navGrid = ts.NavGrid
@@ -224,7 +244,7 @@ func (ts *TestSim) buildNavGrid() {
 // addSoldier is the internal helper used by WithRedSoldier / WithBlueSoldier.
 func (ts *TestSim) addSoldier(id int, x, y float64, team Team, start, end [2]float64) {
 	tl := NewThoughtLog() // per-sim log; not rendered
-	s := NewSoldier(id, x, y, team, start, end, ts.NavGrid, nil, ts.buildings, tl, &ts.tick)
+	s := NewSoldier(id, x, y, team, start, end, ts.NavGrid, ts.covers, ts.buildings, tl, &ts.tick, ts.TacticalMap)
 	ts.Soldiers = append(ts.Soldiers, s)
 	ts.effProbes[s.id] = &effectivenessProbe{lastX: s.x, lastY: s.y}
 	ts.PerfTrackers[s.id] = NewPerfTracker(s, len(ts.buildings) > 0)

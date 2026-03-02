@@ -13,15 +13,16 @@ import (
 // --- Combat constants ---
 
 const (
-	soldierMaxHP      = 100.0 // starting health
-	accurateFireRange = 450.0 // px, reliable engagement envelope (first half of rifle range)
-	maxFireRange      = 900.0 // px, max rifle range (last half is pot-shot territory)
-	tracerLifetime    = 10    // ticks a tracer persists
-	nearMissStress    = 0.08  // fear added to target on miss
-	hitStress         = 0.20  // fear added to target on hit
-	witnessStress     = 0.03  // fear added to nearby friendlies seeing a hit
-	witnessRadius     = 80.0  // px radius for witness stress
-	flashLifetime     = 4     // ticks a muzzle flash persists
+	soldierMaxHP        = 100.0              // starting health
+	accurateFireRange   = 450.0              // px, reliable engagement envelope (first half of rifle range)
+	maxFireRange        = 900.0              // px, max rifle range (last half is pot-shot territory)
+	potShotMaxFireRange = maxFireRange * 2.0 // px, extended pot-shot engagement envelope
+	tracerLifetime      = 10                 // ticks a tracer persists
+	nearMissStress      = 0.08               // fear added to target on miss
+	hitStress           = 0.20               // fear added to target on hit
+	witnessStress       = 0.03               // fear added to nearby friendlies seeing a hit
+	witnessRadius       = 80.0               // px radius for witness stress
+	flashLifetime       = 4                  // ticks a muzzle flash persists
 
 	// Per fire-mode fire intervals (ticks between trigger pulls).
 	// Single: deliberate, slow. Burst: semi-rapid. Auto: rapid.
@@ -72,8 +73,12 @@ func shotRangePenalty(dist float64) float64 {
 		// Gentle linear penalty across the accurate band.
 		return 0.08 * ((dist - cqbRange) / (accurateFireRange - cqbRange))
 	}
+	if dist >= potShotMaxFireRange {
+		return 0.90
+	}
 	if dist >= maxFireRange {
-		return 0.78
+		t := (dist - maxFireRange) / (potShotMaxFireRange - maxFireRange)
+		return 0.78 + (0.90-0.78)*clamp01(t)
 	}
 	t := (dist - accurateFireRange) / (maxFireRange - accurateFireRange)
 	return 0.12 + 0.66*math.Pow(t, 1.15)
@@ -83,7 +88,7 @@ func potShotFactor(dist float64) float64 {
 	if dist <= accurateFireRange {
 		return 0
 	}
-	return clamp01((dist - accurateFireRange) / (maxFireRange - accurateFireRange))
+	return clamp01((dist - accurateFireRange) / (potShotMaxFireRange - accurateFireRange))
 }
 
 func shouldDeliberatelyAimLongRange(s *Soldier, dist, pressure float64) bool {
@@ -281,6 +286,53 @@ func (cm *CombatManager) BroadcastGunfire(red, blue []*Soldier, tick int) {
 	}
 }
 
+// BroadcastGunfireSpatial uses spatial hashing for optimized gunfire propagation.
+// Only checks soldiers within hearing range instead of all soldiers.
+func (cm *CombatManager) BroadcastGunfireSpatial(redHash, blueHash *SpatialHash, red, blue []*Soldier, tick int) {
+	for _, ev := range cm.Gunfires {
+		var listenerHash *SpatialHash
+		if ev.Team == TeamRed {
+			listenerHash = blueHash
+		} else {
+			listenerHash = redHash
+		}
+
+		// Query only soldiers within hearing range using spatial hash.
+		nearbyListeners := listenerHash.QueryRadius(ev.X, ev.Y, gunfireHearingMaxRange)
+
+		for _, s := range nearbyListeners {
+			if s.state == SoldierStateDead {
+				continue
+			}
+			heardStrength := gunfireHeardStrength(ev.X, ev.Y, s, red, blue)
+			if heardStrength < gunfireMinHeardStrength {
+				continue
+			}
+			// Single-tick flag — used by immediate decision logic.
+			s.blackboard.HeardGunfireX = ev.X
+			s.blackboard.HeardGunfireY = ev.Y
+			s.blackboard.HeardGunfire = true
+			s.blackboard.HeardGunfireTick = tick
+			// Persistent memory — keeps soldier activated for ~60s after last shot.
+			s.blackboard.RecordGunfireWithStrength(ev.X, ev.Y, heardStrength)
+		}
+
+		// Shooters also remember they fired (self-activation).
+		var shooters []*Soldier
+		if ev.Team == TeamRed {
+			shooters = red
+		} else {
+			shooters = blue
+		}
+		for _, s := range shooters {
+			if s.state == SoldierStateDead {
+				continue
+			}
+			s.blackboard.RecordGunfireWithStrength(ev.X, ev.Y, 1.0)
+		}
+	}
+}
+
 func gunfireHeardStrength(srcX, srcY float64, listener *Soldier, red, blue []*Soldier) float64 {
 	dx := srcX - listener.x
 	dy := srcY - listener.y
@@ -416,7 +468,7 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		dx := target.x - s.x
 		dy := target.y - s.y
 		dist := math.Sqrt(dx*dx + dy*dy)
-		if dist > maxFireRange {
+		if dist > potShotMaxFireRange {
 			resetBurstState(s)
 			resetAimingState(s)
 			continue
@@ -664,7 +716,7 @@ func aimingTicksForDistance(dist float64) int {
 	if dist <= accurateFireRange {
 		return 0
 	}
-	t := clamp01((dist - accurateFireRange) / (maxFireRange - accurateFireRange))
+	t := clamp01((dist - accurateFireRange) / (potShotMaxFireRange - accurateFireRange))
 	return aimingBaseTicks + int(math.Round(float64(aimingExtraTicks)*t))
 }
 

@@ -290,6 +290,10 @@ type Game struct {
 
 	// Master map seed — printed at startup so layouts can be reproduced.
 	mapSeed int64
+
+	// Spatial partitioning for performance optimization.
+	spatialHashRed  *SpatialHash
+	spatialHashBlue *SpatialHash
 }
 
 type rect struct {
@@ -395,6 +399,9 @@ func New() *Game {
 	g.cachedChestSet = make(map[[2]int]bool)
 	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999)) // #nosec G404 -- non-crypto RNG for local flavor text
 	g.reporter = NewSimReporter(reportWindowTicks, false)
+	// Initialize spatial hashes with cell size = max vision range for optimal performance.
+	g.spatialHashRed = NewSpatialHash(defaultViewDist)
+	g.spatialHashBlue = NewSpatialHash(defaultViewDist)
 	return g
 }
 
@@ -907,6 +914,35 @@ func (g *Game) overlapsAnyBuilding(r rect, rng *rand.Rand) bool {
 	return false
 }
 
+// findValidSpawnLocation searches for a walkable spawn position near the desired location.
+// Returns the validated position or the original if no valid position found within search radius.
+func (g *Game) findValidSpawnLocation(x, y float64, searchRadius float64) (float64, float64) {
+	cx, cy := WorldToCell(x, y)
+	if !g.navGrid.IsBlocked(cx, cy) {
+		return x, y
+	}
+
+	// Spiral search outward for valid cell
+	maxOffset := int(searchRadius / cellSize)
+	for radius := 1; radius <= maxOffset; radius++ {
+		for dx := -radius; dx <= radius; dx++ {
+			for dy := -radius; dy <= radius; dy++ {
+				if dx*dx+dy*dy > radius*radius {
+					continue
+				}
+				testCX := cx + dx
+				testCY := cy + dy
+				if !g.navGrid.IsBlocked(testCX, testCY) {
+					return CellToWorld(testCX, testCY)
+				}
+			}
+		}
+	}
+
+	// Fallback to original position
+	return x, y
+}
+
 // spawnCluster creates squadSize soldiers of the given team at startX,
 // spread vertically around clusterCenterY. Returns the created soldiers.
 func (g *Game) spawnCluster(rng *rand.Rand, team Team, squadSize int, clusterCenterY, startX, endX float64) []*Soldier {
@@ -923,10 +959,14 @@ func (g *Game) spawnCluster(rng *rand.Rand, team Team, squadSize int, clusterCen
 		if y > float64(g.gameHeight)-margin {
 			y = float64(g.gameHeight) - margin
 		}
+
+		// Validate spawn position is walkable
+		validX, validY := g.findValidSpawnLocation(startX, y, 48.0)
+
 		id := g.nextID
 		g.nextID++
-		s := NewSoldier(id, startX, y, team,
-			[2]float64{startX, y}, [2]float64{endX, y},
+		s := NewSoldier(id, validX, validY, team,
+			[2]float64{validX, validY}, [2]float64{endX, validY},
 			g.navGrid, g.covers, g.buildings, g.thoughtLog, &g.tick, g.tacticalMap)
 		s.buildingFootprints = g.buildingFootprints
 		s.tileMap = g.tileMap
@@ -944,8 +984,10 @@ func (g *Game) initSoldiers() {
 	margin := 64.0
 	startX := margin
 	endX := float64(g.gameWidth) - margin
-	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.28, startX, endX)...)
-	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.72, startX, endX)...)
+	// Spawn 3 squads with better vertical distribution
+	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.20, startX, endX)...)
+	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.50, startX, endX)...)
+	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.80, startX, endX)...)
 }
 
 func (g *Game) initOpFor() {
@@ -954,8 +996,10 @@ func (g *Game) initOpFor() {
 	margin := 64.0
 	startX := float64(g.gameWidth) - margin
 	endX := margin
-	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.28, startX, endX)...)
-	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.72, startX, endX)...)
+	// Spawn 3 squads with better vertical distribution
+	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.20, startX, endX)...)
+	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.50, startX, endX)...)
+	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.80, startX, endX)...)
 }
 
 func (g *Game) initSquads() {
@@ -1028,12 +1072,26 @@ func (g *Game) Update() error {
 func (g *Game) simTick() {
 	g.tick++
 
-	// 1. SENSE: each soldier scans for enemies.
+	// 0. SPATIAL HASH: populate spatial partitioning structures for efficient queries.
+	g.spatialHashRed.Clear()
+	g.spatialHashBlue.Clear()
 	for _, s := range g.soldiers {
-		s.UpdateVision(g.opfor, g.buildings)
+		if s.state != SoldierStateDead {
+			g.spatialHashRed.Insert(s)
+		}
 	}
 	for _, s := range g.opfor {
-		s.UpdateVision(g.soldiers, g.buildings)
+		if s.state != SoldierStateDead {
+			g.spatialHashBlue.Insert(s)
+		}
+	}
+
+	// 1. SENSE: each soldier scans for enemies using spatial hash.
+	for _, s := range g.soldiers {
+		s.UpdateVisionSpatial(g.spatialHashBlue, g.buildings)
+	}
+	for _, s := range g.opfor {
+		s.UpdateVisionSpatial(g.spatialHashRed, g.buildings)
 	}
 
 	// 2. COMBAT: fire decisions and resolution.
@@ -1044,8 +1102,8 @@ func (g *Game) simTick() {
 	g.combat.ResolveCombat(g.opfor, g.soldiers, g.opfor, g.buildings, all)
 	g.combat.UpdateTracers()
 
-	// 2.1. SOUND: broadcast gunfire events to enemy soldiers (infinite range).
-	g.combat.BroadcastGunfire(g.soldiers, g.opfor, g.tick)
+	// 2.1. SOUND: broadcast gunfire events using spatial hash for performance.
+	g.combat.BroadcastGunfireSpatial(g.spatialHashRed, g.spatialHashBlue, g.soldiers, g.opfor, g.tick)
 
 	// 2.5. INTEL: update all heatmap layers from current soldier state.
 	g.intel.Update(g.soldiers, g.opfor, g.buildings)
