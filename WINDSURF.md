@@ -20,6 +20,9 @@ The goal is to build robust, well-designed software, not to avoid technical disa
 
 ## Collaboration Guidelines
 
+- Before submitting code to origin, check it is correctly formatted, passes a
+  lint check, and builds correctly. You can use `just test` to do this with a 
+  single command.
 - When testing the behaviour of a binary use 
   `go run ./cmd/<program>` rather than `./bin/<program>` directly. 
   This ensures we are always testing the latest code rather than an out-of-date 
