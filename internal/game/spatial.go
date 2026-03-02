@@ -35,21 +35,21 @@ func (sh *SpatialHash) Insert(s *Soldier) {
 // This checks a square region, so some results may be slightly outside radius.
 func (sh *SpatialHash) QueryRadius(x, y, radius float64) []*Soldier {
 	var result []*Soldier
-	
+
 	// Calculate cell range to check
 	minCX := int(math.Floor((x - radius) / sh.cellSize))
 	maxCX := int(math.Floor((x + radius) / sh.cellSize))
 	minCY := int(math.Floor((y - radius) / sh.cellSize))
 	maxCY := int(math.Floor((y + radius) / sh.cellSize))
-	
+
 	radiusSq := radius * radius
-	
+
 	// Check all cells in range
 	for cy := minCY; cy <= maxCY; cy++ {
 		for cx := minCX; cx <= maxCX; cx++ {
 			key := sh.cellKeyFromCoords(cx, cy)
 			soldiers := sh.buckets[key]
-			
+
 			// Filter by actual distance
 			for _, s := range soldiers {
 				dx := s.x - x
@@ -60,7 +60,7 @@ func (sh *SpatialHash) QueryRadius(x, y, radius float64) []*Soldier {
 			}
 		}
 	}
-	
+
 	return result
 }
 
@@ -68,19 +68,19 @@ func (sh *SpatialHash) QueryRadius(x, y, radius float64) []*Soldier {
 // Does NOT filter by exact distance - faster but less precise.
 func (sh *SpatialHash) QueryRadiusNoFilter(x, y, radius float64) []*Soldier {
 	var result []*Soldier
-	
+
 	minCX := int(math.Floor((x - radius) / sh.cellSize))
 	maxCX := int(math.Floor((x + radius) / sh.cellSize))
 	minCY := int(math.Floor((y - radius) / sh.cellSize))
 	maxCY := int(math.Floor((y + radius) / sh.cellSize))
-	
+
 	for cy := minCY; cy <= maxCY; cy++ {
 		for cx := minCX; cx <= maxCX; cx++ {
 			key := sh.cellKeyFromCoords(cx, cy)
 			result = append(result, sh.buckets[key]...)
 		}
 	}
-	
+
 	return result
 }
 

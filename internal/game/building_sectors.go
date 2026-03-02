@@ -7,14 +7,14 @@ type Sector int
 
 const (
 	SectorNone Sector = iota
-	SectorN          // North (0°)
-	SectorNE         // Northeast (45°)
-	SectorE          // East (90°)
-	SectorSE         // Southeast (135°)
-	SectorS          // South (180°)
-	SectorSW         // Southwest (225°)
-	SectorW          // West (270°)
-	SectorNW         // Northwest (315°)
+	SectorN           // North (0°)
+	SectorNE          // Northeast (45°)
+	SectorE           // East (90°)
+	SectorSE          // Southeast (135°)
+	SectorS           // South (180°)
+	SectorSW          // Southwest (225°)
+	SectorW           // West (270°)
+	SectorNW          // Northwest (315°)
 )
 
 func (s Sector) String() string {
@@ -83,31 +83,31 @@ func AssignSectors(
 	hasEnemy bool,
 ) map[int]Sector {
 	assignments := make(map[int]Sector)
-	
+
 	if len(members) == 0 {
 		return assignments
 	}
-	
+
 	// Determine priority sectors based on enemy bearing
 	prioritySectors := []Sector{}
 	if hasEnemy {
 		// Convert enemy bearing to sector
 		primarySector := bearingToSector(enemyBearing)
 		prioritySectors = append(prioritySectors, primarySector)
-		
+
 		// Add adjacent sectors for coverage
 		prioritySectors = append(prioritySectors, adjacentSectors(primarySector)...)
 	} else {
 		// No enemy: distribute evenly around perimeter
 		prioritySectors = []Sector{SectorN, SectorE, SectorS, SectorW, SectorNE, SectorSE, SectorSW, SectorNW}
 	}
-	
+
 	// Sort soldiers by combat effectiveness (discipline + marksmanship)
 	type soldierScore struct {
 		soldier *Soldier
 		score   float64
 	}
-	
+
 	scored := make([]soldierScore, 0, len(members))
 	for _, m := range members {
 		if m.state == SoldierStateDead {
@@ -116,7 +116,7 @@ func AssignSectors(
 		score := m.profile.Skills.Discipline*0.5 + m.profile.Skills.Marksmanship*0.5
 		scored = append(scored, soldierScore{soldier: m, score: score})
 	}
-	
+
 	// Sort by score descending (best soldiers first)
 	for i := 0; i < len(scored); i++ {
 		for j := i + 1; j < len(scored); j++ {
@@ -125,7 +125,7 @@ func AssignSectors(
 			}
 		}
 	}
-	
+
 	// Assign best soldiers to priority sectors
 	sectorIdx := 0
 	for _, ss := range scored {
@@ -136,7 +136,7 @@ func AssignSectors(
 		assignments[ss.soldier.id] = prioritySectors[sectorIdx]
 		sectorIdx++
 	}
-	
+
 	return assignments
 }
 
@@ -149,10 +149,10 @@ func bearingToSector(bearing float64) Sector {
 	for bearing >= 2*math.Pi {
 		bearing -= 2 * math.Pi
 	}
-	
+
 	// Convert to degrees for easier comparison
 	degrees := bearing * 180 / math.Pi
-	
+
 	// Map to 8 sectors (45° each)
 	if degrees < 22.5 || degrees >= 337.5 {
 		return SectorE
@@ -209,36 +209,36 @@ func GetSectorPosition(
 	if tacticalMap == nil {
 		return 0, 0, false
 	}
-	
+
 	// Calculate offset from building center based on sector
 	cx := float64(buildingFootprint.x + buildingFootprint.w/2)
 	cy := float64(buildingFootprint.y + buildingFootprint.h/2)
-	
+
 	// Offset toward the sector direction (about 40% of building size)
 	offsetDist := math.Min(float64(buildingFootprint.w), float64(buildingFootprint.h)) * 0.4
 	bearing := sector.Bearing()
-	
+
 	targetX := cx + math.Cos(bearing)*offsetDist
 	targetY := cy + math.Sin(bearing)*offsetDist
-	
+
 	// Clamp to building bounds
 	minX := float64(buildingFootprint.x) + float64(cellSize)
 	maxX := float64(buildingFootprint.x+buildingFootprint.w) - float64(cellSize)
 	minY := float64(buildingFootprint.y) + float64(cellSize)
 	maxY := float64(buildingFootprint.y+buildingFootprint.h) - float64(cellSize)
-	
+
 	targetX = math.Max(minX, math.Min(maxX, targetX))
 	targetY = math.Max(minY, math.Min(maxY, targetY))
-	
+
 	// Use tactical map to find best nearby position (window-adjacent, corner, etc.)
 	bestX, bestY, score := tacticalMap.ScanBestNearby(
 		targetX, targetY, 4, enemyBearing, hasEnemy, -1, nil, nil,
 	)
-	
+
 	if score > -0.5 {
 		return bestX, bestY, true
 	}
-	
+
 	return targetX, targetY, true
 }
 
@@ -246,11 +246,11 @@ func GetSectorPosition(
 // Should be called periodically (every 2-3 minutes) when soldiers are static.
 func RotateSectors(currentAssignments map[int]Sector) map[int]Sector {
 	rotated := make(map[int]Sector)
-	
+
 	for soldierID, sector := range currentAssignments {
 		rotated[soldierID] = rotateSectorClockwise(sector)
 	}
-	
+
 	return rotated
 }
 

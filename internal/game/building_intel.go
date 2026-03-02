@@ -36,7 +36,7 @@ func (bim *BuildingIntelMap) UpdateFromGunfire(
 	if footprintIdx < 0 || footprintIdx >= len(footprints) {
 		return
 	}
-	
+
 	intel, exists := bim.buildings[footprintIdx]
 	if !exists {
 		intel = &BuildingIntel{
@@ -44,12 +44,12 @@ func (bim *BuildingIntelMap) UpdateFromGunfire(
 		}
 		bim.buildings[footprintIdx] = intel
 	}
-	
+
 	// Increase presence confidence (shots from building = strong evidence)
 	intel.EnemyPresence = math.Min(1.0, intel.EnemyPresence+confidence*0.4)
 	intel.LastObservedTick = tick
 	intel.Cleared = false // no longer cleared if enemies are shooting from it
-	
+
 	// Threat level based on presence and recency
 	intel.ThreatLevel = intel.EnemyPresence * 0.8
 }
@@ -64,7 +64,7 @@ func (bim *BuildingIntelMap) UpdateFromVisualContact(
 	if footprintIdx < 0 || footprintIdx >= len(footprints) {
 		return
 	}
-	
+
 	intel, exists := bim.buildings[footprintIdx]
 	if !exists {
 		intel = &BuildingIntel{
@@ -72,7 +72,7 @@ func (bim *BuildingIntelMap) UpdateFromVisualContact(
 		}
 		bim.buildings[footprintIdx] = intel
 	}
-	
+
 	// Visual contact is strong evidence
 	intel.EnemyPresence = math.Min(1.0, intel.EnemyPresence+0.5)
 	intel.LastObservedTick = tick
@@ -90,11 +90,11 @@ func (bim *BuildingIntelMap) UpdateFromProximity(
 	if !exists {
 		return
 	}
-	
+
 	// No contact while close = reduces presence confidence
 	intel.EnemyPresence = math.Max(0, intel.EnemyPresence-0.1)
 	intel.LastObservedTick = tick
-	
+
 	if intel.EnemyPresence < 0.1 {
 		intel.ThreatLevel = 0
 	}
@@ -109,7 +109,7 @@ func (bim *BuildingIntelMap) MarkCleared(footprintIdx int, tick int) {
 		}
 		bim.buildings[footprintIdx] = intel
 	}
-	
+
 	intel.Cleared = true
 	intel.ClearedTick = tick
 	intel.EnemyPresence = 0
@@ -120,12 +120,12 @@ func (bim *BuildingIntelMap) MarkCleared(footprintIdx int, tick int) {
 // Should be called periodically (e.g., every 60 ticks).
 func (bim *BuildingIntelMap) DecayIntel(tick int) {
 	decayRate := 0.02 // per decay cycle
-	
+
 	for _, intel := range bim.buildings {
 		if intel.Cleared {
 			continue // cleared buildings don't decay
 		}
-		
+
 		age := tick - intel.LastObservedTick
 		if age > 300 { // 5 seconds stale
 			intel.EnemyPresence = math.Max(0, intel.EnemyPresence-decayRate)
@@ -142,13 +142,13 @@ func (bim *BuildingIntelMap) GetIntel(footprintIdx int) *BuildingIntel {
 // GetThreatBuildings returns buildings with significant threat level.
 func (bim *BuildingIntelMap) GetThreatBuildings(minThreat float64) []*BuildingIntel {
 	threats := []*BuildingIntel{}
-	
+
 	for _, intel := range bim.buildings {
 		if intel.ThreatLevel >= minThreat && !intel.Cleared {
 			threats = append(threats, intel)
 		}
 	}
-	
+
 	return threats
 }
 
@@ -170,21 +170,21 @@ func FindNearestBuilding(x, y float64, footprints []rect) int {
 	if len(footprints) == 0 {
 		return -1
 	}
-	
+
 	bestIdx := -1
 	bestDist := math.MaxFloat64
-	
+
 	for i, fp := range footprints {
 		cx := float64(fp.x + fp.w/2)
 		cy := float64(fp.y + fp.h/2)
 		dist := math.Hypot(cx-x, cy-y)
-		
+
 		if dist < bestDist {
 			bestDist = dist
 			bestIdx = i
 		}
 	}
-	
+
 	return bestIdx
 }
 
@@ -198,20 +198,20 @@ func (bim *BuildingIntelMap) ShouldSuppressBuilding(
 	if intel == nil || intel.Cleared {
 		return false
 	}
-	
+
 	// Suppress if high threat and building is between squad and objective
 	if intel.ThreatLevel < 0.4 {
 		return false
 	}
-	
+
 	if footprintIdx >= len(footprints) {
 		return false
 	}
-	
+
 	fp := footprints[footprintIdx]
 	buildingX := float64(fp.x + fp.w/2)
 	buildingY := float64(fp.y + fp.h/2)
-	
+
 	// Building is close enough to be a threat
 	dist := math.Hypot(buildingX-squadX, buildingY-squadY)
 	return dist < 400 && intel.ThreatLevel > 0.5

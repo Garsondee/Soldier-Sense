@@ -14,9 +14,9 @@ type HeadlessBattlefield struct {
 	Windows            []rect
 	Covers             []*CoverObject
 
-	NavGrid      *NavGrid
-	TacticalMap  *TacticalMap
-	MapSeed      int64
+	NavGrid     *NavGrid
+	TacticalMap *TacticalMap
+	MapSeed     int64
 }
 
 func NewHeadlessBattlefield(mapSeed int64, battleW, battleH int) *HeadlessBattlefield {
