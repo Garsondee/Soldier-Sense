@@ -720,10 +720,11 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			for _, t := range m.blackboard.Threats {
 				// Collect visible threats for flow-field threat cost
 				// Note: This is a simplified approach - in production we'd track actual soldier references
-				if t.IsVisible {
-					// We don't have direct soldier references from threats, so we'll update
-					// the flow controller in the game update loop instead
+				if !t.IsVisible {
+					continue
 				}
+				// Threats don't currently include stable soldier references.
+				// Until they do, we can't build a correct `enemies` slice here.
 			}
 		}
 		sq.flowController.Update(enemies)

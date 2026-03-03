@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/text"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"golang.org/x/image/font/basicfont"
 )
@@ -29,6 +29,14 @@ type LaboratoryVisualMode struct {
 	// UI state
 	showHelp   bool
 	showEvents bool
+}
+
+func drawBasicText(screen *ebiten.Image, x, y int, str string, col color.Color) {
+	face := text.NewGoXFace(basicfont.Face7x13)
+	opts := &text.DrawOptions{}
+	opts.GeoM.Translate(float64(x), float64(y))
+	opts.ColorScale.ScaleWithColor(col)
+	text.Draw(screen, str, face, opts)
 }
 
 // NewLaboratoryVisualMode creates a new visual laboratory test runner.
@@ -191,7 +199,7 @@ func (lv *LaboratoryVisualMode) drawWorld(screen *ebiten.Image, viewportW, viewp
 		bh := float32(b.h) * float32(lv.zoom)
 
 		if wx+bw >= 0 && wx < screenW && wy+bh >= 0 && wy < screenH {
-			vector.DrawFilledRect(screen, wx, wy, bw, bh, color.RGBA{R: 60, G: 60, B: 60, A: 255}, false)
+			vector.FillRect(screen, wx, wy, bw, bh, color.RGBA{R: 60, G: 60, B: 60, A: 255}, false)
 			vector.StrokeRect(screen, wx, wy, bw, bh, 1, color.RGBA{R: 100, G: 100, B: 100, A: 255}, false)
 		}
 	}
@@ -221,11 +229,11 @@ func (lv *LaboratoryVisualMode) drawWorld(screen *ebiten.Image, viewportW, viewp
 			}
 
 			radius := float32(8 * lv.zoom)
-			vector.DrawFilledCircle(screen, wx, wy, radius, col, false)
+			vector.FillCircle(screen, wx, wy, radius, col, false)
 
 			// Draw label
 			if lv.zoom > 0.5 {
-				text.Draw(screen, s.label, basicfont.Face7x13, int(wx)-10, int(wy)-15, color.White)
+				drawBasicText(screen, int(wx)-10, int(wy)-15, s.label, color.White)
 			}
 
 			// Draw fear indicator
@@ -236,10 +244,10 @@ func (lv *LaboratoryVisualMode) drawWorld(screen *ebiten.Image, viewportW, viewp
 				barY := wy + radius + 5
 
 				// Background
-				vector.DrawFilledRect(screen, barX, barY, barW, barH, color.RGBA{R: 40, G: 40, B: 40, A: 200}, false)
+				vector.FillRect(screen, barX, barY, barW, barH, color.RGBA{R: 40, G: 40, B: 40, A: 200}, false)
 				// Fear level
 				fearW := barW * float32(s.profile.Psych.Fear)
-				vector.DrawFilledRect(screen, barX, barY, fearW, barH, color.RGBA{R: 255, G: 100, B: 100, A: 255}, false)
+				vector.FillRect(screen, barX, barY, fearW, barH, color.RGBA{R: 255, G: 100, B: 100, A: 255}, false)
 			}
 		}
 	}
@@ -253,26 +261,26 @@ func (lv *LaboratoryVisualMode) drawTestInfo(screen *ebiten.Image) {
 	panelH := float32(140)
 
 	// Panel background
-	vector.DrawFilledRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 20, G: 25, B: 30, A: 230}, false)
+	vector.FillRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 20, G: 25, B: 30, A: 230}, false)
 	vector.StrokeRect(screen, panelX, panelY, panelW, panelH, 2, color.RGBA{R: 100, G: 120, B: 140, A: 255}, false)
 
 	// Title
 	titleY := int(panelY) + 20
-	text.Draw(screen, lv.test.Name, basicfont.Face7x13, int(panelX)+10, titleY, color.RGBA{R: 200, G: 220, B: 255, A: 255})
+	drawBasicText(screen, int(panelX)+10, titleY, lv.test.Name, color.RGBA{R: 200, G: 220, B: 255, A: 255})
 
 	// Description
 	descY := titleY + 20
 	lines := wrapText(lv.test.Description, 60)
 	for i, line := range lines {
-		text.Draw(screen, line, basicfont.Face7x13, int(panelX)+10, descY+i*15, color.RGBA{R: 180, G: 180, B: 180, A: 255})
+		drawBasicText(screen, int(panelX)+10, descY+i*15, line, color.RGBA{R: 180, G: 180, B: 180, A: 255})
 	}
 
 	// Expected behavior
 	expectedY := descY + len(lines)*15 + 10
-	text.Draw(screen, "Expected:", basicfont.Face7x13, int(panelX)+10, expectedY, color.RGBA{R: 150, G: 255, B: 150, A: 255})
+	drawBasicText(screen, int(panelX)+10, expectedY, "Expected:", color.RGBA{R: 150, G: 255, B: 150, A: 255})
 	expectedLines := wrapText(lv.test.Expected, 60)
 	for i, line := range expectedLines {
-		text.Draw(screen, line, basicfont.Face7x13, int(panelX)+10, expectedY+15+i*15, color.RGBA{R: 150, G: 200, B: 150, A: 255})
+		drawBasicText(screen, int(panelX)+10, expectedY+15+i*15, line, color.RGBA{R: 150, G: 200, B: 150, A: 255})
 	}
 }
 
@@ -285,7 +293,7 @@ func (lv *LaboratoryVisualMode) drawStatus(screen *ebiten.Image) {
 	panelY := float32(10)
 
 	// Panel background
-	vector.DrawFilledRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 20, G: 25, B: 30, A: 230}, false)
+	vector.FillRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 20, G: 25, B: 30, A: 230}, false)
 	vector.StrokeRect(screen, panelX, panelY, panelW, panelH, 2, color.RGBA{R: 100, G: 120, B: 140, A: 255}, false)
 
 	y := int(panelY) + 20
@@ -301,34 +309,34 @@ func (lv *LaboratoryVisualMode) drawStatus(screen *ebiten.Image) {
 		statusText = "Complete"
 	}
 
-	text.Draw(screen, fmt.Sprintf("Status: %s", statusText), basicfont.Face7x13, x, y, color.White)
+	drawBasicText(screen, x, y, fmt.Sprintf("Status: %s", statusText), color.White)
 	y += 15
-	text.Draw(screen, fmt.Sprintf("Tick: %d / %d (%.1f%%)", lv.tick, lv.test.DurationTicks, progress), basicfont.Face7x13, x, y, color.White)
+	drawBasicText(screen, x, y, fmt.Sprintf("Tick: %d / %d (%.1f%%)", lv.tick, lv.test.DurationTicks, progress), color.White)
 	y += 15
-	text.Draw(screen, fmt.Sprintf("Speed: %dx", lv.speed), basicfont.Face7x13, x, y, color.White)
+	drawBasicText(screen, x, y, fmt.Sprintf("Speed: %dx", lv.speed), color.White)
 	y += 20
 
 	// Key observations
-	text.Draw(screen, "Observations:", basicfont.Face7x13, x, y, color.RGBA{R: 200, G: 220, B: 255, A: 255})
+	drawBasicText(screen, x, y, "Observations:", color.RGBA{R: 200, G: 220, B: 255, A: 255})
 	y += 15
 
 	if lv.obs.FirstContactTick >= 0 {
-		text.Draw(screen, fmt.Sprintf("First Contact: T=%d", lv.obs.FirstContactTick), basicfont.Face7x13, x, y, color.RGBA{R: 150, G: 200, B: 150, A: 255})
+		drawBasicText(screen, x, y, fmt.Sprintf("First Contact: T=%d", lv.obs.FirstContactTick), color.RGBA{R: 150, G: 200, B: 150, A: 255})
 		y += 15
 	}
 
 	if lv.obs.MaxFear > 0 {
-		text.Draw(screen, fmt.Sprintf("Max Fear: %.2f (T=%d)", lv.obs.MaxFear, lv.obs.MaxFearTick), basicfont.Face7x13, x, y, color.RGBA{R: 255, G: 150, B: 150, A: 255})
+		drawBasicText(screen, x, y, fmt.Sprintf("Max Fear: %.2f (T=%d)", lv.obs.MaxFear, lv.obs.MaxFearTick), color.RGBA{R: 255, G: 150, B: 150, A: 255})
 		y += 15
 	}
 
 	if lv.obs.FirstPanicTick >= 0 {
-		text.Draw(screen, fmt.Sprintf("Panic: T=%d", lv.obs.FirstPanicTick), basicfont.Face7x13, x, y, color.RGBA{R: 255, G: 200, B: 100, A: 255})
+		drawBasicText(screen, x, y, fmt.Sprintf("Panic: T=%d", lv.obs.FirstPanicTick), color.RGBA{R: 255, G: 200, B: 100, A: 255})
 		y += 15
 	}
 
 	if lv.obs.CohesionBreakTick >= 0 {
-		text.Draw(screen, fmt.Sprintf("Cohesion Break: T=%d", lv.obs.CohesionBreakTick), basicfont.Face7x13, x, y, color.RGBA{R: 255, G: 100, B: 100, A: 255})
+		drawBasicText(screen, x, y, fmt.Sprintf("Cohesion Break: T=%d", lv.obs.CohesionBreakTick), color.RGBA{R: 255, G: 100, B: 100, A: 255})
 		y += 15
 	}
 
@@ -337,14 +345,14 @@ func (lv *LaboratoryVisualMode) drawStatus(screen *ebiten.Image) {
 		passed, reason := lv.test.Validate(lv.obs)
 		y += 10
 		if passed {
-			text.Draw(screen, "PASSED", basicfont.Face7x13, x, y, color.RGBA{R: 100, G: 255, B: 100, A: 255})
+			drawBasicText(screen, x, y, "PASSED", color.RGBA{R: 100, G: 255, B: 100, A: 255})
 		} else {
-			text.Draw(screen, "FAILED", basicfont.Face7x13, x, y, color.RGBA{R: 255, G: 100, B: 100, A: 255})
+			drawBasicText(screen, x, y, "FAILED", color.RGBA{R: 255, G: 100, B: 100, A: 255})
 		}
 		y += 15
 		reasonLines := wrapText(reason, 35)
 		for _, line := range reasonLines {
-			text.Draw(screen, line, basicfont.Face7x13, x, y, color.RGBA{R: 200, G: 200, B: 200, A: 255})
+			drawBasicText(screen, x, y, line, color.RGBA{R: 200, G: 200, B: 200, A: 255})
 			y += 13
 		}
 	}
@@ -359,13 +367,13 @@ func (lv *LaboratoryVisualMode) drawEvents(screen *ebiten.Image) {
 	panelY := float32(screenH) - panelH - 10
 
 	// Panel background
-	vector.DrawFilledRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 20, G: 25, B: 30, A: 230}, false)
+	vector.FillRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 20, G: 25, B: 30, A: 230}, false)
 	vector.StrokeRect(screen, panelX, panelY, panelW, panelH, 2, color.RGBA{R: 100, G: 120, B: 140, A: 255}, false)
 
 	y := int(panelY) + 20
 	x := int(panelX) + 10
 
-	text.Draw(screen, "Recent Events:", basicfont.Face7x13, x, y, color.RGBA{R: 200, G: 220, B: 255, A: 255})
+	drawBasicText(screen, x, y, "Recent Events:", color.RGBA{R: 200, G: 220, B: 255, A: 255})
 	y += 20
 
 	// Show last 10 events
@@ -388,7 +396,7 @@ func (lv *LaboratoryVisualMode) drawEvents(screen *ebiten.Image) {
 			eventColor = color.RGBA{R: 255, G: 150, B: 150, A: 255}
 		}
 
-		text.Draw(screen, eventText, basicfont.Face7x13, x, y, eventColor)
+		drawBasicText(screen, x, y, eventText, eventColor)
 		y += 13
 	}
 }
@@ -402,13 +410,13 @@ func (lv *LaboratoryVisualMode) drawHelp(screen *ebiten.Image) {
 	panelY := float32(screenH)/2 - panelH/2
 
 	// Panel background
-	vector.DrawFilledRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 30, G: 35, B: 40, A: 250}, false)
+	vector.FillRect(screen, panelX, panelY, panelW, panelH, color.RGBA{R: 30, G: 35, B: 40, A: 250}, false)
 	vector.StrokeRect(screen, panelX, panelY, panelW, panelH, 3, color.RGBA{R: 150, G: 170, B: 190, A: 255}, false)
 
 	y := int(panelY) + 25
 	x := int(panelX) + 15
 
-	text.Draw(screen, "Laboratory Test Controls", basicfont.Face7x13, x, y, color.RGBA{R: 200, G: 220, B: 255, A: 255})
+	drawBasicText(screen, x, y, "Laboratory Test Controls", color.RGBA{R: 200, G: 220, B: 255, A: 255})
 	y += 25
 
 	helpLines := []string{
@@ -429,7 +437,7 @@ func (lv *LaboratoryVisualMode) drawHelp(screen *ebiten.Image) {
 	}
 
 	for _, line := range helpLines {
-		text.Draw(screen, line, basicfont.Face7x13, x, y, color.RGBA{R: 200, G: 200, B: 200, A: 255})
+		drawBasicText(screen, x, y, line, color.RGBA{R: 200, G: 200, B: 200, A: 255})
 		y += 14
 	}
 }

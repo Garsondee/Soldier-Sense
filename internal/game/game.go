@@ -1076,6 +1076,13 @@ func (g *Game) Update() error {
 		return g.pendingExit
 	}
 
+	now := time.Now()
+	if g.lastUpdateTime.IsZero() {
+		g.lastUpdateTime = now
+	}
+	_ = now.Sub(g.lastUpdateTime)
+	g.lastUpdateTime = now
+
 	if g.simSpeed <= 0 {
 		// Paused: still update tracers so muzzle flashes fade.
 		g.combat.UpdateTracers()
@@ -1645,6 +1652,11 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	ox, oy := float32(0), float32(0)
 	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
 
+	// Vision cones: drawn early so buildings and units sit on top.
+	// Rendered into an offscreen buffer to avoid additive blowout.
+	g.drawVisionConesBuffered(screen, g.soldiers, color.RGBA{R: 200, G: 60, B: 40, A: 35}, 0.12)
+	g.drawVisionConesBuffered(screen, g.opfor, color.RGBA{R: 40, G: 80, B: 200, A: 35}, 0.12)
+
 	// Per-tile ground rendering from TileMap.
 	if g.tileMap != nil {
 		cs := float32(cellSize)
@@ -1929,6 +1941,9 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 
 	// Detailed info panel for selected soldier (world-space).
 	g.drawSelectedSoldierInfo(screen)
+
+	// Squad intent labels near squad leaders (world-space).
+	g.drawSquadIntentLabels(screen)
 
 	// Spotted indicator.
 	g.drawSpottedIndicators(screen, 0, 0)

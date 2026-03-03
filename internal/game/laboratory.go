@@ -618,11 +618,4 @@ func GetAllLaboratoryTests() []*LaboratoryTest {
 		FirstContactResponseTest(),
 		CohesionCollapseTest(),
 	}
-	return []*LaboratoryTest{
-		SuppressionResponseTest(),
-		FearThresholdTest(),
-		FormationMaintenanceTest(),
-		FirstContactResponseTest(),
-		CohesionCollapseTest(),
-	}
 }

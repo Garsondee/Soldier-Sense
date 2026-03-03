@@ -18,24 +18,17 @@ const (
 type soldierPerformance struct {
 	label                string
 	team                 game.Team
-	startX               float64
-	startY               float64
-	lastX                float64
-	lastY                float64
 	totalTicks           int
 	stationaryTicks      int
-	movingTicks          int
 	sawEnemyTicks        int
 	inRangeTicks         int
 	farFromLeaderTicks   int
-	maxDistFromLeader    float64
 	neverSawEnemy        bool
 	neverInRange         bool
 	immobile             bool
 	excessivelySeparated bool
 	immobilityPct        float64
 	separationPct        float64
-	positionSamples      int
 
 	// Diagnostic information
 	goalChanges      []goalChange
@@ -44,8 +37,6 @@ type soldierPerformance struct {
 	detachedEvents   []detachedEvent
 	proximityPartner string
 	proximityPct     float64
-	pathFailures     int
-	boundHoldTicks   int
 }
 
 type goalChange struct {
@@ -289,7 +280,9 @@ func extractFloatField(value, prefix string) float64 {
 		return 0
 	}
 	var f float64
-	fmt.Sscanf(s, "%f", &f)
+	if _, err := fmt.Sscanf(s, "%f", &f); err != nil {
+		return 0
+	}
 	return f
 }
 

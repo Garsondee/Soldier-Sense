@@ -1132,13 +1132,17 @@ func (s *Soldier) reinforceCurrentGoal() bool {
 	return false
 }
 
-// Update runs the soldier's per-tick cognition loop: believe → think → act.
 func (s *Soldier) Update() {
 	if s.state == SoldierStateDead {
 		return
 	}
-	tick0 := s.tickVal()
-	defer s.recordDebugSnapshot(tick0)
+	// Keep squad flow-field strategic goals in sync with the leader's current objective.
+	if s.squad != nil && s.squad.Leader == s {
+		s.updateSquadFlowFieldGoals()
+	}
+	if s.currentTick != nil {
+		s.recordDebugSnapshot(*s.currentTick)
+	}
 	if false {
 		_ = baseDecisionInterval
 		_ = minDecisionInterval
