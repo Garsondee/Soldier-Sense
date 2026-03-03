@@ -93,6 +93,6 @@ func (sh *SpatialHash) cellKey(x, y float64) int64 {
 
 // cellKeyFromCoords computes the hash key from cell coordinates.
 func (sh *SpatialHash) cellKeyFromCoords(cx, cy int) int64 {
-	// Simple pairing function for 2D -> 1D mapping
-	return int64(cy)<<32 | (int64(cx) & 0xffffffff)
+	// Simple pairing function for 2D -> 1D mapping; uint32 wrap is intentional for negative cell coords.
+	return int64(cy)<<32 | int64(uint32(cx)) // #nosec G115 -- intentional bit-packing
 }

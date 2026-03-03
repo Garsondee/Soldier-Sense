@@ -197,7 +197,7 @@ func (s *Soldier) tickSelfAid(tick int) {
 		pain := s.body.TotalPain()
 		successChance := treatmentSuccessChance(s, pain)
 
-		if rand.Float64() < successChance { // #nosec G404 -- non-crypto RNG is appropriate for game simulation
+		if rand.Float64() < successChance {
 			// Success: mark wound as treated.
 			treat.TargetWound.Treated = true
 			treat.TargetWound.TreatedTick = tick
@@ -333,7 +333,7 @@ func tickProvidedAid(casualty *Soldier, tick int) {
 			successChance = clamp01(successChance + 0.2)
 		}
 
-		if rand.Float64() < successChance { // #nosec G404 -- non-crypto RNG is appropriate for game simulation
+		if rand.Float64() < successChance {
 			// Success: apply treatment effect.
 			switch treat.Action {
 			case TreatApplyTourniquet:

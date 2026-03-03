@@ -13,13 +13,13 @@ import (
 func main() {
 	var listTests bool
 	var testName string
-	
+
 	flag.BoolVar(&listTests, "list", false, "List all available laboratory tests")
 	flag.StringVar(&testName, "test", "", "Run a specific laboratory test by name")
 	flag.Parse()
-	
+
 	tests := game.GetAllLaboratoryTests()
-	
+
 	if listTests {
 		fmt.Println("Available Laboratory Tests:")
 		fmt.Println()
@@ -32,9 +32,9 @@ func main() {
 		}
 		return
 	}
-	
+
 	var selectedTest *game.LaboratoryTest
-	
+
 	if testName != "" {
 		// Find test by name
 		for _, test := range tests {
@@ -63,7 +63,7 @@ func main() {
 		}
 		selectedTest = tests[choice-1]
 	}
-	
+
 	fmt.Printf("\nStarting laboratory test: %s\n", selectedTest.Name)
 	fmt.Printf("Description: %s\n", selectedTest.Description)
 	fmt.Printf("Expected: %s\n\n", selectedTest.Expected)
@@ -76,15 +76,15 @@ func main() {
 	fmt.Println("  E        - Toggle events panel")
 	fmt.Println("  ESC      - Exit")
 	fmt.Println()
-	
+
 	// Create visual mode
 	labMode := game.NewLaboratoryVisualMode(selectedTest)
-	
+
 	// Set window properties
 	ebiten.SetWindowSize(1280, 720)
 	ebiten.SetWindowTitle(fmt.Sprintf("Laboratory Test: %s", selectedTest.Name))
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
-	
+
 	// Run the test
 	if err := ebiten.RunGame(labMode); err != nil {
 		log.Fatal(err)
