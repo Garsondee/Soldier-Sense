@@ -9,14 +9,14 @@ const (
 )
 
 // VisionState tracks a soldier's current look direction and what they see.
-type VisionState struct {
-	// KnownContacts are soldiers this agent can currently see.
-	KnownContacts []*Soldier
-	inConeScratch map[*Soldier]bool
-
+type VisionState struct { //nolint:govet
 	Heading  float64 // radians, 0 = right, pi/2 = down
 	FOV      float64 // radians, total arc width
 	MaxRange float64 // pixels
+
+	// KnownContacts are soldiers this agent can currently see.
+	KnownContacts []*Soldier
+	inConeScratch map[*Soldier]bool
 }
 
 // NewVisionState creates a vision state with defaults.
@@ -83,7 +83,7 @@ func normalizeAngle(a float64) float64 {
 
 // PerformVisionScan uses the spotting accumulator system to gradually detect targets.
 // Phase 1 implementation - replaces binary detection with time-weighted confidence build-up.
-func (v *VisionState) PerformVisionScan(ox, oy float64, observer *Soldier, candidates []*Soldier, buildings []rect, covers []*CoverObject, threats *[]ThreatFact, currentTick int) { //nolint:gocognit,gocyclo
+func (v *VisionState) PerformVisionScan(ox, oy float64, observer *Soldier, candidates []*Soldier, buildings []rect, covers []*CoverObject, losIndex *LOSIndex, threats *[]ThreatFact, currentTick int) { //nolint:gocognit,gocyclo
 	const spottingThreshold = 0.85
 	const ticksPerSecond = 60.0
 
@@ -104,7 +104,7 @@ func (v *VisionState) PerformVisionScan(ox, oy float64, observer *Soldier, candi
 		}
 
 		// Check line of sight
-		if !HasLineOfSightWithCover(ox, oy, c.x, c.y, buildings, covers) {
+		if !HasLineOfSightWithCoverIndexed(ox, oy, c.x, c.y, buildings, covers, losIndex) {
 			continue
 		}
 

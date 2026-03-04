@@ -128,7 +128,7 @@ func TestPerformVisionScan_NoBuildings(t *testing.T) {
 	threats := []ThreatFact{}
 	for i := 0; i < 120; i++ {
 		tick = i
-		v.PerformVisionScan(0, 0, observer, []*Soldier{target}, nil, nil, &threats, tick)
+		v.PerformVisionScan(0, 0, observer, []*Soldier{target}, nil, nil, nil, &threats, tick)
 		if len(v.KnownContacts) == 1 {
 			break
 		}
@@ -148,7 +148,7 @@ func TestPerformVisionScan_BlockedByBuilding(t *testing.T) {
 	threats := []ThreatFact{}
 	observer := NewSoldier(0, 0, 0, TeamRed, [2]float64{0, 0}, [2]float64{100, 0},
 		NewNavGrid(640, 480, buildings, 0, nil, nil), nil, nil, NewThoughtLog(), &tick)
-	v.PerformVisionScan(0, 0, observer, []*Soldier{target}, buildings, nil, &threats, 0)
+	v.PerformVisionScan(0, 0, observer, []*Soldier{target}, buildings, nil, nil, &threats, 0)
 	if len(v.KnownContacts) != 0 {
 		t.Fatalf("expected 0 contacts (building blocks LOS), got %d", len(v.KnownContacts))
 	}

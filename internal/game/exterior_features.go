@@ -4,6 +4,13 @@ import (
 	"math/rand"
 )
 
+func safeIntn(rng *rand.Rand, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return rng.Intn(n)
+}
+
 // ExteriorFeatureType represents different types of building attachments.
 type ExteriorFeatureType uint8
 
@@ -280,22 +287,22 @@ func generateLoadingDockGeometry(building rect, attachedFace int, rng *rand.Rand
 	switch attachedFace {
 	case 0: // North face
 		dockW := int(float64(building.w) * (0.3 + rng.Float64()*0.5)) // 30-80% building width
-		dockX := building.x + rng.Intn(building.w-dockW)              // Random position along face
+		dockX := building.x + safeIntn(rng, building.w-dockW)         // Random position along face
 		return rect{x: dockX, y: building.y - dockDepth, w: dockW, h: dockDepth}
 
 	case 1: // South face
 		dockW := int(float64(building.w) * (0.3 + rng.Float64()*0.5))
-		dockX := building.x + rng.Intn(building.w-dockW)
+		dockX := building.x + safeIntn(rng, building.w-dockW)
 		return rect{x: dockX, y: building.y + building.h, w: dockW, h: dockDepth}
 
 	case 2: // East face
 		dockH := int(float64(building.h) * (0.3 + rng.Float64()*0.5))
-		dockY := building.y + rng.Intn(building.h-dockH)
+		dockY := building.y + safeIntn(rng, building.h-dockH)
 		return rect{x: building.x + building.w, y: dockY, w: dockDepth, h: dockH}
 
 	case 3: // West face
 		dockH := int(float64(building.h) * (0.3 + rng.Float64()*0.5))
-		dockY := building.y + rng.Intn(building.h-dockH)
+		dockY := building.y + safeIntn(rng, building.h-dockH)
 		return rect{x: building.x - dockDepth, y: dockY, w: dockDepth, h: dockH}
 
 	default:
@@ -332,22 +339,22 @@ func generateParkingGeometry(building rect, attachedFace int, rng *rand.Rand) re
 	switch attachedFace {
 	case 0: // North face
 		parkingW := int(float64(building.w) * (0.6 + rng.Float64()*0.4)) // 60-100% building width
-		parkingX := building.x + rng.Intn(building.w-parkingW)
+		parkingX := building.x + safeIntn(rng, building.w-parkingW)
 		return rect{x: parkingX, y: building.y - parkingDepth, w: parkingW, h: parkingDepth}
 
 	case 1: // South face
 		parkingW := int(float64(building.w) * (0.6 + rng.Float64()*0.4))
-		parkingX := building.x + rng.Intn(building.w-parkingW)
+		parkingX := building.x + safeIntn(rng, building.w-parkingW)
 		return rect{x: parkingX, y: building.y + building.h, w: parkingW, h: parkingDepth}
 
 	case 2: // East face
 		parkingH := int(float64(building.h) * (0.6 + rng.Float64()*0.4))
-		parkingY := building.y + rng.Intn(building.h-parkingH)
+		parkingY := building.y + safeIntn(rng, building.h-parkingH)
 		return rect{x: building.x + building.w, y: parkingY, w: parkingDepth, h: parkingH}
 
 	case 3: // West face
 		parkingH := int(float64(building.h) * (0.6 + rng.Float64()*0.4))
-		parkingY := building.y + rng.Intn(building.h-parkingH)
+		parkingY := building.y + safeIntn(rng, building.h-parkingH)
 		return rect{x: building.x - parkingDepth, y: parkingY, w: parkingDepth, h: parkingH}
 
 	default:
@@ -362,19 +369,19 @@ func generateShedGeometry(building rect, attachedFace int, rng *rand.Rand) rect 
 
 	switch attachedFace {
 	case 0: // North face
-		shedX := building.x + rng.Intn(building.w-shedSize)
+		shedX := building.x + safeIntn(rng, building.w-shedSize)
 		return rect{x: shedX, y: building.y - distance - shedSize, w: shedSize, h: shedSize}
 
 	case 1: // South face
-		shedX := building.x + rng.Intn(building.w-shedSize)
+		shedX := building.x + safeIntn(rng, building.w-shedSize)
 		return rect{x: shedX, y: building.y + building.h + distance, w: shedSize, h: shedSize}
 
 	case 2: // East face
-		shedY := building.y + rng.Intn(building.h-shedSize)
+		shedY := building.y + safeIntn(rng, building.h-shedSize)
 		return rect{x: building.x + building.w + distance, y: shedY, w: shedSize, h: shedSize}
 
 	case 3: // West face
-		shedY := building.y + rng.Intn(building.h-shedSize)
+		shedY := building.y + safeIntn(rng, building.h-shedSize)
 		return rect{x: building.x - distance - shedSize, y: shedY, w: shedSize, h: shedSize}
 
 	default:
@@ -389,22 +396,22 @@ func generateCarportGeometry(building rect, attachedFace int, rng *rand.Rand) re
 	switch attachedFace {
 	case 0: // North face
 		carportW := int(float64(building.w) * (0.4 + rng.Float64()*0.4)) // 40-80% building width
-		carportX := building.x + rng.Intn(building.w-carportW)
+		carportX := building.x + safeIntn(rng, building.w-carportW)
 		return rect{x: carportX, y: building.y - carportDepth, w: carportW, h: carportDepth}
 
 	case 1: // South face
 		carportW := int(float64(building.w) * (0.4 + rng.Float64()*0.4))
-		carportX := building.x + rng.Intn(building.w-carportW)
+		carportX := building.x + safeIntn(rng, building.w-carportW)
 		return rect{x: carportX, y: building.y + building.h, w: carportW, h: carportDepth}
 
 	case 2: // East face
 		carportH := int(float64(building.h) * (0.4 + rng.Float64()*0.4))
-		carportY := building.y + rng.Intn(building.h-carportH)
+		carportY := building.y + safeIntn(rng, building.h-carportH)
 		return rect{x: building.x + building.w, y: carportY, w: carportDepth, h: carportH}
 
 	case 3: // West face
 		carportH := int(float64(building.h) * (0.4 + rng.Float64()*0.4))
-		carportY := building.y + rng.Intn(building.h-carportH)
+		carportY := building.y + safeIntn(rng, building.h-carportH)
 		return rect{x: building.x - carportDepth, y: carportY, w: carportDepth, h: carportH}
 
 	default:
@@ -449,7 +456,7 @@ func generateWalkwayGeometry(building rect, attachedFace int, rng *rand.Rand) re
 
 	switch attachedFace {
 	case 0, 1: // North or South face - horizontal walkway
-		walkwayX := building.x + rng.Intn(building.w-walkwayWidth)
+		walkwayX := building.x + safeIntn(rng, building.w-walkwayWidth)
 		var walkwayY int
 		if attachedFace == 0 {
 			walkwayY = building.y - walkwayLength
@@ -459,7 +466,7 @@ func generateWalkwayGeometry(building rect, attachedFace int, rng *rand.Rand) re
 		return rect{x: walkwayX, y: walkwayY, w: walkwayWidth, h: walkwayLength}
 
 	case 2, 3: // East or West face - vertical walkway
-		walkwayY := building.y + rng.Intn(building.h-walkwayWidth)
+		walkwayY := building.y + safeIntn(rng, building.h-walkwayWidth)
 		var walkwayX int
 		if attachedFace == 2 {
 			walkwayX = building.x + building.w

@@ -476,28 +476,51 @@ Recent code changes have started addressing the allocation findings listed above
 
 ### Phase 2 — High-impact shared systems
 
-- [ ] Implement a shared LOS acceleration strategy (spatial bins / broad-phase candidate pruning).
-- [ ] Route major LOS consumers to the same accelerated query path.
+- [x] Implement a shared LOS acceleration strategy (spatial bins / broad-phase candidate pruning).
+  - [x] Added shared `LOSIndex` broad-phase bins for buildings + LOS-blocking cover.
+  - [x] Added indexed LOS helpers while preserving legacy wrappers for compatibility.
+- [x] Route major LOS consumers to the same accelerated query path.
+  - [x] Vision scan + peek scan now use indexed LOS checks.
+  - [x] Combat LOS checks (fire lines and gunfire occlusion) now use indexed LOS checks.
+  - [x] Squad ally-visibility/fear aggregation LOS checks now use indexed LOS checks.
+  - [x] Vision-cone ray clipping now uses indexed building candidates.
 - [ ] Validate LOS correctness parity with existing behaviour (windows, cover classes, edge cases).
+  - [x] `go test ./internal/game/...` passes after integration.
+  - [ ] Add/extend explicit parity tests for indexed vs non-indexed paths (including window LOS helper parity).
 
 ### Phase 3 — Intel and tactical map cost reduction
 
 - [ ] Reduce full-grid intel passes where possible (dirty regions / staggered updates / lower-frequency derived layers).
-- [ ] Optimise fog-of-war clearing (`clearVisibleCells`) to avoid redundant writes.
+  - [x] Staggered `IntelSafeTerritory` recompute to one team map per tick during normal two-team simulation updates.
+  - [x] Staggered `IntelThreatDensity` accumulation to the same one-team-per-tick schedule during normal two-team updates.
+  - [x] Preserved full recompute fallback when one side is absent (tests/sandbox scenarios) to avoid stale safe-territory state.
+- [x] Optimise fog-of-war clearing (`clearVisibleCells`) to avoid redundant writes.
+  - [x] Added per-scan stamped seen-cell dedupe in `IntelStore` so repeated cone samples do not rewrite the same unexplored cell.
 - [ ] Replace repeated `SumInRadius` scans with cheaper aggregation (prefix sums, cached tiles, or quantised rings).
+  - [x] Reduced `SumInRadius`/`MaxInRadius` inner-loop cost by switching to cell-space delta math (removed per-cell `CellToWorld` conversion).
 - [ ] Re-profile tactical decision paths after intel-layer changes.
 
 ### Phase 4 — Pathfinding and movement pipeline
 
 - [ ] Add pathfinding counters (calls, expanded nodes, fail rate, average/95p runtime).
+  - [x] Added `NavGrid` pathfinding counters and runtime sampling (`calls`, `failures`, `expanded nodes`, `avg ms`, `p95 ms`).
+  - [x] Surfaced per-run pathfinding summary line in `cmd/headless-report` output.
 - [ ] Reduce avoidable repaths (slot drift thresholds, cooldowns, shared squad-level path intents).
+  - [x] Added moderate-drift repath cooldown in `moveToContact` while preserving immediate repath on missing/terminal paths and large target drift.
+  - [x] Added formation repath cooldown gating in `UpdateFormation` for moderate slot drift, with forced repath on missing paths/large drift.
 - [ ] Optimise path smoothing/look-ahead LOS checks (limit frequency, early exits, caching).
+  - [x] Switched movement path-smoothing LOS checks in `moveAlongPath` to indexed LOS queries when available.
+  - [x] Added smoothing target/cache reuse with tick-throttled recalculation (`pathLookaheadRecalcTicks`) to reduce repeated LOS scans.
 - [ ] Verify no regression in formation cohesion and responsiveness.
 
 ### Phase 5 — Rendering pass consolidation
 
 - [ ] Prioritise culling/visibility limits for expensive world draw loops.
+  - [x] Added camera-aware culling to speech bubble rendering and overlap checks so off-screen soldiers/bubbles are skipped.
+  - [x] Stopped rebuilding chest-wall neighbour lookup every frame; chest-wall set is now rebuilt once and reused while cover layout is unchanged.
 - [ ] Reduce redundant full-map passes (terrain overlays, road details, heat overlays) when not visible.
+  - [x] Switched terrain cache blit to camera-visible sub-rect (`drawTerrainLayerVisible`) instead of drawing full-map terrain buffer every frame.
+  - [x] Added low-zoom gate for heat overlays (`camZoom >= 0.35`) to skip expensive overlay passes when not meaningfully readable.
 - [ ] Trim high-cost vector-heavy effects under load (adaptive quality for tracers/glow/labels).
 - [ ] Confirm visual fidelity remains acceptable at target frame budgets.
 
@@ -658,3 +681,432 @@ Before/after delta vs previous rendered capture (vision-cone culling/adaptive de
 - fps: `17.46 -> 18.91` (`+8.3%`)
 - avg_world_ms_per_frame: `13.044 -> 10.972` (`-15.9%`)
 - avg_frame_cpu_ms_buckets: `14.209 -> 12.179` (`-14.3%`)
+
+### Rendered capture after effects culling + cached vignette layer
+
+Changes applied:
+
+- Added camera-bounds culling for:
+  - spotted indicators,
+  - radio visual effects,
+  - gunfire lighting blooms.
+- Added adaptive segment count for radio effect arcs based on zoom.
+- Cached static vignette into `vignetteBuf` and blit per-frame instead of re-drawing layered rect bands each frame.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30`
+
+Latest captured output (post-change):
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.006`
+- frame_count: `562`
+- fps: `18.73`
+- sim_tick_count: `1243`
+- avg_sim_ms_per_tick: `18.732`
+- avg_world_ms_per_frame: `9.289`
+- avg_ui_ms_per_frame: `1.227`
+- avg_frame_cpu_ms_buckets: `10.515`
+
+Before/after delta vs previous rendered capture (camera-aware world/overlay culling):
+
+- fps: `18.91 -> 18.73` (`-1.0%`)
+- avg_world_ms_per_frame: `10.972 -> 9.289` (`-15.3%`)
+- avg_frame_cpu_ms_buckets: `12.179 -> 10.515` (`-13.7%`)
+
+### Rendered capture after low-zoom tactical overlay gating
+
+Changes applied:
+
+- Added low-zoom quality gates (`camZoom > 0.75`) to skip expensive tactical overlays at wide zoom:
+  - movement intent lines,
+  - officer orders,
+  - squad intent labels,
+  - spotted indicators.
+- Added map-generation stability guard in exterior feature geometry placement (`safeIntn`) so performance capture runs no longer fail intermittently on invalid `Intn` bounds.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30`
+
+Latest captured output (post-change):
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.019`
+- frame_count: `556`
+- fps: `18.52`
+- sim_tick_count: `1260`
+- avg_sim_ms_per_tick: `14.022`
+- avg_world_ms_per_frame: `19.189`
+- avg_ui_ms_per_frame: `1.098`
+- avg_frame_cpu_ms_buckets: `20.287`
+
+Notes:
+
+- Rendered capture remains highly map-seed dependent (building/exterior density has a large impact).
+- For tighter before/after attribution, the next step should be adding an explicit map-seed flag to rendered perf capture and running fixed-seed comparisons.
+
+### Rendered capture after Phase 2 LOS acceleration integration
+
+Changes applied:
+
+- Added shared LOS broad-phase index (`LOSIndex`) for buildings + LOS-blocking cover.
+- Routed major LOS consumers to indexed queries (vision scan/peek, combat LOS and occlusion, squad ally visibility checks).
+- Updated vision-cone ray clipping to use indexed building candidate queries.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30`
+
+Latest captured output (post-change):
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.009`
+- frame_count: `417`
+- fps: `13.90`
+- sim_tick_count: `869`
+- avg_sim_ms_per_tick: `23.890`
+- avg_world_ms_per_frame: `18.581`
+- avg_ui_ms_per_frame: `1.535`
+- avg_frame_cpu_ms_buckets: `20.116`
+
+Before/after delta vs previous rendered capture (low-zoom tactical overlay gating):
+
+- fps: `18.52 -> 13.90` (`-24.9%`)
+- avg_world_ms_per_frame: `19.189 -> 18.581` (`-3.2%`)
+- avg_ui_ms_per_frame: `1.098 -> 1.535` (`+39.8%`)
+- avg_frame_cpu_ms_buckets: `20.287 -> 20.116` (`-0.8%`)
+- avg_sim_ms_per_tick: `14.022 -> 23.890` (`+70.4%`)
+
+Notes:
+
+- This run used map seed `1772662917844503700` and generated a different layout density profile, so these deltas are not clean attribution for the LOS change set.
+- World-frame CPU bucket stayed roughly flat/slightly improved, but simulation tick cost was significantly higher in this seed.
+- Next mandatory step for credible attribution: repeat A/B runs with identical seeds.
+
+### Perf capture protocol update (fixed seed policy)
+
+From this point onwards, all rendered performance captures should use an explicit map seed so before/after comparisons are attributable.
+
+Standard command format:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Policy:
+
+- Keep `-map-seed` constant while measuring a change set.
+- If changing the seed for scenario coverage, log it explicitly and do not compare directly against other seeds.
+
+### Seeded capture after adding explicit `-map-seed` support
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Captured output:
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.040`
+- frame_count: `344`
+- fps: `11.45`
+- sim_tick_count: `677`
+- avg_sim_ms_per_tick: `28.783`
+- avg_world_ms_per_frame: `25.878`
+- avg_ui_ms_per_frame: `1.947`
+- avg_frame_cpu_ms_buckets: `27.825`
+
+Notes:
+
+- This seeded run provided a deterministic baseline for further LOS-index tuning.
+
+### Seeded capture after LOS index query-overhead reduction
+
+Changes applied:
+
+- Reworked LOS candidate de-duplication to use generation-stamped seen maps, avoiding per-query full map clears in index lookups.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Captured output:
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.025`
+- frame_count: `459`
+- fps: `15.29`
+- sim_tick_count: `920`
+- avg_sim_ms_per_tick: `25.047`
+- avg_world_ms_per_frame: `11.732`
+- avg_ui_ms_per_frame: `1.727`
+- avg_frame_cpu_ms_buckets: `13.459`
+
+Before/after delta vs previous seeded run (same seed):
+
+- fps: `11.45 -> 15.29` (`+33.5%`)
+- avg_world_ms_per_frame: `25.878 -> 11.732` (`-54.7%`)
+- avg_ui_ms_per_frame: `1.947 -> 1.727` (`-11.3%`)
+- avg_frame_cpu_ms_buckets: `27.825 -> 13.459` (`-51.6%`)
+- avg_sim_ms_per_tick: `28.783 -> 25.047` (`-13.0%`)
+
+### Static object/rubble flattening experiment (seeded)
+
+Hypothesis:
+
+- Flattening static tile objects + cover/rubble into a cached layer should reduce per-frame draw cost.
+
+Implementation trial:
+
+- Added a static object cache layer and blitted it in `drawWorld`.
+- Left notes in code to support future invalidation for dynamic battlefields.
+
+Seeded captures during trial (same seed):
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Run A:
+
+- fps: `13.72`
+- avg_sim_ms_per_tick: `30.761`
+- avg_world_ms_per_frame: `12.760`
+- avg_frame_cpu_ms_buckets: `14.929`
+
+Run B:
+
+- fps: `12.12`
+- avg_sim_ms_per_tick: `24.688`
+- avg_world_ms_per_frame: `27.134`
+- avg_frame_cpu_ms_buckets: `28.999`
+
+Assessment:
+
+- Results were unstable and generally worse than the prior best seeded run (`fps 15.29`, `avg_frame_cpu_ms_buckets 13.459`).
+- Decision: revert full static object-layer flattening for now.
+
+Forward path (keeps future dynamic battlefields open):
+
+- Keep current direct rendering for tile objects/cover.
+- If revisiting flattening later, prefer smaller cached sub-layers or tile sprites with explicit dirty-region invalidation hooks.
+
+### Seeded capture after additional Phase 3 full-grid intel pass reduction
+
+Changes applied:
+
+- Reduced full-grid derived intel work during normal two-team simulation updates by staggering `IntelThreatDensity` accumulation to one team map per tick (aligned with staggered `IntelSafeTerritory` recompute).
+- Preserved full derived-layer recompute when one side is absent to maintain expected behaviour in test/sandbox cases.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Captured output:
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.010`
+- frame_count: `489`
+- fps: `16.29`
+- sim_tick_count: `1065`
+- avg_sim_ms_per_tick: `18.015`
+- avg_world_ms_per_frame: `18.920`
+- avg_ui_ms_per_frame: `1.251`
+- avg_frame_cpu_ms_buckets: `20.171`
+
+Before/after delta vs previous seeded run (post `SumInRadius`/`MaxInRadius` cell-space optimisation):
+
+- fps: `16.21 -> 16.29` (`+0.5%`)
+- avg_sim_ms_per_tick: `18.508 -> 18.015` (`-2.7%`)
+- avg_world_ms_per_frame: `18.273 -> 18.920` (`+3.5%`)
+- avg_ui_ms_per_frame: `1.100 -> 1.251` (`+13.7%`)
+- avg_frame_cpu_ms_buckets: `19.373 -> 20.171` (`+4.1%`)
+
+### Headless capture after Phase 4 repath gating pass
+
+Changes applied:
+
+- Added pathfinding counters in `NavGrid` and surfaced per-run pathfinding summary in `cmd/headless-report`.
+- Added cooldown-gated repath policy for moderate drift in both contact movement and squad formation updates.
+
+Capture command:
+
+`go run ./cmd/headless-report -runs 5 -ticks 3600 -seed-base 42 -seed-step 1`
+
+Captured output (perf summary):
+
+- setup: `28.08184ms / 19.5357ms / 38.9985ms`
+- sim: `2.8775942s / 2.0332964s / 3.7292921s`
+- post: `1.33242ms / 1.0174ms / 2.0725ms`
+- total: `2.90700846s / 2.0706525s / 3.7562368s`
+
+Derived from the same report output:
+
+- sim throughput (aggregate avg): ~`1251 ticks/sec` (`3600 / 2.8775942`)
+- sim cost per tick (aggregate avg): ~`799.3 µs/tick`
+
+Comparison notes:
+
+- Versus baseline headless snapshot (`sim 3.08835624s`, `857.9 µs/tick`): improved by ~`6.8%` in sim duration and ~`6.8%` in per-tick cost.
+- Versus previous recent Phase 4 trial (`sim 3.38636304s`): improved by ~`15.0%` in sim duration.
+
+### Seeded rendered capture after Phase 4 repath gating changes
+
+Changes applied since prior seeded rendered capture:
+
+- Added cooldown-gated moderate-drift repath logic in `moveToContact`.
+- Added cooldown-gated moderate-drift repath logic in squad `UpdateFormation`.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Captured output:
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.049`
+- frame_count: `489`
+- fps: `16.27`
+- sim_tick_count: `1128`
+- avg_sim_ms_per_tick: `16.220`
+- avg_world_ms_per_frame: `20.956`
+- avg_ui_ms_per_frame: `1.051`
+- avg_frame_cpu_ms_buckets: `22.007`
+
+Before/after delta vs previous seeded rendered capture (`fps 16.29`, `avg_frame_cpu_ms_buckets 20.171`):
+
+- fps: `16.29 -> 16.27` (`-0.1%`)
+- avg_sim_ms_per_tick: `18.015 -> 16.220` (`-10.0%`)
+- avg_world_ms_per_frame: `18.920 -> 20.956` (`+10.8%`)
+- avg_ui_ms_per_frame: `1.251 -> 1.051` (`-16.0%`)
+- avg_frame_cpu_ms_buckets: `20.171 -> 22.007` (`+9.1%`)
+
+Assessment:
+
+- FPS is effectively flat on this seeded rendered scenario.
+- Simulation tick cost improved, but world-frame draw bucket increased enough that total frame CPU bucket rose.
+- Net rendered gain is not established yet for this change set.
+
+### Headless capture after Phase 4 path-smoothing LOS optimisation
+
+Changes applied:
+
+- `moveAlongPath` now uses indexed LOS (`HasLineOfSightIndexed`) for waypoint look-ahead smoothing checks.
+- Added short tick-throttled smoothing recalc cadence (`pathLookaheadRecalcTicks`) and reuse of the last smoothing target index.
+
+Capture command:
+
+`go run ./cmd/headless-report -runs 5 -ticks 3600 -seed-base 42 -seed-step 1`
+
+Captured output (perf summary):
+
+- setup: `26.30058ms / 19.4151ms / 33.9919ms`
+- sim: `2.71086814s / 1.8438446s / 3.5809813s`
+- post: `1.70174ms / 510µs / 2.7816ms`
+- total: `2.73887046s / 1.8785806s / 3.6062831s`
+
+Derived from the same report output:
+
+- sim throughput (aggregate avg): ~`1328 ticks/sec` (`3600 / 2.71086814`)
+- sim cost per tick (aggregate avg): ~`753.0 µs/tick`
+
+Comparison notes:
+
+- Versus previous Phase 4 repath-gating headless capture (`sim 2.8775942s`, `799.3 µs/tick`): improved by ~`5.8%` in sim duration and per-tick cost.
+- Versus baseline headless snapshot (`sim 3.08835624s`, `857.9 µs/tick`): improved by ~`12.2%` in sim duration and per-tick cost.
+
+### Seeded rendered capture after Phase 5 speech-bubble culling
+
+Changes applied:
+
+- Added camera-aware culling in `drawSpeechBubbles` to skip off-screen bubble rendering and off-screen overlap checks.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Captured output:
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.021`
+- frame_count: `518`
+- fps: `17.25`
+- sim_tick_count: `1203`
+- avg_sim_ms_per_tick: `16.084`
+- avg_world_ms_per_frame: `17.733`
+- avg_ui_ms_per_frame: `1.057`
+- avg_frame_cpu_ms_buckets: `18.790`
+
+Before/after delta vs previous seeded rendered capture (`fps 16.27`, `avg_frame_cpu_ms_buckets 22.007`):
+
+- fps: `16.27 -> 17.25` (`+6.0%`)
+- avg_sim_ms_per_tick: `16.220 -> 16.084` (`-0.8%`)
+- avg_world_ms_per_frame: `20.956 -> 17.733` (`-15.4%`)
+- avg_ui_ms_per_frame: `1.051 -> 1.057` (`+0.6%`)
+- avg_frame_cpu_ms_buckets: `22.007 -> 18.790` (`-14.6%`)
+
+### Seeded rendered capture after Phase 5 cover-neighbour cache reuse
+
+Changes applied:
+
+- `drawCoverObjects` no longer rebuilds chest-wall neighbor lookup each frame.
+- Chest-wall set is now lazily rebuilt once and reused until cover layout changes.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Captured output:
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.008`
+- frame_count: `455`
+- fps: `15.16`
+- sim_tick_count: `1017`
+- avg_sim_ms_per_tick: `16.874`
+- avg_world_ms_per_frame: `24.792`
+- avg_ui_ms_per_frame: `1.182`
+- avg_frame_cpu_ms_buckets: `25.975`
+
+Before/after delta vs previous seeded rendered capture (`fps 17.25`, `avg_frame_cpu_ms_buckets 18.790`):
+
+- fps: `17.25 -> 15.16` (`-12.1%`)
+- avg_sim_ms_per_tick: `16.084 -> 16.874` (`+4.9%`)
+- avg_world_ms_per_frame: `17.733 -> 24.792` (`+39.8%`)
+- avg_ui_ms_per_frame: `1.057 -> 1.182` (`+11.8%`)
+- avg_frame_cpu_ms_buckets: `18.790 -> 25.975` (`+38.2%`)
+
+Notes:
+
+- This regression is unlikely to be caused solely by the chest-wall cache change, given the scope and expected cost of that path.
+- Camera behavior changed to auto-frame-follow in the same development window, which may materially alter rendered workload per frame versus previous captures.
+- For cleaner attribution of future rendering changes, keep map seed fixed and camera mode fixed during A/B runs.
+
+### Seeded rendered capture after terrain visible-blit + low-zoom heat overlay gating
+
+Changes applied:
+
+- Terrain layer now draws only the camera-visible sub-rectangle from `terrainBuf` (`drawTerrainLayerVisible`).
+- Heat overlays now skip drawing when zoomed out below `0.35` where detail is not readable.
+
+Capture command:
+
+`go run ./cmd/render-perf-capture -seconds 30 -map-seed 1772662917844503700`
+
+Captured output:
+
+- duration_target_seconds: `30`
+- duration_actual_seconds: `30.017`
+- frame_count: `477`
+- fps: `15.89`
+- sim_tick_count: `1119`
+- avg_sim_ms_per_tick: `15.563`
+- avg_world_ms_per_frame: `23.160`
+- avg_ui_ms_per_frame: `1.130`
+- avg_frame_cpu_ms_buckets: `24.290`
+
+Before/after delta vs previous seeded rendered capture (`fps 15.16`, `avg_frame_cpu_ms_buckets 25.975`):
+
+- fps: `15.16 -> 15.89` (`+4.8%`)
+- avg_sim_ms_per_tick: `16.874 -> 15.563` (`-7.8%`)
+- avg_world_ms_per_frame: `24.792 -> 23.160` (`-6.6%`)
+- avg_ui_ms_per_frame: `1.182 -> 1.130` (`-4.4%`)
+- avg_frame_cpu_ms_buckets: `25.975 -> 24.290` (`-6.5%`)

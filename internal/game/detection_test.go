@@ -86,7 +86,7 @@ func TestAccumulator_Basic(t *testing.T) {
 
 	var confirmed bool
 	for i := 0; i < 300; i++ { // Up to 5 seconds at 60fps
-		vision.PerformVisionScan(0, 0, observer, candidates, nil, nil, &threats, i)
+		vision.PerformVisionScan(0, 0, observer, candidates, nil, nil, nil, &threats, i)
 
 		if len(vision.KnownContacts) > 0 {
 			confirmed = true
@@ -126,7 +126,7 @@ func TestAccumulator_ProneHarder(t *testing.T) {
 	candidates := []*Soldier{target}
 
 	for i := 0; i < 300; i++ { // 5 seconds at 60fps
-		vision.PerformVisionScan(0, 0, observer, candidates, nil, nil, &threats, i)
+		vision.PerformVisionScan(0, 0, observer, candidates, nil, nil, nil, &threats, i)
 
 		if len(vision.KnownContacts) > 0 {
 			t.Fatalf("Prone target should NOT be detected by low-awareness observer within 5s, but was detected at tick %d", i+1)
@@ -174,7 +174,7 @@ func TestAccumulator_HighAwarenessDetectsProne(t *testing.T) {
 
 	var confirmed bool
 	for i := 0; i < 1800; i++ { // 30 seconds at 60fps
-		vision.PerformVisionScan(0, 0, observer, candidates, nil, nil, &threats, i)
+		vision.PerformVisionScan(0, 0, observer, candidates, nil, nil, nil, &threats, i)
 
 		if len(vision.KnownContacts) > 0 {
 			confirmed = true
@@ -217,8 +217,8 @@ func TestLKPFadeRate_AwarenessScaling(t *testing.T) {
 	threatsHigh := []ThreatFact{}
 
 	// First tick: both see the target
-	visionLow.PerformVisionScan(0, 0, lowAware, []*Soldier{target}, nil, nil, &threatsLow, 0)
-	visionHigh.PerformVisionScan(0, 0, highAware, []*Soldier{target}, nil, nil, &threatsHigh, 0)
+	visionLow.PerformVisionScan(0, 0, lowAware, []*Soldier{target}, nil, nil, nil, &threatsLow, 0)
+	visionHigh.PerformVisionScan(0, 0, highAware, []*Soldier{target}, nil, nil, nil, &threatsHigh, 0)
 
 	// Confirm both detected
 	if len(visionLow.KnownContacts) == 0 || len(visionHigh.KnownContacts) == 0 {
@@ -227,8 +227,8 @@ func TestLKPFadeRate_AwarenessScaling(t *testing.T) {
 
 	// Now remove target from view and let LKP fade
 	for i := 1; i < 300; i++ {
-		visionLow.PerformVisionScan(0, 0, lowAware, []*Soldier{}, nil, nil, &threatsLow, i)
-		visionHigh.PerformVisionScan(0, 0, highAware, []*Soldier{}, nil, nil, &threatsHigh, i)
+		visionLow.PerformVisionScan(0, 0, lowAware, []*Soldier{}, nil, nil, nil, &threatsLow, i)
+		visionHigh.PerformVisionScan(0, 0, highAware, []*Soldier{}, nil, nil, nil, &threatsHigh, i)
 	}
 
 	// High awareness should retain LKP longer

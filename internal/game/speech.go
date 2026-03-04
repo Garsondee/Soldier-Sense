@@ -386,6 +386,7 @@ func (g *Game) UpdateSpeech(rng *rand.Rand) { //nolint:gocognit,gocyclo
 func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) { //nolint:gocognit,gocyclo
 	ox, oy := float32(offX), float32(offY)
 	all := g.allUnits()
+	minX, minY, maxX, maxY := g.cameraCullBounds(220)
 
 	// Overlap prevention: track occupied Y bands per soldier to push bubbles up.
 	occupied := make(map[int]float32) // soldier ID → lowest Y used
@@ -393,6 +394,9 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) { //nolin
 	for _, b := range g.speechBubbles {
 		s := b.soldier
 		if s.state == SoldierStateDead {
+			continue
+		}
+		if !pointInBounds(s.x, s.y, minX, minY, maxX, maxY) {
 			continue
 		}
 		progress := float64(b.age) / float64(speechLifetime)
@@ -450,6 +454,9 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) { //nolin
 		// Check if bubble would overlap any nearby soldiers and shift horizontally if needed.
 		for _, other := range all {
 			if other == s || other.state == SoldierStateDead {
+				continue
+			}
+			if !pointInBounds(other.x, other.y, minX, minY, maxX, maxY) {
 				continue
 			}
 			// Check if other soldier is in the bubble's area.

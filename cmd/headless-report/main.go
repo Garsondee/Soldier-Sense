@@ -394,6 +394,13 @@ type runStats struct {
 	postDur  time.Duration
 	totalDur time.Duration
 
+	pfCalls         int64
+	pfFails         int64
+	pfExpandedNodes int64
+	pfAvgRuntimeMS  float64
+	pfP95RuntimeMS  float64
+	pfFailRatePct   float64
+
 	seed int64
 
 	runIndex             int
@@ -808,6 +815,15 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		setupDur:             setupDur,
 		simDur:               simDur,
 	}
+	if ts.NavGrid != nil {
+		pfStats := ts.NavGrid.PathfindingStats()
+		rs.pfCalls = pfStats.CallCount
+		rs.pfFails = pfStats.FailCount
+		rs.pfExpandedNodes = pfStats.ExpandedNodes
+		rs.pfAvgRuntimeMS = pfStats.AverageRuntimeMS
+		rs.pfP95RuntimeMS = pfStats.P95RuntimeMS
+		rs.pfFailRatePct = pfStats.FailureRatePercent
+	}
 	rs.stalemate, rs.stalemateReason = detectStalemate(&rs)
 
 	// Determine battle outcome
@@ -1024,6 +1040,8 @@ func printRun(rs *runStats) {
 		rs.firstContactTick, rs.firstEngageTick, rs.firstRegroupTick, rs.firstDeathTick, rs.firstPanicTick, rs.firstSurrenderTick, rs.firstBreakTick)
 	fmt.Printf("event_totals: intent_change=%d goal_change=%d state_change=%d contact_new=%d contact_lost=%d\n",
 		rs.intentChanges, rs.goalChanges, rs.stateChanges, rs.contactNew, rs.contactLost)
+	fmt.Printf("pathfinding: calls=%d expanded_nodes=%d fail_rate=%.1f%% avg_ms=%.3f p95_ms=%.3f\n",
+		rs.pfCalls, rs.pfExpandedNodes, rs.pfFailRatePct, rs.pfAvgRuntimeMS, rs.pfP95RuntimeMS)
 	fmt.Printf("effectiveness_events: stalled_in_combat=%d detached_from_engagement=%d affected_soldiers=%d\n",
 		rs.stalledEvents, rs.detachedEvents, len(rs.affected))
 	fmt.Printf("survivors: red=%d/%d blue=%d/%d\n", rs.redSurvivors, rs.redTotal, rs.blueSurvivors, rs.blueTotal)

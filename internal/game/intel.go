@@ -157,13 +157,17 @@ func (l *HeatLayer) SumInRadius(wx, wy, radius float64) float32 {
 		row1 = l.rows - 1
 	}
 
+	centerCol, centerRow := WorldToCell(wx, wy)
+	centerWX, centerWY := CellToWorld(centerCol, centerRow)
+	offsetX := wx - centerWX
+	offsetY := wy - centerWY
+	cellStep := float64(cellSize)
 	r2 := radius * radius
 	var sum float32
 	for row := row0; row <= row1; row++ {
+		dy := float64(row-centerRow)*cellStep - offsetY
 		for col := col0; col <= col1; col++ {
-			cwx, cwy := CellToWorld(col, row)
-			dx := cwx - wx
-			dy := cwy - wy
+			dx := float64(col-centerCol)*cellStep - offsetX
 			if dx*dx+dy*dy <= r2 {
 				sum += l.cells[row*l.cols+col]
 			}
@@ -189,13 +193,17 @@ func (l *HeatLayer) MaxInRadius(wx, wy, radius float64) float32 {
 		row1 = l.rows - 1
 	}
 
+	centerCol, centerRow := WorldToCell(wx, wy)
+	centerWX, centerWY := CellToWorld(centerCol, centerRow)
+	offsetX := wx - centerWX
+	offsetY := wy - centerWY
+	cellStep := float64(cellSize)
 	r2 := radius * radius
 	var best float32
 	for row := row0; row <= row1; row++ {
+		dy := float64(row-centerRow)*cellStep - offsetY
 		for col := col0; col <= col1; col++ {
-			cwx, cwy := CellToWorld(col, row)
-			dx := cwx - wx
-			dy := cwy - wy
+			dx := float64(col-centerCol)*cellStep - offsetX
 			if dx*dx+dy*dy <= r2 {
 				if v := l.cells[row*l.cols+col]; v > best {
 					best = v
@@ -332,12 +340,15 @@ func (m *IntelMap) AccumulateThreatDensity() {
 
 // IntelStore owns all intelligence maps for all teams.
 type IntelStore struct { //nolint:govet
-	maps    map[Team]*IntelMap
-	rows    int
-	cols    int
-	mapW    int // playfield width in pixels
-	mapH    int // playfield height in pixels
-	tileMap *TileMap
+	maps       map[Team]*IntelMap
+	rows       int
+	cols       int
+	mapW       int // playfield width in pixels
+	mapH       int // playfield height in pixels
+	tileMap    *TileMap
+	updateTick int
+	visSeen    []uint32
+	visStamp   uint32
 }
 
 // NewIntelStore creates maps for TeamRed and TeamBlue sized to the given
@@ -346,11 +357,12 @@ func NewIntelStore(mapW, mapH int) *IntelStore {
 	cols := mapW / cellSize
 	rows := mapH / cellSize
 	s := &IntelStore{
-		maps: make(map[Team]*IntelMap),
-		rows: rows,
-		cols: cols,
-		mapW: mapW,
-		mapH: mapH,
+		maps:    make(map[Team]*IntelMap),
+		rows:    rows,
+		cols:    cols,
+		mapW:    mapW,
+		mapH:    mapH,
+		visSeen: make([]uint32, rows*cols),
 	}
 	s.maps[TeamRed] = newIntelMap(TeamRed, rows, cols)
 	s.maps[TeamBlue] = newIntelMap(TeamBlue, rows, cols)
@@ -402,6 +414,8 @@ func (s *IntelStore) Decay() {
 // BlueSoldiers are OpFor (blue) agents.
 // Buildings are used for computing visible cells in the unexplored layer.
 func (s *IntelStore) Update(redSoldiers, blueSoldiers []*Soldier, buildings []rect) {
+	s.updateTick++
+
 	// Decay all layers first.
 	s.Decay()
 
@@ -409,8 +423,20 @@ func (s *IntelStore) Update(redSoldiers, blueSoldiers []*Soldier, buildings []re
 	s.writeSoldiers(redSoldiers, blueSoldiers, buildings)
 	s.writeSoldiers(blueSoldiers, redSoldiers, buildings)
 
-	// Accumulate derived ThreatDensity from contact heat.
-	for _, m := range s.maps {
+	// Derived full-grid passes.
+	if len(redSoldiers) == 0 || len(blueSoldiers) == 0 {
+		for _, m := range s.maps {
+			m.AccumulateThreatDensity()
+			s.computeSafeTerritory(m)
+		}
+		return
+	}
+
+	// Recompute derived full-grid layers on a staggered schedule (one team map per
+	// tick) to reduce update cost while keeping data fresh enough for tactics.
+	teamOrder := [2]Team{TeamRed, TeamBlue}
+	targetIdx := (s.updateTick - 1) % len(teamOrder)
+	if m := s.maps[teamOrder[targetIdx]]; m != nil {
 		m.AccumulateThreatDensity()
 		s.computeSafeTerritory(m)
 	}
@@ -510,6 +536,8 @@ func (s *IntelStore) clearVisibleCells(m *IntelMap, sol *Soldier) {
 		steps = 24
 	}
 	angularSteps := 12
+	stamp := s.nextVisStamp()
+	unexplored := m.Layer(IntelUnexplored)
 
 	for ai := 0; ai <= angularSteps; ai++ {
 		angle := v.Heading - halfFOV + (v.FOV/float64(angularSteps))*float64(ai)
@@ -519,11 +547,36 @@ func (s *IntelStore) clearVisibleCells(m *IntelMap, sol *Soldier) {
 			dist := float64(ri) * float64(cellSize)
 			wx := sol.x + cosA*dist
 			wy := sol.y + sinA*dist
-			m.ClearSeen(wx, wy)
+			col, row := WorldToCell(wx, wy)
+			if col < 0 || row < 0 || col >= s.cols || row >= s.rows {
+				continue
+			}
+			idx := row*s.cols + col
+			if s.visSeen[idx] == stamp {
+				continue
+			}
+			s.visSeen[idx] = stamp
+			unexplored.Set(row, col, 0)
 		}
 	}
 	// Always clear the soldier's own cell.
-	m.ClearSeen(sol.x, sol.y)
+	col, row := WorldToCell(sol.x, sol.y)
+	if col >= 0 && row >= 0 && col < s.cols && row < s.rows {
+		unexplored.Set(row, col, 0)
+	}
+}
+
+func (s *IntelStore) nextVisStamp() uint32 {
+	s.visStamp++
+	if s.visStamp != 0 {
+		return s.visStamp
+	}
+
+	for i := range s.visSeen {
+		s.visSeen[i] = 0
+	}
+	s.visStamp = 1
+	return s.visStamp
 }
 
 // Rows returns the grid row count.

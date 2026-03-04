@@ -3,6 +3,7 @@ package game
 import (
 	"errors"
 	"fmt"
+	"image"
 	"image/color"
 	"math"
 	"math/rand"
@@ -52,7 +53,7 @@ var overlayColors = [intelMapCount]color.RGBA{
 	IntelUnexplored:       {R: 20, G: 20, B: 20, A: 160},   // dark grey
 }
 
-func (g *Game) renderTerrainLayer(screen *ebiten.Image) {
+func (g *Game) renderTerrainLayer(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	ox, oy := float32(0), float32(0)
 	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
 
@@ -117,6 +118,42 @@ func (g *Game) renderTerrainLayer(screen *ebiten.Image) {
 			}
 		}
 	}
+}
+
+func (g *Game) drawTerrainLayerVisible(screen *ebiten.Image, minX, minY, maxX, maxY float64) {
+	if g.terrainBuf == nil {
+		g.renderTerrainLayer(screen)
+		return
+	}
+
+	x0 := int(math.Floor(minX))
+	y0 := int(math.Floor(minY))
+	x1 := int(math.Ceil(maxX))
+	y1 := int(math.Ceil(maxY))
+	if x0 < 0 {
+		x0 = 0
+	}
+	if y0 < 0 {
+		y0 = 0
+	}
+	if x1 > g.gameWidth {
+		x1 = g.gameWidth
+	}
+	if y1 > g.gameHeight {
+		y1 = g.gameHeight
+	}
+	if x1 <= x0 || y1 <= y0 {
+		return
+	}
+
+	sub, ok := g.terrainBuf.SubImage(image.Rect(x0, y0, x1, y1)).(*ebiten.Image)
+	if !ok {
+		screen.DrawImage(g.terrainBuf, nil)
+		return
+	}
+	opts := &ebiten.DrawImageOptions{}
+	opts.GeoM.Translate(float64(x0), float64(y0))
+	screen.DrawImage(sub, opts)
 }
 
 // drawSquadStatusPanels renders all squad status panels into the top of the
@@ -368,7 +405,7 @@ type WallInfo struct {
 }
 
 // Game is the main simulation and rendering state container.
-type Game struct { //nolint:govet
+type Game struct { //nolint:govet,gocritic
 	width              int
 	height             int
 	gameWidth          int               // playfield width (log panel takes the rest)
@@ -408,6 +445,8 @@ type Game struct { //nolint:govet
 	visionBuf *ebiten.Image
 	// Cached static terrain layer (ground, grids, road markings) drawn once.
 	terrainBuf *ebiten.Image
+	// Cached static vignette layer drawn once and composited per frame.
+	vignetteBuf *ebiten.Image
 	// Offscreen buffer for the full battlefield — camera transform applied on blit.
 	worldBuf *ebiten.Image
 	// Offscreen buffer for HUD text — rendered at 1x then blitted at hudScale.
@@ -430,6 +469,9 @@ type Game struct { //nolint:govet
 	camY    float64 // world-space Y of the camera center
 	camZoom float64 // zoom factor (1.0 = native, >1 = zoomed in)
 
+	autoFrameCamera  bool
+	autoFramePadding float64
+
 	// Soldier speech bubbles.
 	speechBubbles []*SpeechBubble
 	speechRng     *rand.Rand
@@ -442,6 +484,7 @@ type Game struct { //nolint:govet
 	cachedClaimedTeam map[int]Team
 	cachedSolidSet    map[[2]int]bool
 	cachedChestSet    map[[2]int]bool
+	chestSetReady     bool
 	hudLinesScratch   []string
 	hudIntelLines     []string
 	hudFilterLine     string
@@ -480,6 +523,7 @@ type Game struct { //nolint:govet
 	// Spatial partitioning for performance optimization.
 	spatialHashRed  *SpatialHash
 	spatialHashBlue *SpatialHash
+	losIndex        *LOSIndex
 
 	// Lightweight performance counters (rolling window).
 	perfFrameCount  int
@@ -577,14 +621,18 @@ func terrainHash(x, y int) uint32 {
 	return v
 }
 
-// New creates a new game instance.
+// New creates a new game instance with a time-based map seed.
 func New() *Game {
+	return NewWithMapSeed(time.Now().UnixNano())
+}
+
+// NewWithMapSeed creates a new game instance using an explicit map seed.
+func NewWithMapSeed(mapSeed int64) *Game {
 	// Battlefield is 3072x1728 — double the original size.
 	battleW := 3072
 	battleH := 1728
 
-	// Master map seed — random each game, printed to console for reproducibility.
-	mapSeed := time.Now().UnixNano()
+	// Master map seed — printed to console for reproducibility.
 	fmt.Printf("MAP SEED: %d\n", mapSeed)
 
 	g := &Game{
@@ -640,6 +688,7 @@ func New() *Game {
 	g.compounds = compounds
 	g.exteriorFeatures = exteriorFeatures
 	g.initCover()
+	g.losIndex = NewLOSIndex(g.buildings, g.covers)
 	g.initTileMap() // stamp buildings/cover into tileMap after generation
 	fmt.Printf("DEBUG: Running biome generation...\n")
 	generateBiome(g.tileMap, mapRng, &defaultBiomeConfig)
@@ -664,6 +713,7 @@ func New() *Game {
 	}
 	g.visionBuf = ebiten.NewImage(battleW, battleH)
 	g.terrainBuf = ebiten.NewImage(battleW, battleH)
+	g.vignetteBuf = ebiten.NewImage(battleW, battleH)
 	g.worldBuf = ebiten.NewImage(battleW, battleH)
 	// HUD buffer: 1/hudScale of screen so it renders crisply when scaled up.
 	g.hudBuf = ebiten.NewImage(g.width/hudScale, g.height/hudScale)
@@ -678,12 +728,17 @@ func New() *Game {
 	g.camX = float64(battleW) / 2
 	g.camY = float64(battleH) / 2
 	g.camZoom = 0.5
+	g.autoFrameCamera = true
+	g.autoFramePadding = 96
+	g.applyAutoFrameCamera(false)
 	g.simSpeed = 1.0
 	// Initialize cached maps for rendering.
 	g.cachedClaimedTeam = make(map[int]Team)
 	g.cachedSolidSet = make(map[[2]int]bool, len(g.buildings)+len(g.windows))
 	g.cachedChestSet = make(map[[2]int]bool)
+	g.rebuildChestSet()
 	g.renderTerrainLayer(g.terrainBuf)
+	g.renderVignetteLayer(g.vignetteBuf)
 	g.hudIntelDirty = true
 	g.hudFilterDirty = true
 	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999)) // #nosec G404 -- non-crypto RNG for local flavor text
@@ -868,6 +923,23 @@ func (g *Game) initCover() {
 	g.covers, rubble = GenerateCover(g.gameWidth, g.gameHeight, g.buildingFootprints, g.buildings, rng, g.tileMap)
 	// Rubble replaces wall segments where explosions hit — remove those walls and add rubble.
 	g.applyBuildingDamage(rubble)
+	g.chestSetReady = false
+}
+
+func (g *Game) rebuildChestSet() {
+	if g.cachedChestSet == nil {
+		return
+	}
+	for k := range g.cachedChestSet {
+		delete(g.cachedChestSet, k)
+	}
+	for _, c := range g.covers {
+		if c.kind != CoverChestWall {
+			continue
+		}
+		g.cachedChestSet[[2]int{c.x / coverCellSize, c.y / coverCellSize}] = true
+	}
+	g.chestSetReady = true
 }
 
 // applyBuildingDamage removes wall segments that overlap rubble zones and appends
@@ -1951,6 +2023,7 @@ func (g *Game) spawnCluster(rng *rand.Rand, team Team, clusterCenterY, startX, e
 		s := NewSoldier(id, validX, validY, team,
 			[2]float64{validX, validY}, [2]float64{endX, validY},
 			g.navGrid, g.covers, g.buildings, g.thoughtLog, &g.tick, g.tacticalMap)
+		s.losIndex = g.losIndex
 		s.buildingFootprints = g.buildingFootprints
 		s.tileMap = g.tileMap
 		s.blackboard.ClaimedBuildingIdx = -1
@@ -2077,6 +2150,9 @@ func (g *Game) Update() error {
 	if g.simSpeed <= 0 {
 		// Paused: still update tracers so muzzle flashes fade.
 		g.combat.UpdateTracers()
+		if g.autoFrameCamera {
+			g.applyAutoFrameCamera(true)
+		}
 		return nil
 	}
 
@@ -2100,6 +2176,10 @@ func (g *Game) Update() error {
 
 	// Update tracer fractional ages for smooth rendering every frame.
 	g.combat.UpdateTracerInterpolation(g.interpolation)
+
+	if g.autoFrameCamera {
+		g.applyAutoFrameCamera(true)
+	}
 
 	g.updateAutoPerfCapture(now)
 	if g.pendingExit != nil {
@@ -2341,56 +2421,43 @@ func (g *Game) handleInput() { //nolint:gocognit,gocyclo
 		}
 	}
 
-	// Camera pan: WASD or arrow keys.
-	panSpeed := 6.0 / g.camZoom // pan slower when zoomed in
-	if ebiten.IsKeyPressed(ebiten.KeyW) || ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
-		g.camY -= panSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyS) || ebiten.IsKeyPressed(ebiten.KeyArrowDown) {
-		g.camY += panSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyA) || ebiten.IsKeyPressed(ebiten.KeyArrowLeft) {
-		g.camX -= panSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyD) || ebiten.IsKeyPressed(ebiten.KeyArrowRight) {
-		g.camX += panSpeed
-	}
+	if !g.autoFrameCamera {
+		// Camera pan: WASD or arrow keys.
+		panSpeed := 6.0 / g.camZoom // pan slower when zoomed in
+		if ebiten.IsKeyPressed(ebiten.KeyW) || ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
+			g.camY -= panSpeed
+		}
+		if ebiten.IsKeyPressed(ebiten.KeyS) || ebiten.IsKeyPressed(ebiten.KeyArrowDown) {
+			g.camY += panSpeed
+		}
+		if ebiten.IsKeyPressed(ebiten.KeyA) || ebiten.IsKeyPressed(ebiten.KeyArrowLeft) {
+			g.camX -= panSpeed
+		}
+		if ebiten.IsKeyPressed(ebiten.KeyD) || ebiten.IsKeyPressed(ebiten.KeyArrowRight) {
+			g.camX += panSpeed
+		}
 
-	// Camera zoom: mouse wheel or =/- keys.
-	const zoomMin, zoomMax = 0.5, 4.0
-	_, wy := ebiten.Wheel()
-	if wy != 0 {
-		g.camZoom *= math.Pow(1.12, wy)
-	}
-	currentKeys[ebiten.KeyEqual] = ebiten.IsKeyPressed(ebiten.KeyEqual)
-	if currentKeys[ebiten.KeyEqual] && !g.prevKeys[ebiten.KeyEqual] {
-		g.camZoom *= 1.25
-	}
-	currentKeys[ebiten.KeyMinus] = ebiten.IsKeyPressed(ebiten.KeyMinus)
-	if currentKeys[ebiten.KeyMinus] && !g.prevKeys[ebiten.KeyMinus] {
-		g.camZoom /= 1.25
-	}
-	if g.camZoom < zoomMin {
-		g.camZoom = zoomMin
-	}
-	if g.camZoom > zoomMax {
-		g.camZoom = zoomMax
-	}
-
-	// Clamp camera center to battlefield bounds (accounting for zoom).
-	halfVW := float64(g.gameWidth) / 2 / g.camZoom
-	halfVH := float64(g.gameHeight) / 2 / g.camZoom
-	if g.camX < halfVW {
-		g.camX = halfVW
-	}
-	if g.camX > float64(g.gameWidth)-halfVW {
-		g.camX = float64(g.gameWidth) - halfVW
-	}
-	if g.camY < halfVH {
-		g.camY = halfVH
-	}
-	if g.camY > float64(g.gameHeight)-halfVH {
-		g.camY = float64(g.gameHeight) - halfVH
+		// Camera zoom: mouse wheel or =/- keys.
+		const zoomMin, zoomMax = 0.5, 4.0
+		_, wy := ebiten.Wheel()
+		if wy != 0 {
+			g.camZoom *= math.Pow(1.12, wy)
+		}
+		currentKeys[ebiten.KeyEqual] = ebiten.IsKeyPressed(ebiten.KeyEqual)
+		if currentKeys[ebiten.KeyEqual] && !g.prevKeys[ebiten.KeyEqual] {
+			g.camZoom *= 1.25
+		}
+		currentKeys[ebiten.KeyMinus] = ebiten.IsKeyPressed(ebiten.KeyMinus)
+		if currentKeys[ebiten.KeyMinus] && !g.prevKeys[ebiten.KeyMinus] {
+			g.camZoom /= 1.25
+		}
+		if g.camZoom < zoomMin {
+			g.camZoom = zoomMin
+		}
+		if g.camZoom > zoomMax {
+			g.camZoom = zoomMax
+		}
+		g.clampCameraToBattlefield()
 	}
 
 	// Sim speed controls: P=pause/resume, ,=slower, .=faster.
@@ -2444,6 +2511,110 @@ func (g *Game) handleInput() { //nolint:gocognit,gocyclo
 	}
 
 	g.rememberKeys(currentKeys)
+}
+
+func (g *Game) clampCameraToBattlefield() {
+	if g.camZoom <= 0 {
+		g.camZoom = 0.01
+	}
+	mapW := float64(g.gameWidth)
+	mapH := float64(g.gameHeight)
+	halfVW := mapW / 2 / g.camZoom
+	halfVH := mapH / 2 / g.camZoom
+
+	if halfVW >= mapW/2 {
+		g.camX = mapW / 2
+	} else {
+		if g.camX < halfVW {
+			g.camX = halfVW
+		}
+		if g.camX > mapW-halfVW {
+			g.camX = mapW - halfVW
+		}
+	}
+	if halfVH >= mapH/2 {
+		g.camY = mapH / 2
+	} else {
+		if g.camY < halfVH {
+			g.camY = halfVH
+		}
+		if g.camY > mapH-halfVH {
+			g.camY = mapH - halfVH
+		}
+	}
+}
+
+func (g *Game) computeBattleframeCamera() (camX, camY, camZoom float64, ok bool) {
+	all := g.allUnits()
+	if len(all) == 0 {
+		return 0, 0, 0, false
+	}
+
+	minX := math.MaxFloat64
+	minY := math.MaxFloat64
+	maxX := -math.MaxFloat64
+	maxY := -math.MaxFloat64
+	haveAlive := false
+	pad := g.autoFramePadding + float64(soldierRadius)
+	for _, s := range all {
+		if s == nil || s.state == SoldierStateDead {
+			continue
+		}
+		haveAlive = true
+		if x0 := s.x - pad; x0 < minX {
+			minX = x0
+		}
+		if y0 := s.y - pad; y0 < minY {
+			minY = y0
+		}
+		if x1 := s.x + pad; x1 > maxX {
+			maxX = x1
+		}
+		if y1 := s.y + pad; y1 > maxY {
+			maxY = y1
+		}
+	}
+	if !haveAlive {
+		return 0, 0, 0, false
+	}
+
+	const minSpan = 220.0
+	spanX := math.Max(minSpan, maxX-minX)
+	spanY := math.Max(minSpan, maxY-minY)
+
+	zoomX := float64(g.gameWidth) / spanX
+	zoomY := float64(g.gameHeight) / spanY
+	targetZoom := math.Min(zoomX, zoomY)
+	const minAutoZoom, maxAutoZoom = 0.18, 4.0
+	if targetZoom < minAutoZoom {
+		targetZoom = minAutoZoom
+	}
+	if targetZoom > maxAutoZoom {
+		targetZoom = maxAutoZoom
+	}
+
+	return (minX + maxX) * 0.5, (minY + maxY) * 0.5, targetZoom, true
+}
+
+func (g *Game) applyAutoFrameCamera(smooth bool) {
+	targetX, targetY, targetZoom, ok := g.computeBattleframeCamera()
+	if !ok {
+		return
+	}
+	if !smooth {
+		g.camX = targetX
+		g.camY = targetY
+		g.camZoom = targetZoom
+		g.clampCameraToBattlefield()
+		return
+	}
+
+	const posLerp = 0.18
+	const zoomLerp = 0.14
+	g.camX += (targetX - g.camX) * posLerp
+	g.camY += (targetY - g.camY) * posLerp
+	g.camZoom += (targetZoom - g.camZoom) * zoomLerp
+	g.clampCameraToBattlefield()
 }
 
 // Draw renders one frame of world and UI.
@@ -2665,17 +2836,6 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	// For drawWorld, all coordinates are in world-space (no offX/offY needed).
 	ox, oy := float32(0), float32(0)
 
-	// Vision cones: drawn early so buildings and units sit on top.
-	// Rendered into an offscreen buffer to avoid additive blowout.
-	g.drawVisionConesBuffered(screen, g.soldiers, color.RGBA{R: 200, G: 60, B: 40, A: 35}, 0.12)
-	g.drawVisionConesBuffered(screen, g.opfor, color.RGBA{R: 40, G: 80, B: 200, A: 35}, 0.12)
-
-	if g.terrainBuf != nil {
-		screen.DrawImage(g.terrainBuf, nil)
-	} else {
-		g.renderTerrainLayer(screen)
-	}
-
 	// Camera-visible world bounds for draw culling.
 	halfVW := float64(g.gameWidth) / 2 / g.camZoom
 	halfVH := float64(g.gameHeight) / 2 / g.camZoom
@@ -2691,12 +2851,22 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	maxX += cullPad
 	maxY += cullPad
 
+	// Vision cones: drawn early so buildings and units sit on top.
+	// Rendered into an offscreen buffer to avoid additive blowout.
+	g.drawVisionConesBuffered(screen, g.soldiers, color.RGBA{R: 200, G: 60, B: 40, A: 35}, 0.12)
+	g.drawVisionConesBuffered(screen, g.opfor, color.RGBA{R: 40, G: 80, B: 200, A: 35}, 0.12)
+
+	g.drawTerrainLayerVisible(screen, minX, minY, maxX, maxY)
+
 	// Intel heatmap overlays (drawn under buildings and soldiers).
 	team := Team(g.overlayTeam)
-	if im := g.intel.For(team); im != nil {
-		for k := IntelMapKind(0); k < intelMapCount; k++ {
-			if g.showOverlay[g.overlayTeam][k] {
-				g.drawHeatLayer(screen, im.Layer(k), overlayColors[k], minX, minY, maxX, maxY)
+	const minHeatOverlayZoom = 0.35
+	if g.camZoom >= minHeatOverlayZoom {
+		if im := g.intel.For(team); im != nil {
+			for k := IntelMapKind(0); k < intelMapCount; k++ {
+				if g.showOverlay[g.overlayTeam][k] {
+					g.drawHeatLayer(screen, im.Layer(k), overlayColors[k], minX, minY, maxX, maxY)
+				}
 			}
 		}
 	}
@@ -2879,11 +3049,13 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	// Radio transmission arcs (transient comms visual effects).
 	g.drawRadioVisualEffects(screen)
 
-	// Movement intent lines: faint dashed line from soldier to path endpoint.
-	g.drawMovementIntentLines(screen)
+	if g.camZoom > 0.75 {
+		// Movement intent lines: faint dashed line from soldier to path endpoint.
+		g.drawMovementIntentLines(screen)
 
-	// Active officer orders (leader-issued command markers).
-	g.drawOfficerOrders(screen)
+		// Active officer orders (leader-issued command markers).
+		g.drawOfficerOrders(screen)
+	}
 
 	// Selection ring for inspector target (world-space).
 	if g.inspector.selected != nil {
@@ -2919,13 +3091,24 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	// Detailed info panel for selected soldier (world-space).
 	g.drawSelectedSoldierInfo(screen)
 
-	// Squad intent labels near squad leaders (world-space).
-	g.drawSquadIntentLabels(screen)
+	if g.camZoom > 0.75 {
+		// Squad intent labels near squad leaders (world-space).
+		g.drawSquadIntentLabels(screen)
 
-	// Spotted indicator.
-	g.drawSpottedIndicators(screen, 0, 0)
+		// Spotted indicator.
+		g.drawSpottedIndicators(screen, 0, 0)
+	}
 
 	// Edge vignette — deeper for more atmosphere.
+	if g.vignetteBuf != nil {
+		screen.DrawImage(g.vignetteBuf, nil)
+	} else {
+		g.drawVignette(screen, 0, 0)
+	}
+}
+
+func (g *Game) renderVignetteLayer(screen *ebiten.Image) {
+	screen.Clear()
 	g.drawVignette(screen, 0, 0)
 }
 
@@ -3102,16 +3285,11 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int, minX, minY
 	cs := float32(coverCellSize) // 16px
 	iCS := coverCellSize
 
-	// Build a fast set of chest-wall cell positions for neighbor lookup.
-	for k := range g.cachedChestSet {
-		delete(g.cachedChestSet, k)
+	// Build a fast set of chest-wall cell positions for neighbor lookup once.
+	if !g.chestSetReady {
+		g.rebuildChestSet()
 	}
 	chestSet := g.cachedChestSet
-	for _, c := range g.covers {
-		if c.kind == CoverChestWall {
-			chestSet[[2]int{c.x / iCS, c.y / iCS}] = true
-		}
-	}
 
 	// Palette.
 	slabBody := color.RGBA{R: 100, G: 94, B: 80, A: 255}
@@ -3414,9 +3592,13 @@ func (g *Game) drawFormationSlots(screen *ebiten.Image) {
 // drawSpottedIndicators renders a subtle "!" above soldiers who currently see enemies.
 func (g *Game) drawSpottedIndicators(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
+	minX, minY, maxX, maxY := g.cameraCullBounds(48)
 	all := g.allUnits()
 	for _, s := range all {
 		if s.state == SoldierStateDead || len(s.vision.KnownContacts) == 0 {
+			continue
+		}
+		if !pointInBounds(s.x, s.y, minX, minY, maxX, maxY) {
 			continue
 		}
 		sx, sy := ox+float32(s.x), oy+float32(s.y)
@@ -3435,9 +3617,18 @@ func (g *Game) drawSpottedIndicators(screen *ebiten.Image, offX, offY int) {
 	}
 }
 
-func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) { //nolint:gocognit
-	const segments = 22
+func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	const baseOpacity = 0.08 // very faint/transparent
+	minX, minY, maxX, maxY := g.cameraCullBounds(128)
+	segments := 22
+	switch {
+	case g.camZoom <= 0.7:
+		segments = 10
+	case g.camZoom <= 1.0:
+		segments = 14
+	case g.camZoom <= 1.5:
+		segments = 18
+	}
 	for _, sq := range g.squads {
 		sq.pruneRadioVisualEvents(g.tick)
 		for _, ev := range sq.radioVisualEvents {
@@ -3469,6 +3660,10 @@ func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) { //nolint:gocognit
 			sy := float32(ev.SenderY)
 			rx := float32(ev.ReceiverX)
 			ry := float32(ev.ReceiverY)
+			if !pointInBounds(ev.SenderX, ev.SenderY, minX, minY, maxX, maxY) &&
+				!pointInBounds(ev.ReceiverX, ev.ReceiverY, minX, minY, maxX, maxY) {
+				continue
+			}
 			dx := rx - sx
 			dy := ry - sy
 			dist := math.Hypot(float64(dx), float64(dy))
@@ -3610,15 +3805,26 @@ func (g *Game) clipVisionRayToBuildings(ox, oy, angle, maxLen float64) (float64,
 
 	bestT := 1.0
 	hitAny := false
-	for _, b := range g.buildings {
-		t, hit := rayAABBHitT(
-			ox, oy, ex, ey,
-			float64(b.x), float64(b.y),
-			float64(b.x+b.w), float64(b.y+b.h),
-		)
-		if hit && t < bestT {
-			bestT = t
-			hitAny = true
+	if g.losIndex == nil {
+		for _, b := range g.buildings {
+			t, hit := rayAABBHitT(
+				ox, oy, ex, ey,
+				float64(b.x), float64(b.y),
+				float64(b.x+b.w), float64(b.y+b.h),
+			)
+			if hit && t < bestT {
+				bestT = t
+				hitAny = true
+			}
+		}
+	} else {
+		for _, bi := range g.losIndex.queryBuildingCandidateIndices(ox, oy, ex, ey) {
+			b := g.losIndex.buildingItems[bi]
+			t, hit := rayAABBHitT(ox, oy, ex, ey, b.minX, b.minY, b.maxX, b.maxY)
+			if hit && t < bestT {
+				bestT = t
+				hitAny = true
+			}
 		}
 	}
 
@@ -3636,8 +3842,12 @@ func (g *Game) clipVisionRayToBuildings(ox, oy, angle, maxLen float64) (float64,
 // Team-tinted: red/orange for friendlies, blue/cyan for OpFor.
 func (g *Game) drawGunfireLighting(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
+	minX, minY, maxX, maxY := g.cameraCullBounds(72)
 	flashes := g.combat.ActiveFlashes()
 	for _, f := range flashes {
+		if !pointInBounds(f.x, f.y, minX, minY, maxX, maxY) {
+			continue
+		}
 		fx := ox + float32(f.x)
 		fy := oy + float32(f.y)
 		progress := float32(f.age) / float32(flashLifetime)

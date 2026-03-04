@@ -3,6 +3,8 @@ package game
 import (
 	"container/heap"
 	"math"
+	"sort"
+	"time"
 )
 
 const cellSize = 16
@@ -12,6 +14,22 @@ type NavGrid struct { //nolint:govet
 	cols    int
 	rows    int
 	blocked []bool
+
+	pfCalls          int64
+	pfFails          int64
+	pfExpandedNodes  int64
+	pfRuntimeNS      int64
+	pfRuntimeSamples []int64
+}
+
+// PathfindingStatsSnapshot captures aggregate A* runtime counters.
+type PathfindingStatsSnapshot struct {
+	CallCount          int64
+	FailCount          int64
+	ExpandedNodes      int64
+	AverageRuntimeMS   float64
+	P95RuntimeMS       float64
+	FailureRatePercent float64
 }
 
 // NewNavGrid builds a walkability grid from the map dimensions and buildings.
@@ -126,6 +144,13 @@ var dirs = [8][2]int{
 // FindPath returns a slice of world-coordinate waypoints from (sx,sy) to (gx,gy).
 // Returns nil if no path exists.
 func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 { //nolint:gocognit,gocyclo
+	pfStart := time.Now()
+	expanded := int64(0)
+	fail := true
+	defer func() {
+		ng.recordPathfindingSample(time.Since(pfStart), expanded, fail)
+	}()
+
 	scx, scy := WorldToCell(sx, sy)
 	gcx, gcy := WorldToCell(gx, gy)
 
@@ -155,6 +180,7 @@ func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 { //nolint:goco
 		}
 		cur := curNode
 		if cur.cx == gcx && cur.cy == gcy {
+			fail = false
 			return buildPath(cur)
 		}
 		k := key(cur.cx, cur.cy)
@@ -162,6 +188,7 @@ func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 { //nolint:goco
 			continue
 		}
 		closed[k] = true
+		expanded++
 
 		for _, d := range dirs {
 			nx, ny := cur.cx+d[0], cur.cy+d[1]
@@ -192,6 +219,56 @@ func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 { //nolint:goco
 		}
 	}
 	return nil
+}
+
+func (ng *NavGrid) recordPathfindingSample(runtime time.Duration, expanded int64, fail bool) {
+	ng.pfCalls++
+	ng.pfExpandedNodes += expanded
+	ng.pfRuntimeNS += runtime.Nanoseconds()
+	ng.pfRuntimeSamples = append(ng.pfRuntimeSamples, runtime.Nanoseconds())
+	if fail {
+		ng.pfFails++
+	}
+}
+
+// ResetPathfindingStats clears accumulated pathfinding counters.
+func (ng *NavGrid) ResetPathfindingStats() {
+	ng.pfCalls = 0
+	ng.pfFails = 0
+	ng.pfExpandedNodes = 0
+	ng.pfRuntimeNS = 0
+	ng.pfRuntimeSamples = ng.pfRuntimeSamples[:0]
+}
+
+// PathfindingStats returns a snapshot of current pathfinding counters.
+func (ng *NavGrid) PathfindingStats() PathfindingStatsSnapshot {
+	stats := PathfindingStatsSnapshot{
+		CallCount:     ng.pfCalls,
+		FailCount:     ng.pfFails,
+		ExpandedNodes: ng.pfExpandedNodes,
+	}
+	if ng.pfCalls <= 0 {
+		return stats
+	}
+
+	stats.AverageRuntimeMS = float64(ng.pfRuntimeNS) / float64(ng.pfCalls) / 1_000_000.0
+	stats.FailureRatePercent = float64(ng.pfFails) / float64(ng.pfCalls) * 100
+
+	samples := make([]int64, len(ng.pfRuntimeSamples))
+	copy(samples, ng.pfRuntimeSamples)
+	sort.Slice(samples, func(i, j int) bool {
+		return samples[i] < samples[j]
+	})
+	p95Idx := int(math.Ceil(float64(len(samples))*0.95)) - 1
+	if p95Idx < 0 {
+		p95Idx = 0
+	}
+	if p95Idx >= len(samples) {
+		p95Idx = len(samples) - 1
+	}
+	stats.P95RuntimeMS = float64(samples[p95Idx]) / 1_000_000.0
+
+	return stats
 }
 
 func buildPath(end *pathNode) [][2]float64 {

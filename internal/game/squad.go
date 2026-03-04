@@ -1667,7 +1667,7 @@ func (sq *Squad) visibleAlliesFor(self *Soldier) int {
 		if !self.vision.InCone(self.x, self.y, m.x, m.y) {
 			continue
 		}
-		if HasLineOfSightWithCover(self.x, self.y, m.x, m.y, self.buildings, self.covers) {
+		if HasLineOfSightWithCoverIndexed(self.x, self.y, m.x, m.y, self.buildings, self.covers, self.losIndex) {
 			count++
 		}
 	}
@@ -1684,7 +1684,7 @@ func (sq *Squad) avgVisibleAllyFearFor(self *Soldier) float64 {
 		if !self.vision.InCone(self.x, self.y, m.x, m.y) {
 			continue
 		}
-		if !HasLineOfSightWithCover(self.x, self.y, m.x, m.y, self.buildings, self.covers) {
+		if !HasLineOfSightWithCoverIndexed(self.x, self.y, m.x, m.y, self.buildings, self.covers, self.losIndex) {
 			continue
 		}
 		sum += m.profile.Psych.EffectiveFear()
@@ -2242,14 +2242,26 @@ func (sq *Squad) UpdateFormation() { //nolint:gocognit,gocyclo
 		dx := wx - m.slotTargetX
 		dy := wy - m.slotTargetY
 		slotDrift := math.Sqrt(dx*dx + dy*dy)
+		missingPath := m.path == nil || m.pathIndex >= len(m.path)
+		forceRepath := missingPath || slotDrift > repathThreshold*2.0
+		shouldRepath := forceRepath
+		if !shouldRepath && slotDrift > repathThreshold {
+			tickNow := m.tickVal()
+			if tickNow-m.lastFormationRepathTick >= formationRepathCooldownTicks {
+				shouldRepath = true
+			}
+		}
 
-		if m.path == nil || slotDrift > repathThreshold {
+		if shouldRepath {
 			m.slotTargetX = wx
 			m.slotTargetY = wy
 			newPath := m.navGrid.FindPath(m.x, m.y, wx, wy)
 			if newPath != nil {
 				m.path = newPath
 				m.pathIndex = 0
+				m.lastFormationRepathTick = m.tickVal()
+			} else if forceRepath {
+				m.lastFormationRepathTick = m.tickVal()
 			}
 		}
 		assigned[m.id] = [2]float64{wx, wy}

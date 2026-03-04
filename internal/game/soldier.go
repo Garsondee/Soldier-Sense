@@ -775,6 +775,7 @@ type Soldier struct { //nolint:gocritic,govet
 
 	// World reference for sightline queries.
 	buildings          []rect
+	losIndex           *LOSIndex
 	intel              *IntelStore
 	buildingFootprints []rect
 	tacticalMap        *TacticalMap
@@ -861,6 +862,11 @@ type Soldier struct { //nolint:gocritic,govet
 	recoveryExploreSuccesses int
 	// Scratch flag set by chooseRecoveryAction, consumed by applyRecoveryAction.
 	recoveryExploreThisTick bool
+
+	lastContactRepathTick   int
+	lastFormationRepathTick int
+	pathSmoothTargetIndex   int
+	lastPathSmoothTick      int
 }
 
 // RecoveryAction defines how a soldier should recover from suppression or contact.
@@ -2360,9 +2366,10 @@ func (s *Soldier) faceNearestThreat() {
 const (
 	// ContactLeashMul is how many times the normal formation leash distance
 	// a MoveToContact soldier can stray from the leader before pulling back.
-	contactLeashMul   = 2.0
-	contactLeashBase  = 240.0 // px, fallback when no squad slot info
-	contactRepathDist = 32.0  // repath when contact position drifts this much
+	contactLeashMul            = 2.0
+	contactLeashBase           = 240.0 // px, fallback when no squad slot info
+	contactRepathDist          = 32.0  // repath when contact position drifts this much
+	contactRepathCooldownTicks = 18
 	// Preferred move orders are soft endpoints from the squad leader.
 	// Once close enough, soldiers can resume autonomous tactical repositioning.
 	preferredOrderArriveDist = float64(cellSize) * 2.5
@@ -2728,11 +2735,20 @@ func (s *Soldier) moveToContact(dt float64) { //nolint:gocognit,gocyclo
 	dx := targetX - s.slotTargetX
 	dy := targetY - s.slotTargetY
 	drift := math.Sqrt(dx*dx + dy*dy)
-	shouldRepath := s.path == nil || s.pathIndex >= len(s.path) || drift > contactRepathDist
+	missingPath := s.path == nil || s.pathIndex >= len(s.path)
+	forceRepath := missingPath || drift > contactRepathDist*2.5
+	shouldRepath := forceRepath
 	if !shouldRepath && s.path != nil {
 		remaining := len(s.path) - s.pathIndex
 		distToTarget := math.Hypot(targetX-s.x, targetY-s.y)
 		if remaining <= 1 && distToTarget > float64(cellSize)*1.5 {
+			forceRepath = true
+			shouldRepath = true
+		}
+	}
+	if !shouldRepath && drift > contactRepathDist {
+		tickNow := s.tickVal()
+		if tickNow-s.lastContactRepathTick >= contactRepathCooldownTicks {
 			shouldRepath = true
 		}
 	}
@@ -2747,7 +2763,11 @@ func (s *Soldier) moveToContact(dt float64) { //nolint:gocognit,gocyclo
 			s.recoveryRouteFailEMA = emaBlend(s.recoveryRouteFailEMA, 0, 0.30)
 			s.recoveryStallEMA = emaBlend(s.recoveryStallEMA, 0.10, 0.20)
 			s.recoveryCommitTicks = 0
+			s.lastContactRepathTick = s.tickVal()
 		} else {
+			if forceRepath {
+				s.lastContactRepathTick = s.tickVal()
+			}
 			s.applyRecoveryAction(dt, targetX, targetY)
 			return
 		}
@@ -2951,6 +2971,9 @@ func (s *Soldier) moveFlank(dt float64) { //nolint:gocognit,gocyclo
 // pathLookaheadMax is the maximum number of waypoints to skip via LOS smoothing.
 const pathLookaheadMax = 12
 
+// pathLookaheadRecalcTicks throttles LOS smoothing re-scans in moveAlongPath.
+const pathLookaheadRecalcTicks = 6
+
 // moveAlongPath advances the soldier along the current A* path,
 // using stance-aware speed and updating heading.
 //
@@ -2963,6 +2986,9 @@ func (s *Soldier) moveAlongPath(dt float64) { //nolint:gocognit,gocyclo
 		// One-way advance: idle at objective.
 		s.state = SoldierStateIdle
 		return
+	}
+	if s.pathSmoothTargetIndex < s.pathIndex || s.pathSmoothTargetIndex >= len(s.path) {
+		s.pathSmoothTargetIndex = s.pathIndex
 	}
 
 	// LOS-based path smoothing: skip intermediate waypoints the soldier can see.
@@ -2977,18 +3003,25 @@ func (s *Soldier) moveAlongPath(dt float64) { //nolint:gocognit,gocyclo
 	}
 
 	// Find the farthest reachable waypoint with clear LOS from current position.
-	bestIdx := s.pathIndex
+	bestIdx := s.pathSmoothTargetIndex
+	tickNow := s.tickVal()
 	maxCheck := s.pathIndex + lookahead
 	if maxCheck > len(s.path) {
 		maxCheck = len(s.path)
 	}
-	for i := s.pathIndex + 1; i < maxCheck; i++ {
-		wp := s.path[i]
-		if HasLineOfSight(s.x, s.y, wp[0], wp[1], s.buildings) {
-			bestIdx = i
-		} else {
-			break // walls block further look-ahead
+	recalcSmooth := tickNow-s.lastPathSmoothTick >= pathLookaheadRecalcTicks || bestIdx <= s.pathIndex || bestIdx > maxCheck
+	if recalcSmooth {
+		bestIdx = s.pathIndex
+		for i := s.pathIndex + 1; i < maxCheck; i++ {
+			wp := s.path[i]
+			if HasLineOfSightIndexed(s.x, s.y, wp[0], wp[1], s.buildings, s.losIndex) {
+				bestIdx = i
+			} else {
+				break // walls block further look-ahead
+			}
 		}
+		s.pathSmoothTargetIndex = bestIdx
+		s.lastPathSmoothTick = tickNow
 	}
 	// Skip intermediate waypoints.
 	if bestIdx > s.pathIndex {
@@ -3180,7 +3213,7 @@ func (s *Soldier) UpdateVisionSpatial(enemyHash *SpatialHash, buildings []rect) 
 	effectiveRange := s.vision.DegradeRange(s.profile.Physical.Fatigue, s.profile.Skills.TacticalAwareness, s.profile.Survival.SituationalAwareness)
 	nearbyEnemies := enemyHash.QueryRadius(s.x, s.y, effectiveRange)
 
-	s.vision.PerformVisionScan(s.x, s.y, s, nearbyEnemies, buildings, s.covers, &s.blackboard.Threats, s.tickVal())
+	s.vision.PerformVisionScan(s.x, s.y, s, nearbyEnemies, buildings, s.covers, s.losIndex, &s.blackboard.Threats, s.tickVal())
 
 	// Corner/doorway peek: if wall-adjacent and at a corner, perform a
 	// supplementary narrow-FOV scan in peek directions.
@@ -3231,7 +3264,7 @@ func (s *Soldier) UpdateVision(enemies []*Soldier, buildings []rect) {
 	if s.state == SoldierStateDead {
 		return
 	}
-	s.vision.PerformVisionScan(s.x, s.y, s, enemies, buildings, s.covers, &s.blackboard.Threats, s.tickVal())
+	s.vision.PerformVisionScan(s.x, s.y, s, enemies, buildings, s.covers, s.losIndex, &s.blackboard.Threats, s.tickVal())
 
 	// Corner/doorway peek: if wall-adjacent and at a corner, perform a
 	// supplementary narrow-FOV scan in peek directions. This simulates
@@ -3311,7 +3344,7 @@ func (s *Soldier) peekScan(direction, fov, maxRange float64, enemies []*Soldier,
 		}
 
 		// LOS check through buildings and cover.
-		if HasLineOfSightWithCover(s.x, s.y, e.x, e.y, buildings, s.covers) {
+		if HasLineOfSightWithCoverIndexed(s.x, s.y, e.x, e.y, buildings, s.covers, s.losIndex) {
 			s.vision.KnownContacts = append(s.vision.KnownContacts, e)
 		}
 	}

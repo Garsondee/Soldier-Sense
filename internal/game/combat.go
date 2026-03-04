@@ -531,7 +531,7 @@ func gunfireHeardStrength(srcX, srcY float64, listener *Soldier, red, blue []*So
 
 	// Building occlusion muffles sound strongly.
 	occlusionFactor := 1.0
-	if !HasLineOfSightWithCover(srcX, srcY, listener.x, listener.y, listener.buildings, listener.covers) {
+	if !HasLineOfSightWithCoverIndexed(srcX, srcY, listener.x, listener.y, listener.buildings, listener.covers, listener.losIndex) {
 		occlusionFactor = gunfireOccludedMul
 	}
 
@@ -592,7 +592,7 @@ func (cm *CombatManager) ResolveCombat(shooters, _, allFriendlies []*Soldier, bu
 
 		// LOS check (buildings and tall walls block firing lines).
 		// For LKP fire, we skip LOS check since we're firing at a remembered position
-		if !firingAtLKP && !HasLineOfSightWithCover(s.x, s.y, targetX, targetY, buildings, s.covers) {
+		if !firingAtLKP && !HasLineOfSightWithCoverIndexed(s.x, s.y, targetX, targetY, buildings, s.covers, s.losIndex) {
 			resetBurstState(s)
 			resetAimingState(s)
 			continue

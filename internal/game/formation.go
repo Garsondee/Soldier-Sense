@@ -87,6 +87,9 @@ func SlotWorld(leaderX, leaderY, heading, fwd, right float64) (float64, float64)
 // a soldier will request a new A* path to it.
 const repathThreshold = 20.0
 
+// formationRepathCooldownTicks limits moderate-drift repaths to avoid churn.
+const formationRepathCooldownTicks = 30
+
 // FormationSlot is assigned to one non-leader squad member.
 type FormationSlot struct {
 	Index   int     // slot index in the formation
