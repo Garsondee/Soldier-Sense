@@ -147,14 +147,21 @@ func shouldImmediatelyObeyOrder(tick, soldierID, orderID int, chance float64) bo
 	return orderImmediateObedienceRoll(tick, soldierID, orderID) < clamp01(chance)
 }
 
+// SquadPhase describes the current squad maneuver phase.
 type SquadPhase int
 
 const (
+	// SquadPhaseApproach is the default maneuver phase when advancing toward the objective/contact.
 	SquadPhaseApproach SquadPhase = iota
+	// SquadPhaseFixFire is the phase where the squad attempts to fix the enemy with fire.
 	SquadPhaseFixFire
+	// SquadPhaseBound is the phase where the squad bounds forward cover-to-cover.
 	SquadPhaseBound
+	// SquadPhaseAssault is the phase where the squad closes and assaults.
 	SquadPhaseAssault
+	// SquadPhaseStalledRecovery is a recovery phase when progress has stalled.
 	SquadPhaseStalledRecovery
+	// SquadPhaseConsolidate is a consolidation phase used to reduce spread / regroup.
 	SquadPhaseConsolidate
 )
 
@@ -284,7 +291,7 @@ func NewSquad(id int, team Team, members []*Soldier) *Squad {
 	return sq
 }
 
-// InitializeFlowField sets up the flow-field navigation system for this squad
+// InitializeFlowField sets up the flow-field navigation system for this squad.
 func (sq *Squad) InitializeFlowField(navGrid *NavGrid, tacticalMap *TacticalMap) {
 	sq.flowController = NewSquadFlowController(sq, navGrid, tacticalMap)
 }
@@ -324,7 +331,7 @@ func (sq *Squad) claimedBuildingCentroid() (float64, float64, bool) {
 	return float64(fp.x) + float64(fp.w)/2, float64(fp.y) + float64(fp.h)/2, true
 }
 
-func (sq *Squad) updateStalematePressure(tick int, hasContact bool, anyVisibleThreats int, closestDist float64, phaseStalled bool, terminalStalledCount, aliveCount int) (bool, bool) {
+func (sq *Squad) updateStalematePressure(tick int, hasContact bool, anyVisibleThreats int, closestDist float64, phaseStalled bool, terminalStalledCount, aliveCount int) (bool, bool) { //nolint:gocyclo
 	if sq.Leader == nil || !hasContact || aliveCount == 0 {
 		sq.stalemateTicks = 0
 		if tick >= sq.proactivePushUntil {
@@ -360,7 +367,7 @@ func (sq *Squad) updateStalematePressure(tick int, hasContact bool, anyVisibleTh
 	return stalemateActive, tick < sq.proactivePushUntil
 }
 
-func (sq *Squad) leaderObservedPhaseSteer(hasContact bool, closestDist float64, anyVisibleThreats int) (SquadPhase, bool) {
+func (sq *Squad) leaderObservedPhaseSteer(hasContact bool, closestDist float64, anyVisibleThreats int) (SquadPhase, bool) { //nolint:gocyclo
 	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
 		return sq.Phase, false
 	}
@@ -427,7 +434,7 @@ func (sq *Squad) advancePhase(tick int, next SquadPhase) {
 	}
 }
 
-func (sq *Squad) updatePhaseWithGuards(tick int, hasContact bool, anyVisibleThreats int, closestDist, spread float64, contactX, contactY float64, terminalStalledCount, aliveCount int) bool {
+func (sq *Squad) updatePhaseWithGuards(tick int, hasContact bool, anyVisibleThreats int, closestDist, spread, contactX, contactY float64, terminalStalledCount, aliveCount int) bool { //nolint:gocognit,gocyclo
 	if sq.Leader == nil {
 		return false
 	}
@@ -451,41 +458,46 @@ func (sq *Squad) updatePhaseWithGuards(tick int, hasContact bool, anyVisibleThre
 
 	switch sq.Phase {
 	case SquadPhaseApproach:
-		if spread > 250 {
+		switch {
+		case spread > 250:
 			next = SquadPhaseConsolidate
-		} else if hasContact && anyVisibleThreats > 0 && closestDist < engageExitDist {
+		case hasContact && anyVisibleThreats > 0 && closestDist < engageExitDist:
 			next = SquadPhaseFixFire
 		}
 	case SquadPhaseFixFire:
-		if spread > 250 {
+		switch {
+		case spread > 250:
 			next = SquadPhaseConsolidate
-		} else if !hasContact {
+		case !hasContact:
 			next = SquadPhaseApproach
-		} else if closestDist < engageEnterDist && elapsed >= phaseMinHoldTicks {
+		case closestDist < engageEnterDist && elapsed >= phaseMinHoldTicks:
 			next = SquadPhaseBound
 		}
 	case SquadPhaseBound:
-		if spread > 260 {
+		switch {
+		case spread > 260:
 			next = SquadPhaseConsolidate
-		} else if !hasContact {
+		case !hasContact:
 			next = SquadPhaseApproach
-		} else if closestDist < engageEnterDist*0.80 && elapsed >= phaseMinHoldTicks {
+		case closestDist < engageEnterDist*0.80 && elapsed >= phaseMinHoldTicks:
 			next = SquadPhaseAssault
 		}
 	case SquadPhaseAssault:
-		if spread > 260 {
+		switch {
+		case spread > 260:
 			next = SquadPhaseConsolidate
-		} else if !hasContact {
+		case !hasContact:
 			next = SquadPhaseApproach
-		} else if closestDist > engageExitDist && elapsed >= phaseMinHoldTicks {
+		case closestDist > engageExitDist && elapsed >= phaseMinHoldTicks:
 			next = SquadPhaseFixFire
 		}
 	case SquadPhaseStalledRecovery:
-		if spread > 260 {
+		switch {
+		case spread > 260:
 			next = SquadPhaseConsolidate
-		} else if !hasContact {
+		case !hasContact:
 			next = SquadPhaseApproach
-		} else if elapsed >= phaseRecoveryTicks && !manyTerminalStalled {
+		case elapsed >= phaseRecoveryTicks && !manyTerminalStalled:
 			next = SquadPhaseBound
 		}
 	case SquadPhaseConsolidate:
@@ -566,7 +578,7 @@ func (sq *Squad) issueOfficerOrder(tick int, kind OfficerCommandKind, targetX, t
 	}
 }
 
-func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY float64, stalemateActive, forceProactive bool) {
+func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY float64, stalemateActive, forceProactive bool) { //nolint:gocognit,gocyclo
 	if sq.Leader == nil {
 		return
 	}
@@ -656,8 +668,8 @@ func (sq *Squad) syncOfficerOrder(tick int, hasContact bool, contactX, contactY 
 
 // SquadThink runs the leader's squad-level decision loop.
 // It evaluates the leader's blackboard and sets Intent + orders for members.
-// intel is the world IntelStore; may be nil (degrades gracefully to blackboard-only).
-func (sq *Squad) SquadThink(intel *IntelStore) {
+// Intel is the world IntelStore; may be nil (degrades gracefully to blackboard-only).
+func (sq *Squad) SquadThink(intel *IntelStore) { //nolint:gocognit,gocyclo
 	leaderIncapacitated := sq.Leader == nil || sq.Leader.state == SoldierStateDead || sq.Leader.state == SoldierStateUnconscious
 	if leaderIncapacitated {
 		// Find capable candidates (alive and not incapacitated)
@@ -680,9 +692,14 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		if !sq.leaderSucceeding {
 			// Leader incapacitated (dead/unconscious) — start succession clock.
 			// Delay is longer if candidate is stressed or inexperienced.
+			// Initiative trait reduces succession delay - proactive soldiers step up faster.
 			ef := candidate.profile.Psych.EffectiveFear()
 			exp := candidate.profile.Psych.Experience
-			delay := int(float64(successionDelayTicks) * (1.0 + ef*2.0) * (1.2 - exp*0.8))
+			initiative := candidate.profile.Personality.Initiative
+			delay := int(float64(successionDelayTicks) * (1.0 + ef*2.0) * (1.2 - exp*0.8) * (1.0 - initiative*0.4))
+			if delay < 10 {
+				delay = 10 // Minimum delay for realism
+			}
 			sq.leaderSuccessionTick = *candidate.currentTick + delay
 			sq.leaderSucceeding = true
 			sq.leaderDeadTick = *candidate.currentTick
@@ -1345,6 +1362,8 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 		m.blackboard.OfficerOrderObedienceChance = 0
 		if sq.ActiveOrder.IsActiveAt(tick) {
 			obedienceChance := sq.Cohesion
+			// LeadershipFollowing trait enhances responsiveness to commands
+			obedienceChance += m.profile.Cooperation.LeadershipFollowing * 0.25
 			if m.blackboard.DisobeyingOrders {
 				obedienceChance *= 0.55
 			}
@@ -1391,14 +1410,15 @@ func (sq *Squad) SquadThink(intel *IntelStore) {
 			m.blackboard.SquadContactY = contactY
 		}
 		// Assign a unique spread position for engage orders.
-		if m == sq.Leader {
+		switch {
+		case m == sq.Leader:
 			m.blackboard.HasMoveOrder = false
-		} else if !sq.Broken && len(moveOrders) > 0 && orderIdx < len(moveOrders) {
+		case !sq.Broken && len(moveOrders) > 0 && orderIdx < len(moveOrders):
 			m.blackboard.OrderMoveX = moveOrders[orderIdx][0]
 			m.blackboard.OrderMoveY = moveOrders[orderIdx][1]
 			m.blackboard.HasMoveOrder = true
 			orderIdx++
-		} else {
+		default:
 			m.blackboard.HasMoveOrder = false
 		}
 		if !sq.Broken && stalledPriorityMember == m {
@@ -1746,7 +1766,8 @@ func (sq *Squad) evaluateBuildings() {
 
 	obsContactX, obsContactY := 0.0, 0.0
 	obsHasContact := false
-	if b.VisibleThreatCount() > 0 {
+	switch {
+	case b.VisibleThreatCount() > 0:
 		best := math.MaxFloat64
 		for _, t := range b.Threats {
 			if !t.IsVisible {
@@ -1759,10 +1780,10 @@ func (sq *Squad) evaluateBuildings() {
 				obsHasContact = true
 			}
 		}
-	} else if b.SquadHasContact {
+	case b.SquadHasContact:
 		obsContactX, obsContactY = b.SquadContactX, b.SquadContactY
 		obsHasContact = true
-	} else if b.HeardGunfire {
+	case b.HeardGunfire:
 		obsContactX, obsContactY = b.HeardGunfireX, b.HeardGunfireY
 		obsHasContact = true
 	}
@@ -1936,7 +1957,7 @@ func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 
 	positions := make([][2]float64, n)
 	for i, m := range alive {
-		// Symmetric lateral offset: centre is at 0, then alternating ±1, ±2...
+		// Symmetric lateral offset: center is at 0, then alternating ±1, ±2...
 		halfN := float64(n-1) / 2.0
 		lateral := (float64(i) - halfN) * spacing
 

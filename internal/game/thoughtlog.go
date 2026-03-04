@@ -21,13 +21,18 @@ const (
 type LogCategory uint8
 
 const (
-	LogCatRadio   LogCategory = iota // radio transmissions (clear/garbled/drop/timeout)
-	LogCatSquad                      // periodic squad status polls
-	LogCatSpeech                     // soldier speech bubbles
-	LogCatThought                    // individual soldier goal/state changes
-	logCatCount                      // sentinel — must be last
+	// LogCatRadio marks radio transmissions (clear/garbled/drop/timeout).
+	LogCatRadio LogCategory = iota // radio transmissions (clear/garbled/drop/timeout)
+	// LogCatSquad marks periodic squad status polls.
+	LogCatSquad // periodic squad status polls
+	// LogCatSpeech marks soldier speech bubbles.
+	LogCatSpeech // soldier speech bubbles
+	// LogCatThought marks individual soldier goal/state changes.
+	LogCatThought // individual soldier goal/state changes
+	logCatCount   // sentinel — must be last
 )
 
+// ShortName returns a 3-letter category label for compact UI display.
 func (c LogCategory) ShortName() string {
 	switch c {
 	case LogCatRadio:
@@ -45,10 +50,10 @@ func (c LogCategory) ShortName() string {
 
 // ThoughtEntry is a single line in the thought log.
 type ThoughtEntry struct {
-	Tick     int
 	Label    string // e.g. "R1", "B3", "SQ-R"
-	Team     Team
 	Message  string
+	Tick     int
+	Team     Team
 	Category LogCategory
 }
 
@@ -265,7 +270,7 @@ func (tl *ThoughtLog) Draw(buf *ebiten.Image, bufW, bufH int) {
 	for i, e := range visible {
 		isRecent := i >= len(visible)-recent
 
-		// Team colour dot.
+		// Team color dot.
 		var dotCol color.RGBA
 		if e.Team == TeamRed {
 			dotCol = color.RGBA{R: 230, G: 70, B: 60, A: 255}
@@ -278,10 +283,10 @@ func (tl *ThoughtLog) Draw(buf *ebiten.Image, bufW, bufH int) {
 			vector.FillRect(buf, 2, float32(y), float32(bufW-4), float32(logLineHeight), color.RGBA{R: 30, G: 45, B: 30, A: 180}, false)
 		}
 
-		// Team colour indicator stripe.
+		// Team color indicator stripe.
 		vector.FillRect(buf, 2, float32(y+1), 2, float32(logLineHeight-2), dotCol, false)
 
-		// Category colour pip.
+		// Category color pip.
 		catCol := logCategoryColor(e.Category)
 		vector.FillRect(buf, 5, float32(y+1), 2, float32(logLineHeight-2), catCol, false)
 

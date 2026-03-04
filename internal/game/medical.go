@@ -124,10 +124,19 @@ func treatmentDuration(action TreatmentAction, provider *Soldier) int {
 		skillMul = 0.5
 	}
 
-	// Stress modifier: fear increases time.
-	stressMul := 1.0 + provider.profile.Psych.EffectiveFear()*0.4
+	// MedicalKnowledge trait further improves treatment speed
+	medKnowledgeMul := 1.0 - provider.profile.Survival.MedicalKnowledge*0.25
+	if medKnowledgeMul < 0.6 {
+		medKnowledgeMul = 0.6
+	}
 
-	return int(float64(base) * skillMul * stressMul)
+	// MedicDedication trait: specialist medics are significantly faster
+	medicDedicationMul := 1.0 - provider.profile.Cooperation.MedicDedication*0.35
+	if medicDedicationMul < 0.5 {
+		medicDedicationMul = 0.5
+	}
+
+	return int(math.Round(float64(base) * skillMul * medKnowledgeMul * medicDedicationMul))
 }
 
 // treatmentSuccessChance returns the probability of successful treatment.
@@ -135,7 +144,19 @@ func treatmentSuccessChance(provider *Soldier, targetPain float64) float64 {
 	base := provider.profile.Skills.FirstAid
 	painPenalty := targetPain * 0.3
 	fearPenalty := provider.profile.Psych.EffectiveFear() * 0.2
-	return clamp01(base - painPenalty - fearPenalty)
+
+	// MedicalKnowledge trait improves success chance (up to +20% bonus)
+	medKnowledgeBonus := provider.profile.Survival.MedicalKnowledge * 0.20
+
+	// MedicDedication trait: specialist medics have higher success rates
+	// Also reduces fear penalty when treating casualties
+	medicDedicationBonus := provider.profile.Cooperation.MedicDedication * 0.25
+	if provider.profile.Cooperation.MedicDedication > 0.4 {
+		// High dedication medics resist fear when treating
+		fearPenalty *= (1.0 - provider.profile.Cooperation.MedicDedication*0.4)
+	}
+
+	return clamp01(base - painPenalty - fearPenalty + medKnowledgeBonus + medicDedicationBonus)
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +218,7 @@ func (s *Soldier) tickSelfAid(tick int) {
 		pain := s.body.TotalPain()
 		successChance := treatmentSuccessChance(s, pain)
 
+		//nolint:gosec // G404: math/rand is acceptable for game simulation (not cryptographic)
 		if rand.Float64() < successChance {
 			// Success: mark wound as treated.
 			treat.TargetWound.Treated = true
@@ -333,6 +355,7 @@ func tickProvidedAid(casualty *Soldier, tick int) {
 			successChance = clamp01(successChance + 0.2)
 		}
 
+		//nolint:gosec // G404: math/rand is acceptable for game simulation (not cryptographic)
 		if rand.Float64() < successChance {
 			// Success: apply treatment effect.
 			switch treat.Action {

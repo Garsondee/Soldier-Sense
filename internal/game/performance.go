@@ -85,7 +85,7 @@ type PerfTracker struct {
 }
 
 // NewPerfTracker creates a tracker seeded from the soldier's initial state.
-// hasBuildingAccess should be true when the map contains buildings/cover objects.
+// HasBuildingAccess should be true when the map contains buildings/cover objects.
 func NewPerfTracker(s *Soldier, hasBuildingAccess bool) *PerfTracker {
 	return &PerfTracker{
 		Label:             s.label,
@@ -347,7 +347,7 @@ func computeGrade(pt *PerfTracker) SoldierGrade {
 		g.FirefightScore = perfClamp(s)
 	}
 
-	// --- Under fire: behaviour while receiving rounds ---
+	// --- Under fire: behavior while receiving rounds ---
 	if pt.TicksUnderFire >= perfMinUnderFireTicks {
 		s := 50.0
 		s += 30.0 * (1.0 - float64(pt.TicksFrozenInOpen)/uf)
@@ -595,7 +595,8 @@ func FormatGrades(grades []SoldierGrade) string {
 	sb.WriteString("\n=== Soldier Performance Grades ===\n")
 
 	currentTeam := Team(-1)
-	for _, g := range grades {
+	for i := range grades {
+		g := &grades[i]
 		if g.Team != currentTeam {
 			currentTeam = g.Team
 			teamName := "RED"
@@ -658,7 +659,8 @@ func FormatGradesSummary(grades []SoldierGrade) string {
 		badCount  map[string]int
 	}
 	teams := map[Team]*teamStats{}
-	for _, g := range grades {
+	for i := range grades {
+		g := &grades[i]
 		ts, ok := teams[g.Team]
 		if !ok {
 			ts = &teamStats{goodCount: map[string]int{}, badCount: map[string]int{}}
@@ -752,7 +754,7 @@ func perfTopTraits(counts map[string]int, n int) string {
 		trait string
 		count int
 	}
-	var items []kv
+	items := make([]kv, 0, len(counts))
 	for k, v := range counts {
 		items = append(items, kv{k, v})
 	}
@@ -769,5 +771,5 @@ func perfTopTraits(counts map[string]int, n int) string {
 	return strings.Join(parts, ", ")
 }
 
-// ensure sort import is used
+// Ensure sort import is used.
 var _ = sort.Strings

@@ -1,6 +1,6 @@
 # just is a handy way to save and run project-specific commands.
 # The book is at https://just.systems/man/en/
-# Install it from https://github.com/casey/just/releases 
+# Install it from https://github.com/casey/just/releases
 #   Windows: winget install --id=Casey.Just -e  (then use Git Bash as your shell)
 
 set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-cu"]
@@ -32,9 +32,46 @@ gosec:
       echo "To install gosec: go install github.com/securego/gosec/v2/cmd/gosec@latest" ; \
     fi
 
+# Install all development tools (golangci-lint, gosec)
+install-tools:
+    @echo "Installing development tools..." ; \
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest ; \
+    go install github.com/securego/gosec/v2/cmd/gosec@latest ; \
+    echo "✓ Tools installed successfully"
+
 # Install golangci-lint via go install (ensure ~/go/bin is in your PATH)
 install-golangci-lint:
     go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# Install gosec security scanner
+install-gosec:
+    go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+# Set up Git pre-commit hooks
+setup-hooks:
+    @if [ ! -f .git/hooks/pre-commit ]; then \
+      echo "Error: .git/hooks/pre-commit not found" ; \
+      echo "This should have been created automatically" ; \
+      exit 1 ; \
+    fi ; \
+    echo "✓ Pre-commit hook is already in place" ; \
+    echo "  The hook will run automatically before each commit"
+
+# Complete development environment setup
+setup: install-tools setup-hooks
+    @echo "" ; \
+    echo "═══════════════════════════════════════" ; \
+    echo "✓ Development environment setup complete!" ; \
+    echo "═══════════════════════════════════════" ; \
+    echo "" ; \
+    echo "Pre-commit hooks are now active and will run:" ; \
+    echo "  • Code formatting checks" ; \
+    echo "  • Linting (golangci-lint)" ; \
+    echo "  • Security scanning (gosec)" ; \
+    echo "  • Unit tests" ; \
+    echo "  • Build verification" ; \
+    echo "" ; \
+    echo "Run 'just test' to verify everything works"
 
 fmt:
     go fmt ./cmd/... ./internal/...

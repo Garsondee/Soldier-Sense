@@ -5,12 +5,12 @@ import "math"
 // SpatialHash provides O(1) spatial queries for nearby soldiers.
 // Uses a grid-based hash to bucket soldiers by position.
 type SpatialHash struct {
-	cellSize float64
 	buckets  map[int64][]*Soldier
+	cellSize float64
 }
 
 // NewSpatialHash creates a spatial hash with the given cell size.
-// cellSize should be roughly the maximum query radius for best performance.
+// CellSize should be roughly the maximum query radius for best performance.
 func NewSpatialHash(cellSize float64) *SpatialHash {
 	return &SpatialHash{
 		cellSize: cellSize,

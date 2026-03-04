@@ -72,7 +72,7 @@ func TestFindTileMapCoverForThreat_FindsNearbyCover(t *testing.T) {
 		t.Fatal("expected to find tilemap cover candidate")
 	}
 	if def < 0.20 {
-		t.Fatalf("expected candidate defence >= 0.20, got %.3f", def)
+		t.Fatalf("expected candidate defense >= 0.20, got %.3f", def)
 	}
 	if math.Hypot(px-sx, py-sy) > 120 {
 		t.Fatalf("cover candidate beyond max search distance")

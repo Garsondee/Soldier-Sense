@@ -1,0 +1,159 @@
+run:
+  timeout: 5m
+  tests: true
+  build-tags: []
+  skip-dirs:
+    - bin
+    - dist
+    - _build
+  skip-files: []
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+  uniq-by-line: true
+  sort-results: true
+
+linters:
+  enable:
+    # Default linters
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify code
+    - govet         # Vet examines Go source code
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Go static analysis
+    - unused        # Check for unused constants, variables, functions and types
+    
+    # Additional code quality linters
+    - gofmt         # Check whether code was gofmt-ed
+    - goimports     # Check import statements are formatted
+    - misspell      # Finds commonly misspelled English words
+    - revive        # Fast, configurable, extensible, flexible, and beautiful linter for Go
+    - unconvert     # Remove unnecessary type conversions
+    - unparam       # Reports unused function parameters
+    - gosec         # Security-focused linter
+    - bodyclose     # Checks whether HTTP response body is closed successfully
+    - noctx         # Finds sending http request without context.Context
+    - rowserrcheck  # Checks whether Err of rows is checked successfully
+    - sqlclosecheck # Checks that sql.Rows and sql.Stmt are closed
+    
+    # Error handling
+    - errname       # Checks that sentinel errors are prefixed with Err
+    - errorlint     # Find code that will cause problems with Go 1.13 error wrapping
+    
+    # Performance
+    - prealloc      # Finds slice declarations that could potentially be preallocated
+    
+    # Style
+    - stylecheck    # Stylecheck is a replacement for golint
+    - whitespace    # Detection of leading and trailing whitespace
+    
+    # Complexity
+    - gocyclo       # Computes and checks the cyclomatic complexity of functions
+    - gocognit      # Computes and checks the cognitive complexity of functions
+    
+    # Best practices
+    - gocritic      # Provides diagnostics that check for bugs, performance and style issues
+    - godot         # Check if comments end in a period
+    - nolintlint    # Reports ill-formed or insufficient nolint directives
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  
+  govet:
+    enable-all: true
+    disable:
+      - shadow  # Can be too noisy for some codebases
+  
+  gocyclo:
+    min-complexity: 15
+  
+  gocognit:
+    min-complexity: 20
+  
+  misspell:
+    locale: US
+  
+  revive:
+    confidence: 0.8
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+  
+  gosec:
+    severity: medium
+    confidence: medium
+    excludes:
+      - G404  # Use of weak random number generator - we use math/rand intentionally for game simulation
+  
+  stylecheck:
+    checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022"]
+    dot-import-whitelist: []
+    initialisms: ["ACL", "API", "ASCII", "CPU", "CSS", "DNS", "EOF", "GUID", "HTML", "HTTP", "HTTPS", "ID", "IP", "JSON", "QPS", "RAM", "RPC", "SLA", "SMTP", "SQL", "SSH", "TCP", "TLS", "TTL", "UDP", "UI", "GID", "UID", "UUID", "URI", "URL", "UTF8", "VM", "XML", "XMPP", "XSRF", "XSS", "SIP", "RTP", "AMQP", "DB", "TS"]
+  
+  godot:
+    scope: declarations
+    exclude: []
+    capital: true
+  
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+    disabled-checks:
+      - whyNoLint
+      - unnamedResult
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - gocritic
+    
+    # Exclude known issues in legacy code or generated code
+    - path: internal/game/biome\.go
+      linters:
+        - gocyclo
+        - gocognit
+    
+    # Allow math/rand for game simulation (not cryptographic)
+    - text: "Use of weak random number generator"
+      linters:
+        - gosec

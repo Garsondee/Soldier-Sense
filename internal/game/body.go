@@ -10,15 +10,23 @@ import "math/rand"
 type BodyRegion int
 
 const (
-	RegionHead     BodyRegion = iota // 0
-	RegionNeck                       // 1
-	RegionTorso                      // 2
-	RegionArmLeft                    // 3
-	RegionArmRight                   // 4
-	RegionAbdomen                    // 5
-	RegionLegLeft                    // 6
-	RegionLegRight                   // 7
-	regionCount                      // sentinel — always last
+	// RegionHead is the head hit region.
+	RegionHead BodyRegion = iota // 0
+	// RegionNeck is the neck hit region.
+	RegionNeck // 1
+	// RegionTorso is the torso hit region.
+	RegionTorso // 2
+	// RegionArmLeft is the left arm hit region.
+	RegionArmLeft // 3
+	// RegionArmRight is the right arm hit region.
+	RegionArmRight // 4
+	// RegionAbdomen is the abdomen hit region.
+	RegionAbdomen // 5
+	// RegionLegLeft is the left leg hit region.
+	RegionLegLeft // 6
+	// RegionLegRight is the right leg hit region.
+	RegionLegRight // 7
+	regionCount    // sentinel — always last
 )
 
 func (r BodyRegion) String() string {
@@ -91,10 +99,14 @@ var stanceHitWeights = [3][regionCount]float64{
 type WoundSeverity int
 
 const (
-	WoundMinor    WoundSeverity = iota // graze / fragment
-	WoundModerate                      // through-and-through or lodged
-	WoundSevere                        // major vessel / bone damage
-	WoundCritical                      // catastrophic — immediate life threat
+	// WoundMinor is a graze or fragment wound.
+	WoundMinor WoundSeverity = iota // graze / fragment
+	// WoundModerate is a penetrating but survivable wound.
+	WoundModerate // through-and-through or lodged
+	// WoundSevere is a major trauma wound.
+	WoundSevere // major vessel / bone damage
+	// WoundCritical is a catastrophic immediate life threat.
+	WoundCritical // catastrophic — immediate life threat
 )
 
 func (ws WoundSeverity) String() string {
@@ -151,13 +163,13 @@ type Wound struct {
 
 // BodyMap holds per-region health and the wound list for one soldier.
 type BodyMap struct {
-	HP    [regionCount]float64
-	MaxHP [regionCount]float64
-
 	Wounds []Wound
 
 	// BloodVolume represents circulating blood as a fraction (1.0 = full).
 	BloodVolume float64
+
+	HP    [regionCount]float64
+	MaxHP [regionCount]float64
 }
 
 // NewBodyMap returns a fully healthy body with no wounds.

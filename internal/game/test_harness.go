@@ -25,28 +25,28 @@ type effectivenessProbe struct {
 // It mirrors Game.Update but has no Ebiten dependency and supports
 // deterministic seeding and structured logging.
 type TestSim struct {
-	Width        int
-	Height       int
-	buildings    []rect
-	covers       []*CoverObject
 	TacticalMap  *TacticalMap
 	NavGrid      *NavGrid
 	Soldiers     []*Soldier // all soldiers across both teams
 	Squads       []*Squad
 	SimLog       *SimLog
 	Reporter     *SimReporter
-	Tick         int
+	buildings    []rect
+	covers       []*CoverObject
 	rng          *rand.Rand
 	combat       *CombatManager
 	effProbes    map[int]*effectivenessProbe
 	PerfTrackers map[int]*PerfTracker
+	Width        int
+	Height       int
+	Tick         int
 
-	// internal counters
+	// Internal counters.
 	nextID int
 	tick   int // pointer target for soldiers
 }
 
-func (ts *TestSim) logCombatEffectiveness(tick int, s *Soldier) {
+func (ts *TestSim) logCombatEffectiveness(tick int, s *Soldier) { //nolint:gocyclo
 	probe, ok := ts.effProbes[s.id]
 	if !ok {
 		probe = &effectivenessProbe{lastX: s.x, lastY: s.y}
@@ -111,13 +111,13 @@ const (
 
 // SimOption is a builder function applied to a TestSim during construction.
 type SimOption struct {
-	kind simOptionKind
 	fn   func(*TestSim)
+	kind simOptionKind
 }
 
 // WithMapSize sets the playfield dimensions.
 func WithMapSize(w, h int) SimOption {
-	return SimOption{simOptInfra, func(ts *TestSim) {
+	return SimOption{kind: simOptInfra, fn: func(ts *TestSim) {
 		ts.Width = w
 		ts.Height = h
 	}}
@@ -125,7 +125,7 @@ func WithMapSize(w, h int) SimOption {
 
 // WithBuilding adds an obstacle.
 func WithBuilding(x, y, w, h int) SimOption {
-	return SimOption{simOptInfra, func(ts *TestSim) {
+	return SimOption{kind: simOptInfra, fn: func(ts *TestSim) {
 		ts.buildings = append(ts.buildings, rect{x: x, y: y, w: w, h: h})
 	}}
 }
@@ -133,7 +133,7 @@ func WithBuilding(x, y, w, h int) SimOption {
 // WithHeadlessBattlefield injects a fully generated battlefield into the sim.
 // This overrides map size, buildings, covers, navgrid, and tactical map.
 func WithHeadlessBattlefield(bf *HeadlessBattlefield) SimOption {
-	return SimOption{simOptInfra, func(ts *TestSim) {
+	return SimOption{kind: simOptInfra, fn: func(ts *TestSim) {
 		if bf == nil {
 			return
 		}
@@ -148,42 +148,42 @@ func WithHeadlessBattlefield(bf *HeadlessBattlefield) SimOption {
 
 // WithSeed sets the RNG seed for deterministic runs.
 func WithSeed(seed int64) SimOption {
-	return SimOption{simOptInfra, func(ts *TestSim) {
+	return SimOption{kind: simOptInfra, fn: func(ts *TestSim) {
 		ts.rng = rand.New(rand.NewSource(seed)) // #nosec G404 -- test harness
 	}}
 }
 
 // WithVerbose enables per-tick verbose logging.
 func WithVerbose(v bool) SimOption {
-	return SimOption{simOptInfra, func(ts *TestSim) {
+	return SimOption{kind: simOptInfra, fn: func(ts *TestSim) {
 		ts.SimLog = NewSimLog(v)
 	}}
 }
 
 // WithRedSoldier adds a red team soldier advancing from (sx,sy) toward (tx,ty).
 func WithRedSoldier(id int, sx, sy, tx, ty float64) SimOption {
-	return SimOption{simOptSoldier, func(ts *TestSim) {
+	return SimOption{kind: simOptSoldier, fn: func(ts *TestSim) {
 		ts.addSoldier(id, sx, sy, TeamRed, [2]float64{sx, sy}, [2]float64{tx, ty})
 	}}
 }
 
 // WithBlueSoldier adds a blue team soldier advancing from (sx,sy) toward (tx,ty).
 func WithBlueSoldier(id int, sx, sy, tx, ty float64) SimOption {
-	return SimOption{simOptSoldier, func(ts *TestSim) {
+	return SimOption{kind: simOptSoldier, fn: func(ts *TestSim) {
 		ts.addSoldier(id, sx, sy, TeamBlue, [2]float64{sx, sy}, [2]float64{tx, ty})
 	}}
 }
 
 // WithRedSquad groups existing red soldiers (by ID) into a squad.
 func WithRedSquad(ids ...int) SimOption {
-	return SimOption{simOptSquad, func(ts *TestSim) {
+	return SimOption{kind: simOptSquad, fn: func(ts *TestSim) {
 		ts.formSquad(TeamRed, ids)
 	}}
 }
 
 // WithBlueSquad groups existing blue soldiers (by ID) into a squad.
 func WithBlueSquad(ids ...int) SimOption {
-	return SimOption{simOptSquad, func(ts *TestSim) {
+	return SimOption{kind: simOptSquad, fn: func(ts *TestSim) {
 		ts.formSquad(TeamBlue, ids)
 	}}
 }
@@ -253,7 +253,7 @@ func (ts *TestSim) addSoldier(id int, x, y float64, team Team, start, end [2]flo
 	}
 }
 
-// formSquad groups soldiers into a squad. indices are soldier IDs (not slice indices).
+// formSquad groups soldiers into a squad. Indices are soldier IDs (not slice indices).
 func (ts *TestSim) formSquad(team Team, ids []int) {
 	var members []*Soldier
 	for _, id := range ids {
@@ -311,7 +311,7 @@ func (ts *TestSim) RunUntil(predicate func(*TestSim) bool, maxTicks int) int {
 }
 
 // runOneTick mirrors Game.Update for the headless harness.
-func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
+func (ts *TestSim) runOneTick(reds, blues []*Soldier) { //nolint:gocognit
 	tick := ts.tick
 
 	// Snapshot previous goals/intents for change detection.
@@ -501,7 +501,7 @@ func (ts *TestSim) runOneTick(reds, blues []*Soldier) {
 		}
 	}
 
-	// Analytics: collect behaviour report every ~1s.
+	// Analytics: collect behavior report every ~1s.
 	if tick%60 == 0 && ts.Reporter != nil {
 		ts.Reporter.Collect(tick, reds, blues, ts.Squads)
 	}
@@ -530,18 +530,18 @@ func (ts *TestSim) CurrentTick() int {
 	return ts.tick
 }
 
-// Snapshot captures a lightweight state summary.
+// SimSnapshot captures a lightweight state summary.
 type SimSnapshot struct {
-	Tick     int
 	Soldiers []SoldierSnapshot
+	Tick     int
 }
 
 // SoldierSnapshot is a lightweight copy of a soldier's state at a tick.
 type SoldierSnapshot struct {
-	ID    int
 	Label string
-	Team  Team
 	X, Y  float64
+	ID    int
+	Team  Team
 	State SoldierState
 	Goal  GoalKind
 	Fear  float64

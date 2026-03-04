@@ -5,6 +5,9 @@ import (
 	"math/rand"
 )
 
+// cellKey represents a grid cell coordinate for placement tracking.
+type cellKey struct{ cx, cy int }
+
 // CoverKind identifies the type of cover object.
 type CoverKind int
 
@@ -18,9 +21,25 @@ const (
 	// Excellent cover — heavily reduces hit chance.
 	CoverChestWall
 
-	// CoverRubble is scattered debris. Passable. Only marginally effective.
-	// Does not block LOS. Slightly reduces hit chance.
-	CoverRubble
+	// CoverRubbleLight is scattered small debris and chunks.
+	// Passable with minor movement penalty. Provides minimal cover.
+	CoverRubbleLight
+
+	// CoverRubbleMedium is moderate debris piles from collapsed structures.
+	// Passable but slows movement significantly. Decent cover value.
+	CoverRubbleMedium
+
+	// CoverRubbleHeavy is large concrete/masonry chunks and twisted metal.
+	// Very difficult to traverse. Excellent cover, can partially block LOS.
+	CoverRubbleHeavy
+
+	// CoverRubbleMetal is twisted steel beams, vehicle parts, and machinery debris.
+	// Moderate movement penalty but excellent ballistic protection.
+	CoverRubbleMetal
+
+	// CoverRubbleWood is splintered timber, furniture debris, and organic matter.
+	// Easy to move through but minimal ballistic protection.
+	CoverRubbleWood
 )
 
 // coverCellSize is the size of a cover object in pixels.
@@ -47,8 +66,16 @@ func (c *CoverObject) CoverDefence() float64 {
 		return 0.85
 	case CoverChestWall:
 		return 0.70
-	case CoverRubble:
-		return 0.65 // substantial debris cover
+	case CoverRubbleLight:
+		return 0.25 // minimal debris cover
+	case CoverRubbleMedium:
+		return 0.50 // moderate debris cover
+	case CoverRubbleHeavy:
+		return 0.75 // excellent debris cover
+	case CoverRubbleMetal:
+		return 0.80 // superior ballistic protection
+	case CoverRubbleWood:
+		return 0.20 // poor ballistic protection
 	default:
 		return 0.0
 	}
@@ -62,8 +89,16 @@ func (c *CoverObject) MovementMul() float64 {
 		return 1.0 // impassable, not reached
 	case CoverChestWall:
 		return 0.65 // climb-over penalty
-	case CoverRubble:
-		return 0.40 // rubble is very hard to move through quickly
+	case CoverRubbleLight:
+		return 0.85 // minor debris, easy to navigate
+	case CoverRubbleMedium:
+		return 0.60 // moderate debris piles
+	case CoverRubbleHeavy:
+		return 0.35 // large chunks, very difficult
+	case CoverRubbleMetal:
+		return 0.45 // twisted metal, sharp edges
+	case CoverRubbleWood:
+		return 0.75 // splintered wood, easier than concrete
 	default:
 		return 1.0
 	}
@@ -71,7 +106,14 @@ func (c *CoverObject) MovementMul() float64 {
 
 // BlocksLOS returns true if this cover object fully interrupts line of sight.
 func (c *CoverObject) BlocksLOS() bool {
-	return c.kind == CoverTallWall
+	switch c.kind {
+	case CoverTallWall:
+		return true
+	case CoverRubbleHeavy:
+		return true // large debris piles can block LOS
+	default:
+		return false
+	}
 }
 
 // BlocksMovement returns true if soldiers cannot walk through this cover object.
@@ -81,22 +123,29 @@ func (c *CoverObject) BlocksMovement() bool {
 
 // SlowsMovement returns true if this cover object impedes but does not block movement.
 func (c *CoverObject) SlowsMovement() bool {
-	return c.kind == CoverChestWall || c.kind == CoverRubble
+	switch c.kind {
+	case CoverChestWall, CoverRubbleLight, CoverRubbleMedium, CoverRubbleHeavy, CoverRubbleMetal, CoverRubbleWood:
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Cover generation ---
 
 const (
-	// wallRunMinLen / wallRunMaxLen: length of a cover-wall run in cells.
+	// WallRunMinLen / wallRunMaxLen are the length bounds of a cover-wall run in cells.
 	wallRunMinLen = 3
 	wallRunMaxLen = 10
 	// Number of cover wall runs and freestanding corridors to attempt.
 	numWallRuns  = 20
 	numCorridors = 6
-	// Explosion radius for building-damage rubble (px).
-	explosionRadius = 80
-	numExplosions   = 30
 )
+
+type wallFaceAttempt struct {
+	x, y  int
+	horiz bool
+}
 
 // GenerateCover generates cover objects and returns two slices:
 //
@@ -105,70 +154,33 @@ const (
 //
 // Walls and chest-walls form long horizontal or vertical runs that extend
 // from building edges or span open corridors between buildings.
-func GenerateCover(mapW, mapH int, footprints []rect, walls []rect, rng *rand.Rand, tm *TileMap) ([]*CoverObject, []*CoverObject) {
-	cs := coverCellSize
-	margin := cs * 3
+func GenerateCover(mapW, mapH int, footprints, walls []rect, rng *rand.Rand, tm *TileMap) ([]*CoverObject, []*CoverObject) {
 	covers := make([]*CoverObject, 0, 64)
-
-	// occupied tracks cells already used by cover so we don't double-place.
-	type cellKey struct{ cx, cy int }
 	occupied := map[cellKey]bool{}
+	cellSize := coverCellSize
+	margin := cellSize * 3
+	footprintRects := footprintsToRects(footprints)
 
-	// onRoad checks the tile map for road tiles.
-	onRoad := func(px, py int) bool {
-		if tm == nil {
-			return false
-		}
-		return tileOnRoad(tm, px/cs, py/cs)
-	}
+	generateWallExtensions(footprints, walls, footprintRects, occupied, &covers, rng, tm, cellSize, margin, mapW, mapH)
+	generateFreestandingRuns(walls, footprintRects, occupied, &covers, rng, tm, cellSize, margin, mapW, mapH)
+	generateCoverCorridors(walls, footprintRects, occupied, &covers, rng, tm, cellSize, margin, mapW, mapH)
 
-	placeLine := func(startX, startY, length int, horizontal bool, kind CoverKind) {
-		for i := 0; i < length; i++ {
-			var x, y int
-			if horizontal {
-				x = startX + i*cs
-				y = startY
-			} else {
-				x = startX
-				y = startY + i*cs
-			}
-			if onRoad(x, y) {
-				continue
-			}
-			k := cellKey{x / cs, y / cs}
-			if occupied[k] {
-				continue
-			}
-			c := &CoverObject{x: x, y: y, kind: kind}
-			if coverOverlapsBuildings(c, walls) {
-				continue
-			}
-			if coverOverlapsBuildings(c, footprintsToRects(footprints)) {
-				continue
-			}
-			occupied[k] = true
-			covers = append(covers, c)
-		}
-	}
+	// --- 4. Generate rubble positions from building explosions (returned separately) ---
+	rubble := generateExplosionRubble(mapW, mapH, footprints, walls, rng, tm)
 
-	snap := func(v int) int { return (v / cs) * cs }
+	return covers, rubble
+}
 
-	// --- 1. Wall extensions: short runs adjacent to building edges ---
+func generateWallExtensions(
+	footprints, walls, footprintRects []rect,
+	occupied map[cellKey]bool,
+	covers *[]*CoverObject,
+	rng *rand.Rand,
+	tm *TileMap,
+	cellSize, margin, mapW, mapH int,
+) {
 	for _, fp := range footprints {
-		// Try to extend each face of the building outward.
-		faceAttempts := []struct {
-			x, y  int
-			horiz bool
-		}{
-			// Extend leftward from west face.
-			{fp.x - cs*(wallRunMinLen+rng.Intn(3)), fp.y + fp.h/2, true},
-			// Extend rightward from east face.
-			{fp.x + fp.w, fp.y + fp.h/2, true},
-			// Extend upward from north face.
-			{fp.x + fp.w/2, fp.y - cs*(wallRunMinLen+rng.Intn(3)), false},
-			// Extend downward from south face.
-			{fp.x + fp.w/2, fp.y + fp.h, false},
-		}
+		faceAttempts := buildWallFaceAttempts(fp, cellSize, rng)
 		for _, fa := range faceAttempts {
 			if rng.Float64() > 0.6 {
 				continue
@@ -178,123 +190,401 @@ func GenerateCover(mapW, mapH int, footprints []rect, walls []rect, rng *rand.Ra
 			if rng.Float64() < 0.3 {
 				kind = CoverTallWall
 			}
-			sx := snap(fa.x)
-			sy := snap(fa.y)
-			if sx < margin || sy < margin || sx > mapW-margin || sy > mapH-margin {
+			sx := snapToCoverCell(fa.x, cellSize)
+			sy := snapToCoverCell(fa.y, cellSize)
+			if !isWithinCoverMargins(sx, sy, margin, mapW, mapH) {
 				continue
 			}
-			placeLine(sx, sy, length, fa.horiz, kind)
+			placeCoverLine(walls, footprintRects, occupied, covers, tm, cellSize, sx, sy, length, fa.horiz, kind)
 		}
 	}
+}
 
-	// --- 2. Freestanding runs (corridors / barriers in open ground) ---
-	for attempt := 0; attempt < numWallRuns*6 && len(covers) < numWallRuns*wallRunMaxLen; attempt++ {
+func buildWallFaceAttempts(fp rect, cs int, rng *rand.Rand) []wallFaceAttempt {
+	return []wallFaceAttempt{
+		{x: fp.x - cs*(wallRunMinLen+rng.Intn(3)), y: fp.y + fp.h/2, horiz: true},
+		{x: fp.x + fp.w, y: fp.y + fp.h/2, horiz: true},
+		{x: fp.x + fp.w/2, y: fp.y - cs*(wallRunMinLen+rng.Intn(3)), horiz: false},
+		{x: fp.x + fp.w/2, y: fp.y + fp.h, horiz: false},
+	}
+}
+
+func generateFreestandingRuns(
+	walls, footprintRects []rect,
+	occupied map[cellKey]bool,
+	covers *[]*CoverObject,
+	rng *rand.Rand,
+	tm *TileMap,
+	cellSize, margin, mapW, mapH int,
+) {
+	for attempt := 0; attempt < numWallRuns*6 && len(*covers) < numWallRuns*wallRunMaxLen; attempt++ {
 		horizontal := rng.Intn(2) == 0
 		length := wallRunMinLen + rng.Intn(wallRunMaxLen-wallRunMinLen+1)
-		var sx, sy int
-		if horizontal {
-			sx = margin + snap(rng.Intn((mapW-margin*2)/cs)*cs)
-			sy = margin + snap(rng.Intn((mapH-margin*2)/cs)*cs)
-		} else {
-			sx = margin + snap(rng.Intn((mapW-margin*2)/cs)*cs)
-			sy = margin + snap(rng.Intn((mapH-margin*2)/cs)*cs)
-		}
+		sx := margin + snapToCoverCell(rng.Intn((mapW-margin*2)/cellSize)*cellSize, cellSize)
+		sy := margin + snapToCoverCell(rng.Intn((mapH-margin*2)/cellSize)*cellSize, cellSize)
 		kind := CoverChestWall
 		if rng.Float64() < 0.25 {
 			kind = CoverTallWall
 		}
-		placeLine(sx, sy, length, horizontal, kind)
+		placeCoverLine(walls, footprintRects, occupied, covers, tm, cellSize, sx, sy, length, horizontal, kind)
 	}
+}
 
-	// --- 3. Corridors: pairs of parallel chest-wall runs forming a lane ---
+func generateCoverCorridors(
+	walls, footprintRects []rect,
+	occupied map[cellKey]bool,
+	covers *[]*CoverObject,
+	rng *rand.Rand,
+	tm *TileMap,
+	cellSize, margin, mapW, mapH int,
+) {
 	for i := 0; i < numCorridors; i++ {
 		horizontal := rng.Intn(2) == 0
 		length := wallRunMinLen + rng.Intn(wallRunMaxLen-wallRunMinLen+1)
-		gap := (3 + rng.Intn(4)) * cs // gap between the two walls
-		var sx, sy int
+		gap := (3 + rng.Intn(4)) * cellSize
 		if horizontal {
-			sx = margin + snap(rng.Intn((mapW-margin*2)/cs)*cs)
-			sy = margin + snap(rng.Intn(((mapH-margin*2)-gap)/cs)*cs)
-			placeLine(sx, sy, length, true, CoverChestWall)
-			placeLine(sx, sy+gap, length, true, CoverChestWall)
-		} else {
-			sx = margin + snap(rng.Intn(((mapW-margin*2)-gap)/cs)*cs)
-			sy = margin + snap(rng.Intn((mapH-margin*2)/cs)*cs)
-			placeLine(sx, sy, length, false, CoverChestWall)
-			placeLine(sx+gap, sy, length, false, CoverChestWall)
+			sx := margin + snapToCoverCell(rng.Intn((mapW-margin*2)/cellSize)*cellSize, cellSize)
+			sy := margin + snapToCoverCell(rng.Intn(((mapH-margin*2)-gap)/cellSize)*cellSize, cellSize)
+			placeCoverLine(walls, footprintRects, occupied, covers, tm, cellSize, sx, sy, length, true, CoverChestWall)
+			placeCoverLine(walls, footprintRects, occupied, covers, tm, cellSize, sx, sy+gap, length, true, CoverChestWall)
+			continue
 		}
+		sx := margin + snapToCoverCell(rng.Intn(((mapW-margin*2)-gap)/cellSize)*cellSize, cellSize)
+		sy := margin + snapToCoverCell(rng.Intn((mapH-margin*2)/cellSize)*cellSize, cellSize)
+		placeCoverLine(walls, footprintRects, occupied, covers, tm, cellSize, sx, sy, length, false, CoverChestWall)
+		placeCoverLine(walls, footprintRects, occupied, covers, tm, cellSize, sx+gap, sy, length, false, CoverChestWall)
 	}
+}
 
-	// --- 4. Generate rubble positions from building explosions (returned separately) ---
-	rubble := generateExplosionRubble(mapW, mapH, footprints, walls, rng, tm)
+func placeCoverLine(
+	walls, footprintRects []rect,
+	occupied map[cellKey]bool,
+	covers *[]*CoverObject,
+	tm *TileMap,
+	cellSize int,
+	startX, startY, length int,
+	horizontal bool,
+	kind CoverKind,
+) {
+	for i := 0; i < length; i++ {
+		x, y := coverLineCell(startX, startY, i, cellSize, horizontal)
+		if coverCellBlocked(walls, footprintRects, occupied, tm, cellSize, x, y, kind) {
+			continue
+		}
+		k := cellKey{x / cellSize, y / cellSize}
+		occupied[k] = true
+		*covers = append(*covers, &CoverObject{x: x, y: y, kind: kind})
+	}
+}
 
-	return covers, rubble
+func coverLineCell(startX, startY, step, cellSize int, horizontal bool) (int, int) {
+	if horizontal {
+		return startX + step*cellSize, startY
+	}
+	return startX, startY + step*cellSize
+}
+
+func coverCellBlocked(walls, footprintRects []rect, occupied map[cellKey]bool, tm *TileMap, cellSize, x, y int, kind CoverKind) bool {
+	if tileOnRoadForCover(tm, x, y, cellSize) {
+		return true
+	}
+	k := cellKey{x / cellSize, y / cellSize}
+	if occupied[k] {
+		return true
+	}
+	c := &CoverObject{x: x, y: y, kind: kind}
+	if coverOverlapsBuildings(c, walls) {
+		return true
+	}
+	return coverOverlapsBuildings(c, footprintRects)
+}
+
+func tileOnRoadForCover(tm *TileMap, px, py, cellSize int) bool {
+	if tm == nil {
+		return false
+	}
+	return tileOnRoad(tm, px/cellSize, py/cellSize)
+}
+
+func snapToCoverCell(v, cellSize int) int {
+	return (v / cellSize) * cellSize
+}
+
+func isWithinCoverMargins(x, y, margin, mapW, mapH int) bool {
+	return !(x < margin || y < margin || x > mapW-margin || y > mapH-margin)
 }
 
 // footprintsToRects converts building footprints to rects for overlap testing.
 func footprintsToRects(fps []rect) []rect { return fps }
 
-// generateExplosionRubble fires numExplosions into the map, preferring to hit
-// buildings. Each explosion that overlaps a building removes wall segments
-// (handled by applyBuildingDamage) and drops rubble in a radius.
-func generateExplosionRubble(mapW, mapH int, footprints []rect, _ []rect, rng *rand.Rand, tm *TileMap) []*CoverObject {
+// generateExplosionRubble creates sophisticated rubble formations using realistic
+// blast patterns, debris fields, and structural collapse simulations.
+func generateExplosionRubble(mapW, mapH int, footprints, _ []rect, rng *rand.Rand, tm *TileMap) []*CoverObject {
 	cs := coverCellSize
-	rubble := make([]*CoverObject, 0, 32)
-	type cellKey struct{ cx, cy int }
+	rubble := make([]*CoverObject, 0, 128)
 	placed := map[cellKey]bool{}
 
-	for i := 0; i < numExplosions; i++ {
-		// Bias explosions toward building footprints.
-		var ex, ey int
-		if len(footprints) > 0 && rng.Float64() < 0.75 {
-			fp := footprints[rng.Intn(len(footprints))]
-			// Hit a random point on the building perimeter or just outside.
-			side := rng.Intn(4)
-			switch side {
-			case 0: // north edge
-				ex = fp.x + rng.Intn(fp.w)
-				ey = fp.y + rng.Intn(explosionRadius/2)
-			case 1: // south edge
-				ex = fp.x + rng.Intn(fp.w)
-				ey = fp.y + fp.h - rng.Intn(explosionRadius/2)
-			case 2: // west edge
-				ex = fp.x + rng.Intn(explosionRadius/2)
-				ey = fp.y + rng.Intn(fp.h)
-			default: // east edge
-				ex = fp.x + fp.w - rng.Intn(explosionRadius/2)
-				ey = fp.y + rng.Intn(fp.h)
-			}
-		} else {
-			ex = cs * (2 + rng.Intn((mapW-cs*4)/cs))
-			ey = cs * (2 + rng.Intn((mapH-cs*4)/cs))
-		}
+	// Generate different types of debris formations
+	formations := []func(){
+		// Building collapse formations
+		func() { generateBuildingCollapseRubble(mapW, mapH, footprints, rng, tm, &rubble, placed, cs) },
+		// Artillery/explosion debris fields
+		func() { generateExplosionDebrisFields(mapW, mapH, footprints, rng, tm, &rubble, placed, cs) },
+		// Vehicle wreck scatter patterns
+		func() { generateVehicleWreckDebris(mapW, mapH, rng, tm, &rubble, placed, cs) },
+		// Linear demolition paths
+		func() { generateDemolitionPaths(mapW, mapH, footprints, rng, tm, &rubble, placed, cs) },
+	}
 
-		// Scatter rubble cells within the explosion radius.
-		r := explosionRadius / cs
-		for dy := -r; dy <= r; dy++ {
-			for dx := -r; dx <= r; dx++ {
-				if dx*dx+dy*dy > r*r {
-					continue
-				}
-				rx := ((ex / cs) + dx) * cs
-				ry := ((ey / cs) + dy) * cs
-				if rx < cs || ry < cs || rx > mapW-cs*2 || ry > mapH-cs*2 {
-					continue
-				}
-				k := cellKey{rx / cs, ry / cs}
-				if placed[k] {
-					continue
-				}
-				// Don't place rubble on roads — it would visually clash.
-				if tm != nil && tileOnRoad(tm, rx/cs, ry/cs) {
-					continue
-				}
-				placed[k] = true
-				rubble = append(rubble, &CoverObject{x: rx, y: ry, kind: CoverRubble})
-			}
+	// Execute multiple formation types
+	for _, formation := range formations {
+		if rng.Float64() < 0.7 { // 70% chance for each type
+			formation()
 		}
 	}
+
 	return rubble
+}
+
+type rubbleChoice struct {
+	threshold float64
+	kind      CoverKind
+}
+
+type rubbleContext int
+
+const (
+	rubbleOpenGround rubbleContext = iota
+	rubbleNearBuilding
+	rubbleInsideResidential
+	rubbleInsideCommercial
+	rubbleInsideIndustrial
+)
+
+var rubbleChoicesByContext = map[rubbleContext][]rubbleChoice{
+	rubbleInsideIndustrial: {
+		{threshold: 0.45, kind: CoverRubbleHeavy},
+		{threshold: 0.75, kind: CoverRubbleMetal},
+		{threshold: 0.85, kind: CoverRubbleMedium},
+		{threshold: 0.95, kind: CoverRubbleWood},
+		{threshold: 1.00, kind: CoverRubbleLight},
+	},
+	rubbleInsideCommercial: {
+		{threshold: 0.30, kind: CoverRubbleHeavy},
+		{threshold: 0.50, kind: CoverRubbleMedium},
+		{threshold: 0.65, kind: CoverRubbleMetal},
+		{threshold: 0.80, kind: CoverRubbleWood},
+		{threshold: 1.00, kind: CoverRubbleLight},
+	},
+	rubbleInsideResidential: {
+		{threshold: 0.20, kind: CoverRubbleHeavy},
+		{threshold: 0.35, kind: CoverRubbleMedium},
+		{threshold: 0.45, kind: CoverRubbleMetal},
+		{threshold: 0.75, kind: CoverRubbleWood},
+		{threshold: 1.00, kind: CoverRubbleLight},
+	},
+	rubbleNearBuilding: {
+		{threshold: 0.25, kind: CoverRubbleHeavy},
+		{threshold: 0.45, kind: CoverRubbleMedium},
+		{threshold: 0.60, kind: CoverRubbleMetal},
+		{threshold: 0.75, kind: CoverRubbleWood},
+		{threshold: 1.00, kind: CoverRubbleLight},
+	},
+	rubbleOpenGround: {
+		{threshold: 0.10, kind: CoverRubbleHeavy},
+		{threshold: 0.25, kind: CoverRubbleMedium},
+		{threshold: 0.40, kind: CoverRubbleMetal},
+		{threshold: 0.55, kind: CoverRubbleWood},
+		{threshold: 1.00, kind: CoverRubbleLight},
+	},
+}
+
+func rubbleContextAt(footprints []rect, rx, ry int) rubbleContext {
+	nearBuilding := false
+	for _, fp := range footprints {
+		if rx >= fp.x && rx < fp.x+fp.w && ry >= fp.y && ry < fp.y+fp.h {
+			area := fp.w * fp.h
+			switch {
+			case area > 4000:
+				return rubbleInsideIndustrial
+			case area > 1500:
+				return rubbleInsideCommercial
+			default:
+				return rubbleInsideResidential
+			}
+		}
+		if rx >= fp.x-48 && rx < fp.x+fp.w+48 && ry >= fp.y-48 && ry < fp.y+fp.h+48 {
+			nearBuilding = true
+		}
+	}
+	if nearBuilding {
+		return rubbleNearBuilding
+	}
+	return rubbleOpenGround
+}
+
+func chooseRubbleFromContext(ctx rubbleContext, rng *rand.Rand) CoverKind {
+	choices, ok := rubbleChoicesByContext[ctx]
+	if !ok {
+		return CoverRubbleLight
+	}
+	roll := rng.Float64()
+	for i := range choices {
+		if roll < choices[i].threshold {
+			return choices[i].kind
+		}
+	}
+	return choices[len(choices)-1].kind
+}
+
+// chooseRubbleType selects rubble type based on context and building materials.
+func chooseRubbleType(rng *rand.Rand, footprints []rect, rx, ry int) CoverKind {
+	ctx := rubbleContextAt(footprints, rx, ry)
+	return chooseRubbleFromContext(ctx, rng)
+}
+
+// generateBuildingCollapseRubble simulates realistic building collapse patterns.
+func generateBuildingCollapseRubble(mapW, mapH int, footprints []rect, rng *rand.Rand, tm *TileMap, rubble *[]*CoverObject, placed map[cellKey]bool, cs int) {
+	// Basic implementation for now - creates debris piles around buildings
+	for _, fp := range footprints {
+		if rng.Float64() > 0.4 { // 40% chance per building
+			continue
+		}
+
+		// Create debris field around building
+		for i := 0; i < 8+rng.Intn(12); i++ {
+			rx := fp.x + rng.Intn(fp.w) + (rng.Intn(64) - 32)
+			ry := fp.y + rng.Intn(fp.h) + (rng.Intn(64) - 32)
+			rx = (rx / cs) * cs
+			ry = (ry / cs) * cs
+
+			if !isValidRubblePosition(rx, ry, mapW, mapH, cs, tm, placed) {
+				continue
+			}
+
+			k := cellKey{rx / cs, ry / cs}
+			placed[k] = true
+			rubbleType := chooseRubbleType(rng, footprints, rx, ry)
+			*rubble = append(*rubble, &CoverObject{x: rx, y: ry, kind: rubbleType})
+		}
+	}
+}
+
+// generateExplosionDebrisFields creates realistic blast patterns.
+func generateExplosionDebrisFields(mapW, mapH int, footprints []rect, rng *rand.Rand, tm *TileMap, rubble *[]*CoverObject, placed map[cellKey]bool, cs int) {
+	numBlasts := 2 + rng.Intn(4)
+
+	for i := 0; i < numBlasts; i++ {
+		// Choose blast center
+		var blastX, blastY int
+		if len(footprints) > 0 && rng.Float64() < 0.6 {
+			fp := footprints[rng.Intn(len(footprints))]
+			blastX = fp.x + rng.Intn(fp.w)
+			blastY = fp.y + rng.Intn(fp.h)
+		} else {
+			blastX = cs * (3 + rng.Intn((mapW-cs*6)/cs))
+			blastY = cs * (3 + rng.Intn((mapH-cs*6)/cs))
+		}
+
+		// Create blast radius debris
+		radius := 32 + rng.Intn(48)
+		for j := 0; j < 15+rng.Intn(20); j++ {
+			angle := rng.Float64() * 6.28 // 2*Pi
+			dist := float64(rng.Intn(radius))
+			rx := blastX + int(math.Cos(angle)*dist)
+			ry := blastY + int(math.Sin(angle)*dist)
+			rx = (rx / cs) * cs
+			ry = (ry / cs) * cs
+
+			if !isValidRubblePosition(rx, ry, mapW, mapH, cs, tm, placed) {
+				continue
+			}
+
+			k := cellKey{rx / cs, ry / cs}
+			placed[k] = true
+			rubbleType := chooseRubbleType(rng, footprints, rx, ry)
+			*rubble = append(*rubble, &CoverObject{x: rx, y: ry, kind: rubbleType})
+		}
+	}
+}
+
+// generateVehicleWreckDebris creates vehicle-related debris patterns.
+func generateVehicleWreckDebris(mapW, mapH int, rng *rand.Rand, tm *TileMap, rubble *[]*CoverObject, placed map[cellKey]bool, cs int) {
+	numWrecks := rng.Intn(3)
+
+	for i := 0; i < numWrecks; i++ {
+		crashX := cs * (4 + rng.Intn((mapW-cs*8)/cs))
+		crashY := cs * (4 + rng.Intn((mapH-cs*8)/cs))
+
+		// Create metal debris cluster
+		for j := 0; j < 5+rng.Intn(10); j++ {
+			rx := crashX + (rng.Intn(96) - 48)
+			ry := crashY + (rng.Intn(96) - 48)
+			rx = (rx / cs) * cs
+			ry = (ry / cs) * cs
+
+			if !isValidRubblePosition(rx, ry, mapW, mapH, cs, tm, placed) {
+				continue
+			}
+
+			k := cellKey{rx / cs, ry / cs}
+			placed[k] = true
+			*rubble = append(*rubble, &CoverObject{x: rx, y: ry, kind: CoverRubbleMetal})
+		}
+	}
+}
+
+// generateDemolitionPaths creates linear destruction patterns.
+func generateDemolitionPaths(mapW, mapH int, footprints []rect, rng *rand.Rand, tm *TileMap, rubble *[]*CoverObject, placed map[cellKey]bool, cs int) {
+	if rng.Float64() > 0.3 { // 30% chance
+		return
+	}
+
+	// Simple linear debris path
+	startX := cs * (2 + rng.Intn((mapW-cs*4)/cs))
+	startY := cs * 2
+	endX := cs * (2 + rng.Intn((mapW-cs*4)/cs))
+	endY := mapH - cs*2
+
+	steps := 20 + rng.Intn(30)
+	for i := 0; i < steps; i++ {
+		t := float64(i) / float64(steps)
+		rx := int(float64(startX)*(1-t) + float64(endX)*t)
+		ry := int(float64(startY)*(1-t) + float64(endY)*t)
+		rx = (rx / cs) * cs
+		ry = (ry / cs) * cs
+
+		if rng.Float64() > 0.4 { // sparse placement
+			continue
+		}
+
+		if !isValidRubblePosition(rx, ry, mapW, mapH, cs, tm, placed) {
+			continue
+		}
+
+		k := cellKey{rx / cs, ry / cs}
+		placed[k] = true
+		rubbleType := chooseRubbleType(rng, footprints, rx, ry)
+		*rubble = append(*rubble, &CoverObject{x: rx, y: ry, kind: rubbleType})
+	}
+}
+
+// isValidRubblePosition checks if a rubble position is valid.
+func isValidRubblePosition(rx, ry, mapW, mapH, cs int, tm *TileMap, placed map[cellKey]bool) bool {
+	if rx < cs || ry < cs || rx > mapW-cs*2 || ry > mapH-cs*2 {
+		return false
+	}
+
+	k := cellKey{rx / cs, ry / cs}
+	if placed[k] {
+		return false
+	}
+
+	if tm != nil && tileOnRoad(tm, rx/cs, ry/cs) {
+		return false
+	}
+
+	return true
 }
 
 // coverOverlapsBuildings returns true if the cover object overlaps a building (with padding).
@@ -314,16 +604,16 @@ func coverOverlapsBuildings(c *CoverObject, buildings []rect) bool {
 
 // --- Cover query helpers ---
 
-// FindCoverForThreat searches the provided cover list for the best cover object
-// that interposes between (sx,sy) and the threat direction (threatAngle, radians).
+// FindCoverForThreat searches the provided cover list for the best cover object.
+// That object should interpose between (sx,sy) and the threat direction (threatAngle, radians).
 // It returns the nearest valid cover object, or nil if none found.
-// maxSearchDist is the maximum distance (px) to search.
-func FindCoverForThreat(sx, sy, threatAngle float64, covers []*CoverObject, buildings []rect, maxSearchDist float64) *CoverObject {
+// MaxSearchDist is the maximum distance (px) to search.
+func FindCoverForThreat(sx, sy, threatAngle float64, covers []*CoverObject, _ []rect, maxSearchDist float64) *CoverObject {
 	var best *CoverObject
 	bestScore := -math.MaxFloat64
 
 	for _, c := range covers {
-		// Centre of cover cell.
+		// Center of cover cell.
 		cx := float64(c.x) + coverCellSize/2.0
 		cy := float64(c.y) + coverCellSize/2.0
 
@@ -347,7 +637,7 @@ func FindCoverForThreat(sx, sy, threatAngle float64, covers []*CoverObject, buil
 			continue
 		}
 
-		// Prefer closer cover and better defence value.
+		// Prefer closer cover and better defense value.
 		coverVal := c.CoverDefence()
 		score := coverVal*2.0 - dist/maxSearchDist - angDiff/(math.Pi/2.5)*0.5
 

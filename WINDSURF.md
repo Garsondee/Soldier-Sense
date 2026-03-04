@@ -20,12 +20,14 @@ The goal is to build robust, well-designed software, not to avoid technical disa
 
 ## Collaboration Guidelines
 
+- Regularly use 'just test' to check for linting and technical debt happening. Fix problems as they occur.
+
 - Before submitting code to origin, check it is correctly formatted, passes a
-  lint check, and builds correctly. You can use `just test` to do this with a 
+  lint check, and builds correctly. You can use `just test` to do this with a
   single command.
-- When testing the behaviour of a binary use 
-  `go run ./cmd/<program>` rather than `./bin/<program>` directly. 
-  This ensures we are always testing the latest code rather than an out-of-date 
+- When testing the behaviour of a binary use
+  `go run ./cmd/<program>` rather than `./bin/<program>` directly.
+  This ensures we are always testing the latest code rather than an out-of-date
   compiled binary. (Unless we are deliberately testing an out-of-date binary).
 
 ## Programming Guidelines
@@ -50,7 +52,7 @@ For projects we own, including this one, we adopt the following single, uniform,
 - We use 120 as the maximum line-length and not 80 characters. The detailed guideline
   is that the length first-to-last non-whitespace character should be 80 characters
   and that an additional 40 characters of indentation is allowed.
-- Indentation in source files should use spaces only, no tabs EXCEPT in Golang or 
+- Indentation in source files should use spaces only, no tabs EXCEPT in Golang or
   Makefiles where tabs are effectively required.
 - Use 4 spaces per indentation level EXCEPT when working in YAML/JSON files where 2 spaces per indentation level is more practical owning to higher nesting levels.
 - UTF-8 encoding should be used for all text files EXCEPT when working with compilers/interpreters that do not support UTF-8.
@@ -59,3 +61,7 @@ For projects we own, including this one, we adopt the following single, uniform,
 
 - Use Unix-style paths (forward slashes) in code and documentation, even on Windows.
 - Use Markdown for documentation files wherever possible with the .md file extension.
+
+## Language Guidelines
+
+- Use UK English spelling of words.

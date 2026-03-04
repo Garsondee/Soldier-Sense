@@ -6,7 +6,7 @@ import (
 )
 
 // SimLogEntry is one recorded event during a headless test simulation.
-type SimLogEntry struct {
+type SimLogEntry struct { //nolint:govet
 	Tick     int
 	Soldier  string  // label e.g. "R0", "B3", or "--" for global events
 	Team     string  // "red", "blue", or "--"
@@ -66,7 +66,7 @@ func (sl *SimLog) Entries() []SimLogEntry {
 // Filter returns entries matching the given category and/or key.
 // Pass empty string to match any value for that field.
 func (sl *SimLog) Filter(category, key string) []SimLogEntry {
-	var out []SimLogEntry
+	out := make([]SimLogEntry, 0, len(sl.entries))
 	for _, e := range sl.entries {
 		if category != "" && e.Category != category {
 			continue
@@ -153,8 +153,8 @@ func (sl *SimLog) FormatRange(fromTick, toTick int) string {
 }
 
 // Summary returns a short human-readable summary of the simulation state.
-// soldiers is the full list of all soldiers in the simulation.
-func (sl *SimLog) Summary(tick int, soldiers []*Soldier, squads []*Squad) string {
+// Soldiers is the full list of all soldiers in the simulation.
+func (sl *SimLog) Summary(tick int, soldiers []*Soldier, squads []*Squad) string { //nolint:gocognit
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "--- Summary at T=%03d ---\n", tick)
 

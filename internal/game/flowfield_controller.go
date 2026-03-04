@@ -2,48 +2,41 @@ package game
 
 import "math"
 
-// FlowFieldLayer represents the hierarchical level of a flow field
+// FlowFieldLayer represents the hierarchical level of a flow field.
 type FlowFieldLayer int
 
 const (
+	// FlowFieldLayerStrategic is the squad-level objective layer.
 	FlowFieldLayerStrategic FlowFieldLayer = iota // Squad-level objectives
-	FlowFieldLayerTactical                        // Individual positioning
+	// FlowFieldLayerTactical is the individual positioning layer.
+	FlowFieldLayerTactical // Individual positioning
 )
 
-// SquadFlowController manages hierarchical flow fields for a squad
-// Strategic layer: Squad-level movement toward objectives
-// Tactical layer: Individual soldier positioning and spacing
+// SquadFlowController manages hierarchical flow fields for a squad.
+// Strategic layer: squad-level movement toward objectives.
+// Tactical layer: individual soldier positioning and spacing.
 type SquadFlowController struct {
-	squad *Squad
-
-	// Grid dimensions (shared across layers)
-	width  int
-	height int
-
-	// Shared cost field (updated dynamically)
-	costField *CostField
-
-	// Strategic layer: Squad-level movement
-	strategicGoals       []Vec2i
+	squad                *Squad
+	costField            *CostField
 	strategicIntegration *IntegrationField
 	strategicFlow        *FlowField
+	tacticalIntegration  *IntegrationField
+	tacticalFlow         *FlowField
+	navGrid              *NavGrid
+	tacticalMap          *TacticalMap
+	strategicGoals       []Vec2i
+	tacticalGoals        []Vec2i
 
-	// Tactical layer: Individual positioning
-	tacticalGoals       []Vec2i // One per soldier for formation
-	tacticalIntegration *IntegrationField
-	tacticalFlow        *FlowField
-
-	// Update tracking
+	width             int
+	height            int
 	updateTicks       int
-	strategicDirty    bool
-	tacticalDirty     bool
 	recomputeInterval int
 
-	// References
-	navGrid     *NavGrid
-	tacticalMap *TacticalMap
+	strategicDirty bool
+	tacticalDirty  bool
 }
 
+// NewSquadFlowController creates a squad flow controller.
 func NewSquadFlowController(squad *Squad, navGrid *NavGrid, tacticalMap *TacticalMap) *SquadFlowController {
 	width := navGrid.cols
 	height := navGrid.rows
@@ -69,7 +62,7 @@ func NewSquadFlowController(squad *Squad, navGrid *NavGrid, tacticalMap *Tactica
 	return sfc
 }
 
-// Update is called every tick to maintain flow fields
+// Update is called every tick to maintain flow fields.
 func (sfc *SquadFlowController) Update(enemies []*Soldier) {
 	sfc.updateTicks++
 
@@ -96,7 +89,7 @@ func (sfc *SquadFlowController) Update(enemies []*Soldier) {
 	}
 }
 
-// SetStrategicGoal sets the squad-level objective
+// SetStrategicGoal sets the squad-level objective.
 func (sfc *SquadFlowController) SetStrategicGoal(worldX, worldY float64) {
 	cellX := int(worldX / cellSize)
 	cellY := int(worldY / cellSize)
@@ -110,14 +103,13 @@ func (sfc *SquadFlowController) SetStrategicGoal(worldX, worldY float64) {
 	}
 }
 
-// SetStrategicGoals sets multiple strategic goals (for complex objectives)
+// SetStrategicGoals sets multiple strategic goals (for complex objectives).
 func (sfc *SquadFlowController) SetStrategicGoals(goals []Vec2i) {
 	sfc.strategicGoals = goals
 	sfc.strategicDirty = true
 }
 
-// SetFormationGoals sets tactical goals for formation positioning
-// Positions should be world coordinates for each soldier's formation position
+// SetFormationGoals sets tactical goals for formation positioning.
 func (sfc *SquadFlowController) SetFormationGoals(positions []Vec2) {
 	goals := make([]Vec2i, 0, len(positions))
 
@@ -131,7 +123,7 @@ func (sfc *SquadFlowController) SetFormationGoals(positions []Vec2) {
 	sfc.tacticalDirty = true
 }
 
-// SetTacticalGoal sets a single tactical goal (for individual positioning)
+// SetTacticalGoal sets a single tactical goal (for individual positioning).
 func (sfc *SquadFlowController) SetTacticalGoal(worldX, worldY float64) {
 	cellX := int(worldX / cellSize)
 	cellY := int(worldY / cellSize)
@@ -139,7 +131,7 @@ func (sfc *SquadFlowController) SetTacticalGoal(worldX, worldY float64) {
 	sfc.tacticalDirty = true
 }
 
-// RecomputeStrategic regenerates the strategic layer flow field
+// RecomputeStrategic regenerates the strategic layer flow field.
 func (sfc *SquadFlowController) RecomputeStrategic() {
 	if len(sfc.strategicGoals) == 0 {
 		return
@@ -150,7 +142,7 @@ func (sfc *SquadFlowController) RecomputeStrategic() {
 	sfc.strategicFlow.Generate(sfc.strategicIntegration)
 }
 
-// RecomputeTactical regenerates the tactical layer flow field
+// RecomputeTactical regenerates the tactical layer flow field.
 func (sfc *SquadFlowController) RecomputeTactical() {
 	if len(sfc.tacticalGoals) == 0 {
 		return
@@ -161,7 +153,7 @@ func (sfc *SquadFlowController) RecomputeTactical() {
 	sfc.tacticalFlow.Generate(sfc.tacticalIntegration)
 }
 
-// GetStrategicFlow returns the strategic layer flow vector at world position
+// GetStrategicFlow returns the strategic layer flow vector at world position.
 func (sfc *SquadFlowController) GetStrategicFlow(worldX, worldY float64) Vec2 {
 	if sfc.strategicFlow == nil {
 		return Vec2{0, 0}
@@ -169,7 +161,7 @@ func (sfc *SquadFlowController) GetStrategicFlow(worldX, worldY float64) Vec2 {
 	return sfc.strategicFlow.SampleFlow(worldX, worldY)
 }
 
-// GetTacticalFlow returns the tactical layer flow vector at world position
+// GetTacticalFlow returns the tactical layer flow vector at world position.
 func (sfc *SquadFlowController) GetTacticalFlow(worldX, worldY float64) Vec2 {
 	if sfc.tacticalFlow == nil {
 		return Vec2{0, 0}
@@ -177,9 +169,8 @@ func (sfc *SquadFlowController) GetTacticalFlow(worldX, worldY float64) Vec2 {
 	return sfc.tacticalFlow.SampleFlow(worldX, worldY)
 }
 
-// GetBlendedFlow returns a weighted blend of strategic and tactical flows
-// Blending allows smooth transition between squad movement and individual positioning
-func (sfc *SquadFlowController) GetBlendedFlow(worldX, worldY float64, tacticalWeight float64) Vec2 {
+// GetBlendedFlow returns a weighted blend of strategic and tactical flows.
+func (sfc *SquadFlowController) GetBlendedFlow(worldX, worldY, tacticalWeight float64) Vec2 {
 	strategic := sfc.GetStrategicFlow(worldX, worldY)
 	tactical := sfc.GetTacticalFlow(worldX, worldY)
 
@@ -201,7 +192,7 @@ func (sfc *SquadFlowController) GetBlendedFlow(worldX, worldY float64, tacticalW
 	return blended.Normalize()
 }
 
-// GetDistanceToStrategicGoal returns the integration field cost to strategic goal
+// GetDistanceToStrategicGoal returns the integration field cost to strategic goal.
 func (sfc *SquadFlowController) GetDistanceToStrategicGoal(worldX, worldY float64) float64 {
 	if sfc.strategicIntegration == nil {
 		return math.Inf(1)
@@ -211,7 +202,7 @@ func (sfc *SquadFlowController) GetDistanceToStrategicGoal(worldX, worldY float6
 	return sfc.strategicIntegration.GetCost(cellX, cellY)
 }
 
-// GetDistanceToTacticalGoal returns the integration field cost to tactical goal
+// GetDistanceToTacticalGoal returns the integration field cost to tactical goal.
 func (sfc *SquadFlowController) GetDistanceToTacticalGoal(worldX, worldY float64) float64 {
 	if sfc.tacticalIntegration == nil {
 		return math.Inf(1)
@@ -221,7 +212,7 @@ func (sfc *SquadFlowController) GetDistanceToTacticalGoal(worldX, worldY float64
 	return sfc.tacticalIntegration.GetCost(cellX, cellY)
 }
 
-// updateOccupancy updates the cost field with current soldier positions
+// updateOccupancy updates the cost field with current soldier positions.
 func (sfc *SquadFlowController) updateOccupancy() {
 	// Clear previous occupancy
 	for i := range sfc.costField.occupancy {

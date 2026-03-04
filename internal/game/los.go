@@ -102,3 +102,40 @@ func rayIntersectsAABB(ox, oy, ex, ey, minX, minY, maxX, maxY float64) bool {
 	_, hit := rayAABBHitT(ox, oy, ex, ey, minX, minY, maxX, maxY)
 	return hit
 }
+
+// HasLineOfSightThroughWindow checks if LOS from (ax,ay) to (bx,by) is blocked by buildings,
+// or if it passes through a window. Returns (hasLOS, throughWindow, windowPenalty).
+// Phase 3: Window-based partial detection for building interiors.
+func HasLineOfSightThroughWindow(ax, ay, bx, by float64, buildings []rect, windows []rect) (bool, bool, float64) {
+	// First check if any building blocks the ray
+	var blockingBuilding *rect
+	for i := range buildings {
+		b := &buildings[i]
+		if rayIntersectsAABB(ax, ay, bx, by,
+			float64(b.x), float64(b.y),
+			float64(b.x+b.w), float64(b.y+b.h)) {
+			blockingBuilding = b
+			break
+		}
+	}
+
+	// If no building blocks, we have clear LOS
+	if blockingBuilding == nil {
+		return true, false, 0.0
+	}
+
+	// Building blocks - check if ray passes through a window
+	for i := range windows {
+		w := &windows[i]
+		if rayIntersectsAABB(ax, ay, bx, by,
+			float64(w.x), float64(w.y),
+			float64(w.x+w.w), float64(w.y+w.h)) {
+			// Ray passes through window - partial LOS with penalty
+			// Interior environment multiplier: 2.8x concealment
+			return true, true, 2.8
+		}
+	}
+
+	// Building blocks and no window - no LOS
+	return false, false, 0.0
+}

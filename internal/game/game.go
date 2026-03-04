@@ -39,7 +39,7 @@ var (
 	ErrRestart = errors.New("restart game")
 )
 
-// overlayColors maps each IntelMapKind to its debug render colour.
+// overlayColors maps each IntelMapKind to its debug render color.
 var overlayColors = [intelMapCount]color.RGBA{
 	IntelContact:          {R: 255, G: 50, B: 50, A: 180},  // bright red
 	IntelRecentContact:    {R: 255, G: 140, B: 0, A: 140},  // orange
@@ -55,14 +55,14 @@ var overlayColors = [intelMapCount]color.RGBA{
 // drawSquadStatusPanels renders all squad status panels into the top of the
 // right-side column using the same buffer→3x-blit technique as the thought log.
 // Returns the total screen-space height consumed so the log can start below.
-func (g *Game) drawSquadStatusPanels(screen *ebiten.Image, panelX int) int {
+func drawSquadStatusPanels(g *Game, screen *ebiten.Image, panelX int) int {
 	if len(g.squads) == 0 || g.squadBuf == nil {
 		return 0
 	}
 	screenY := 0
 	for _, sq := range g.squads {
 		g.squadBuf.Clear()
-		g.renderSquadPanel(g.squadBuf, sq)
+		renderSquadPanel(g.squadBuf, sq)
 		opts := &ebiten.DrawImageOptions{}
 		opts.GeoM.Scale(float64(logScale), float64(logScale))
 		opts.GeoM.Translate(float64(panelX), float64(screenY))
@@ -73,7 +73,7 @@ func (g *Game) drawSquadStatusPanels(screen *ebiten.Image, panelX int) int {
 }
 
 // renderSquadPanel draws a single squad's status into buf at 1× scale.
-func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
+func renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 	bw := float32(squadBufW)
 	bh := float32(squadBufH)
 
@@ -81,30 +81,7 @@ func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 	vector.FillRect(buf, 0, 0, bw, bh, color.RGBA{R: 10, G: 14, B: 10, A: 248}, false)
 	vector.StrokeRect(buf, 0, 0, bw, bh, 1.0, color.RGBA{R: 55, G: 85, B: 60, A: 255}, false)
 
-	// Gather per-squad stats.
-	alive := 0
-	casualties := 0
-	avgFear := 0.0
-	avgMorale := 0.0
-	avgHP := 0.0
-	objectiveCounts := map[GoalKind]int{}
-	for _, m := range sq.Members {
-		if m.state == SoldierStateDead {
-			casualties++
-			continue
-		}
-		alive++
-		avgFear += m.profile.Psych.EffectiveFear()
-		avgMorale += m.profile.Psych.Morale
-		avgHP += clamp01(m.health() / soldierMaxHP)
-		objectiveCounts[m.blackboard.CurrentGoal]++
-	}
-	if alive > 0 {
-		inv := 1.0 / float64(alive)
-		avgFear *= inv
-		avgMorale *= inv
-		avgHP *= inv
-	}
+	stats := gatherSquadPanelStats(sq)
 
 	// ── Row 0: Title bar (y 0..13) ──
 	titleBg := color.RGBA{R: 28, G: 14, B: 14, A: 255}
@@ -118,17 +95,10 @@ func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 	if sq.Team == TeamBlue {
 		teamStr = "BLU"
 	}
-	statusLabel := "STEADY"
-	if sq.Broken {
-		statusLabel = "SHATTERED"
-	} else if sq.Stress > 0.62 || avgFear > 0.58 {
-		statusLabel = "SHAKEN"
-	} else if sq.Intent == IntentEngage {
-		statusLabel = "CONTACT"
-	}
+	statusLabel := squadStatusLabel(sq, stats.avgFear)
 	effectiveness := clamp01(
-		(1.0-float64(casualties)/float64(max(1, len(sq.Members))))*0.35 +
-			avgHP*0.30 + avgMorale*0.20 + (1.0-sq.Stress)*0.15)
+		(1.0-float64(stats.casualties)/float64(max(1, len(sq.Members))))*0.35 +
+			stats.avgHP*0.30 + stats.avgMorale*0.20 + (1.0-sq.Stress)*0.15)
 
 	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("%s SQ-%d  %s  eff:%2.0f%%", teamStr, sq.ID, statusLabel, effectiveness*100), 4, 2)
 
@@ -157,18 +127,10 @@ func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 	if sq.Leader != nil && sq.Leader.state != SoldierStateDead {
 		lead = sq.Leader.label
 	}
-	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("%d/%d up  lead:%s", alive, len(sq.Members), lead), 72, 17)
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("%d/%d up  lead:%s", stats.alive, len(sq.Members), lead), 72, 17)
 
 	// ── Row 2: Objective + casualties (y 29..40) ──
-	mainGoal := GoalAdvance
-	bestCount := -1
-	for goal, cnt := range objectiveCounts {
-		if cnt > bestCount {
-			bestCount = cnt
-			mainGoal = goal
-		}
-	}
-	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("obj:%s  cas:%d", mainGoal, casualties), 4, 30)
+	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("obj:%s  cas:%d", stats.mainGoal, stats.casualties), 4, 30)
 
 	// ── Row 3: Phase / intent / formation (y 42..53) ──
 	ebitenutil.DebugPrintAt(buf, fmt.Sprintf("ph:%s int:%s", sq.Phase, sq.Intent), 4, 42)
@@ -179,33 +141,99 @@ func (g *Game) renderSquadPanel(buf *ebiten.Image, sq *Squad) {
 	barX := 4
 	barW := int(bw) - 8
 	barH := 3
+	barY0 := 68
+	drawSquadMetricBars(buf, sq, stats, barX, barW, barH, barY0)
+	// Bar legend — single line below bars.
+	ebitenutil.DebugPrintAt(buf, "STR  FER  MOR  COH", 4+barW/2-54, barY0+4*4)
+}
+
+type squadPanelStats struct {
+	alive      int
+	casualties int
+	avgFear    float64
+	avgMorale  float64
+	avgHP      float64
+	mainGoal   GoalKind
+}
+
+func gatherSquadPanelStats(sq *Squad) squadPanelStats {
+	stats := squadPanelStats{mainGoal: GoalAdvance}
+	objectiveCounts := map[GoalKind]int{}
+	for _, m := range sq.Members {
+		if m.state == SoldierStateDead {
+			stats.casualties++
+			continue
+		}
+		stats.alive++
+		stats.avgFear += m.profile.Psych.EffectiveFear()
+		stats.avgMorale += m.profile.Psych.Morale
+		stats.avgHP += clamp01(m.health() / soldierMaxHP)
+		objectiveCounts[m.blackboard.CurrentGoal]++
+	}
+	if stats.alive > 0 {
+		inv := 1.0 / float64(stats.alive)
+		stats.avgFear *= inv
+		stats.avgMorale *= inv
+		stats.avgHP *= inv
+	}
+	stats.mainGoal = dominantGoal(objectiveCounts)
+	return stats
+}
+
+func dominantGoal(objectiveCounts map[GoalKind]int) GoalKind {
+	mainGoal := GoalAdvance
+	bestCount := -1
+	for goal, cnt := range objectiveCounts {
+		if cnt > bestCount {
+			bestCount = cnt
+			mainGoal = goal
+		}
+	}
+	return mainGoal
+}
+
+func squadStatusLabel(sq *Squad, avgFear float64) string {
+	switch {
+	case sq.Broken:
+		return "SHATTERED"
+	case sq.Stress > 0.62 || avgFear > 0.58:
+		return "SHAKEN"
+	case sq.Intent == IntentEngage:
+		return "CONTACT"
+	default:
+		return "STEADY"
+	}
+}
+
+func drawSquadMetricBars(buf *ebiten.Image, sq *Squad, stats squadPanelStats, barX, barW, barH, barY0 int) {
 	type metricBar struct {
-		label string
 		value float64
 		col   color.RGBA
 	}
 	bars := []metricBar{
-		{"STR", sq.Stress, color.RGBA{R: 210, G: 80, B: 60, A: 220}},
-		{"FER", avgFear, color.RGBA{R: 220, G: 150, B: 55, A: 220}},
-		{"MOR", avgMorale, color.RGBA{R: 70, G: 180, B: 110, A: 220}},
-		{"COH", sq.Cohesion, color.RGBA{R: 80, G: 140, B: 220, A: 220}},
+		{value: sq.Stress, col: color.RGBA{R: 210, G: 80, B: 60, A: 220}},
+		{value: stats.avgFear, col: color.RGBA{R: 220, G: 150, B: 55, A: 220}},
+		{value: stats.avgMorale, col: color.RGBA{R: 70, G: 180, B: 110, A: 220}},
+		{value: sq.Cohesion, col: color.RGBA{R: 80, G: 140, B: 220, A: 220}},
 	}
-	barY0 := 68
 	for i, b := range bars {
 		by := barY0 + i*4
-		// Bar track.
-		vector.FillRect(buf, float32(barX), float32(by), float32(barW), float32(barH),
-			color.RGBA{R: 20, G: 28, B: 22, A: 220}, false)
-		// Filled portion.
+		vector.FillRect(buf, float32(barX), float32(by), float32(barW), float32(barH), color.RGBA{R: 20, G: 28, B: 22, A: 220}, false)
 		filled := int(clamp01(b.value) * float64(barW))
 		if filled > 0 {
 			vector.FillRect(buf, float32(barX), float32(by), float32(filled), float32(barH), b.col, false)
 		}
 	}
-	// Bar legend — single line below bars.
-	ebitenutil.DebugPrintAt(buf, "STR  FER  MOR  COH", 4+barW/2-54, barY0+4*4)
 }
 
+// WallInfo stores additional information about wall segments.
+type WallInfo struct {
+	Rect       rect     // Wall rectangle
+	WallType   WallType // Type of wall construction
+	IsExterior bool     // True if exterior wall, false if interior
+}
+
+// Game is the main simulation and rendering state container.
 type Game struct {
 	width              int
 	height             int
@@ -216,6 +244,11 @@ type Game struct {
 	buildings          []rect            // individual wall segments (1-cell wide), used for LOS/nav
 	windows            []rect            // window segments: block movement, transparent to LOS
 	buildingFootprints []rect            // overall floor area of each structure, used for rendering
+	wallInfo           []WallInfo        // enhanced wall information with types and properties
+	organicRoads       []OrganicRoad     // curved road network replacing grid roads
+	lots               []Lot             // land subdivision for building placement
+	compounds          []Compound        // multi-building complexes with perimeters
+	exteriorFeatures   []ExteriorFeature // porches, loading docks, etc.
 	buildingQualities  []BuildingQuality // pre-computed tactical metrics per footprint
 	covers             []*CoverObject
 	navGrid            *NavGrid
@@ -256,8 +289,8 @@ type Game struct {
 	tileMap *TileMap
 
 	// Camera pan + zoom.
-	camX    float64 // world-space X of the camera centre
-	camY    float64 // world-space Y of the camera centre
+	camX    float64 // world-space X of the camera center
+	camY    float64 // world-space Y of the camera center
 	camZoom float64 // zoom factor (1.0 = native, >1 = zoomed in)
 
 	// Soldier speech bubbles.
@@ -292,7 +325,7 @@ type Game struct {
 	aarSelection int
 	aarReason    BattleOutcomeReason
 
-	// Analytics reporter — collects behaviour stats periodically.
+	// Analytics reporter — collects behavior stats periodically.
 	reporter *SimReporter
 
 	// Master map seed — printed at startup so layouts can be reproduced.
@@ -310,7 +343,7 @@ type rect struct {
 	h int
 }
 
-// terrainPatch is a subtle ground colour variation tile.
+// terrainPatch is a subtle ground color variation tile.
 type terrainPatch struct {
 	x, y  float32
 	w, h  float32
@@ -345,6 +378,7 @@ func terrainHash(x, y int) uint32 {
 	return v
 }
 
+// New creates a new game instance.
 func New() *Game {
 	// Battlefield is 3072x1728 — double the original size.
 	battleW := 3072
@@ -367,14 +401,51 @@ func New() *Game {
 		mapSeed:    mapSeed,
 	}
 	mapRng := rand.New(rand.NewSource(mapSeed)) // #nosec G404 -- game only
-	// Create the TileMap first — grid roads and buildings write directly into it.
+	// Create the TileMap first — organic roads and lot-based buildings write directly into it.
 	g.tileMap = NewTileMap(battleW/cellSize, battleH/cellSize)
-	generateGridRoads(g.tileMap, mapRng, defaultRoadConfig)
-	g.initBuildings(mapRng)
+
+	// Generate organic road network first
+	fmt.Printf("DEBUG: Generating organic road network...\n")
+	organicRoads := generateOrganicRoadNetwork(g.tileMap, mapRng)
+	fmt.Printf("DEBUG: Generated %d organic roads\n", len(organicRoads))
+
+	// Generate lot subdivision based on roads
+	fmt.Printf("DEBUG: Generating lot subdivision...\n")
+	lots := generateLotSubdivision(g.tileMap, organicRoads, mapRng)
+	fmt.Printf("DEBUG: Generated %d lots\n", len(lots))
+
+	// Generate buildings within lots
+	fmt.Printf("DEBUG: Placing buildings from lots...\n")
+	g.initBuildingsFromLots(lots, mapRng)
+	fmt.Printf("DEBUG: Generated %d buildings\n", len(g.buildingFootprints))
+
+	// Generate compounds (multi-building complexes)
+	compounds := generateCompounds(g.tileMap, g.buildingFootprints, mapRng)
+
+	// Generate exterior features for buildings (porches, loading docks, sheds, etc.)
+	fmt.Printf("DEBUG: Generating exterior features...\n")
+	buildingTypes := g.getBuildingTypes() // Get building types from the generation process
+	exteriorFeatures := generateExteriorFeatures(g.buildingFootprints, buildingTypes, mapRng)
+	fmt.Printf("DEBUG: Generated %d exterior features\n", len(exteriorFeatures))
+
+	// Generate building names
+	fmt.Printf("DEBUG: Generating building names...\n")
+	buildingShapes := g.getBuildingShapes()
+	buildingNames := generateBuildingNames(g.buildingFootprints, buildingTypes, buildingShapes, mapRng)
+	fmt.Printf("DEBUG: Generated %d building names\n", len(buildingNames))
+
+	// Store road and lot data for future use
+	g.organicRoads = organicRoads
+	g.lots = lots
+	g.compounds = compounds
+	g.exteriorFeatures = exteriorFeatures
 	g.initCover()
 	g.initTileMap() // stamp buildings/cover into tileMap after generation
-	generateBiome(g.tileMap, mapRng, defaultBiomeConfig)
+	fmt.Printf("DEBUG: Running biome generation...\n")
+	generateBiome(g.tileMap, mapRng, &defaultBiomeConfig)
+	fmt.Printf("DEBUG: Running fortification generation...\n")
 	generateFortifications(g.tileMap, mapRng, defaultFortConfig)
+	fmt.Printf("DEBUG: Map generation complete\n")
 	g.navGrid = NewNavGrid(g.gameWidth, g.gameHeight, g.buildings, soldierRadius, g.covers, g.windows)
 	g.tacticalMap = NewTacticalMap(g.gameWidth, g.gameHeight, g.buildings, g.windows, g.buildingFootprints)
 	g.buildingQualities = ComputeBuildingQualities(g.buildingFootprints, g.buildings, g.windows, g.gameWidth, g.gameHeight, g.navGrid)
@@ -402,7 +473,7 @@ func New() *Game {
 	// Squad status panel buffer: reused for each panel, blitted at logScale.
 	g.squadBuf = ebiten.NewImage(squadBufW, squadBufH)
 	g.initTerrainPatches()
-	// Default camera: centred on battlefield, zoom 0.5 so the full map is visible.
+	// Default camera: centered on battlefield, zoom 0.5 so the full map is visible.
 	g.camX = float64(battleW) / 2
 	g.camY = float64(battleH) / 2
 	g.camZoom = 0.5
@@ -419,7 +490,100 @@ func New() *Game {
 	return g
 }
 
-// initTerrainPatches generates deterministic subtle ground colour patches.
+// getBuildingTypes returns the building types for all generated buildings.
+func (g *Game) getBuildingTypes() []BuildingType {
+	// For now, classify each building based on its footprint
+	// In a full implementation, this would be stored during generation
+	buildingTypes := make([]BuildingType, len(g.buildingFootprints))
+	unit := 64
+	rng := rand.New(rand.NewSource(g.mapSeed + 1)) // Deterministic classification
+
+	for i, fp := range g.buildingFootprints {
+		buildingTypes[i] = classifyBuildingType(fp, unit, rng)
+	}
+
+	return buildingTypes
+}
+
+// getBuildingShapes returns the building shapes for all generated buildings.
+func (g *Game) getBuildingShapes() []BuildingShape {
+	// For now, all buildings are rectangular unless we track complex shapes during generation
+	// In a full implementation, this would be stored during the complex footprint generation
+	buildingShapes := make([]BuildingShape, len(g.buildingFootprints))
+
+	for i := range g.buildingFootprints {
+		buildingShapes[i] = ShapeRectangular // Default for now
+		// TODO: Track actual complex shapes (L/T/U) during generation
+	}
+
+	return buildingShapes
+}
+
+// initBuildingsFromLots generates buildings within lot boundaries using the new lot-based system.
+func (g *Game) initBuildingsFromLots(lots []Lot, rng *rand.Rand) {
+	wall := cellSize // 16px
+	unit := 64
+
+	g.buildings = g.buildings[:0]
+	g.buildingFootprints = g.buildingFootprints[:0]
+
+	// Generate building candidates from lots
+	candidates := buildingCandidatesInLots(lots, rng)
+
+	// Place buildings from lot candidates
+	for _, candidate := range candidates {
+		// Check for overlaps with existing buildings
+		if g.overlapsAnyBuilding(candidate, rng) {
+			continue
+		}
+
+		// Check for overlaps with roads with buffer zone
+		buffer := 32 // 32 pixel buffer around roads
+		expandedCandidate := rect{
+			x: candidate.x - buffer,
+			y: candidate.y - buffer,
+			w: candidate.w + 2*buffer,
+			h: candidate.h + 2*buffer,
+		}
+		if rectOverlapsRoadTiles(g.tileMap, expandedCandidate) {
+			continue
+		}
+
+		// Classify building type first
+		buildingType := classifyBuildingType(candidate, unit, rng)
+
+		// Complex building shapes for larger buildings
+		if candidate.w/unit >= 8 && candidate.h/unit >= 8 {
+			shapeRoll := rng.Float64()
+			var complexFootprint ComplexFootprint
+
+			switch {
+			case shapeRoll < 0.15: // 15% L-shaped
+				complexFootprint = generateLShapedFootprint(candidate, rng)
+			case shapeRoll < 0.25: // 10% T-shaped
+				complexFootprint = generateTShapedFootprint(candidate, rng)
+			case shapeRoll < 0.32: // 7% U-shaped (rarest, most complex)
+				complexFootprint = generateUShapedFootprint(candidate, rng)
+			default: // 68% rectangular (still majority)
+				complexFootprint = ComplexFootprint{
+					Sections: []rect{candidate},
+				}
+			}
+
+			// Add each section as a separate footprint and generate walls with type context
+			for _, section := range complexFootprint.Sections {
+				g.buildingFootprints = append(g.buildingFootprints, section)
+				g.addBuildingWallsWithType(rng, section, wall, unit, buildingType)
+			}
+		} else {
+			// Standard rectangular building for smaller sizes
+			g.buildingFootprints = append(g.buildingFootprints, candidate)
+			g.addBuildingWallsWithType(rng, candidate, wall, unit, buildingType)
+		}
+	}
+}
+
+// initTerrainPatches generates deterministic subtle ground color patches.
 func (g *Game) initTerrainPatches() {
 	rng := rand.New(rand.NewSource(54321)) // #nosec G404 -- cosmetic only
 	count := 600                           // more patches for the larger map
@@ -475,7 +639,19 @@ func (g *Game) initTileMap() {
 			g.tileMap.SetObject(c, r, ObjectTallWall)
 		case CoverChestWall:
 			g.tileMap.SetObject(c, r, ObjectChestWall)
-		case CoverRubble:
+		case CoverRubbleLight:
+			g.tileMap.SetObject(c, r, ObjectRubblePile)
+			g.tileMap.SetGround(c, r, GroundRubbleLight)
+		case CoverRubbleMedium:
+			g.tileMap.SetObject(c, r, ObjectRubblePile)
+			g.tileMap.SetGround(c, r, GroundRubbleLight)
+		case CoverRubbleHeavy:
+			g.tileMap.SetObject(c, r, ObjectRubblePile)
+			g.tileMap.SetGround(c, r, GroundRubbleHeavy)
+		case CoverRubbleMetal:
+			g.tileMap.SetObject(c, r, ObjectRubblePile)
+			g.tileMap.SetGround(c, r, GroundRubbleLight)
+		case CoverRubbleWood:
 			g.tileMap.SetObject(c, r, ObjectRubblePile)
 			g.tileMap.SetGround(c, r, GroundRubbleLight)
 		}
@@ -514,60 +690,642 @@ func (g *Game) applyBuildingDamage(rubble []*CoverObject) {
 	g.covers = append(g.covers, rubble...)
 }
 
-func (g *Game) initBuildings(rng *rand.Rand) {
-	wall := cellSize // 16px
-	unit := 64
-	targetCount := 32 // more buildings
+// NOTE: Old initBuildings function removed - replaced by initBuildingsFromLots
+// This function was using buildingCandidatesAlongGridRoads which conflicts with organic system
 
-	g.buildings = g.buildings[:0]
-	g.buildingFootprints = g.buildingFootprints[:0]
+// generateHallwayLayout creates a central hallway with rooms branching off it.
+func (g *Game) generateHallwayLayout(rng *rand.Rand, fp rect, wall, unit int, leafRooms *[]interiorRoom) {
+	// Determine hallway orientation based on building dimensions
+	horizontal := fp.w > fp.h
 
-	// Weighted size pool — larger buildings are more common.
-	// Each entry: {wUnits, hUnits, weight} where weight controls how many
-	// candidates are generated (higher = more likely to appear).
-	type sizeEntry struct {
-		w, h   int
-		weight int
-	}
-	sizes := []sizeEntry{
-		// Small buildings (uncommon).
-		{3, 3, 1}, {3, 4, 1}, {4, 3, 1},
-		// Medium buildings.
-		{4, 4, 2}, {4, 5, 2}, {5, 4, 2}, {5, 5, 3},
-		// Large buildings (common).
-		{5, 6, 3}, {6, 5, 3}, {6, 6, 4}, {6, 7, 3}, {7, 6, 3},
-		// Very large buildings.
-		{7, 7, 3}, {7, 8, 2}, {8, 7, 2}, {8, 8, 2},
-	}
+	if horizontal {
+		// Horizontal hallway running east-west
+		hallwayWidth := unit
+		hallwayY := fp.y + fp.h/2 - hallwayWidth/2
 
-	var candidates []rect
-	for _, sz := range sizes {
-		for rep := 0; rep < sz.weight; rep++ {
-			c := buildingCandidatesAlongGridRoads(g.tileMap, rng, sz.w*unit, sz.h*unit, unit/2, unit*3)
-			candidates = append(candidates, c...)
+		// Create hallway walls (north and south of corridor)
+		for wx := fp.x; wx < fp.x+fp.w; wx += wall {
+			// North hallway wall
+			if hallwayY > fp.y {
+				g.buildings = append(g.buildings, rect{x: wx, y: hallwayY - wall, w: wall, h: wall})
+			}
+			// South hallway wall
+			if hallwayY+hallwayWidth+wall < fp.y+fp.h {
+				g.buildings = append(g.buildings, rect{x: wx, y: hallwayY + hallwayWidth, w: wall, h: wall})
+			}
 		}
-	}
-	// Shuffle the combined pool.
-	rng.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
 
-	// Variable separation between buildings.
-	for _, candidate := range candidates {
-		if len(g.buildingFootprints) >= targetCount {
-			break
+		// Create rooms north and south of hallway
+		northHeight := hallwayY - wall - fp.y
+		southHeight := fp.y + fp.h - (hallwayY + hallwayWidth + wall)
+
+		// Divide each side into 2-4 rooms
+		if northHeight >= 2*unit {
+			roomCount := 2 + rng.Intn(3) // 2-4 rooms
+			roomWidth := fp.w / roomCount
+			for i := 0; i < roomCount; i++ {
+				roomX := fp.x + i*roomWidth
+				actualWidth := roomWidth
+				if i == roomCount-1 { // Last room gets any remainder
+					actualWidth = fp.x + fp.w - roomX
+				}
+				if actualWidth >= 2*unit {
+					*leafRooms = append(*leafRooms, interiorRoom{
+						rx: roomX, ry: fp.y, rw: actualWidth, rh: northHeight,
+					})
+
+					// Add door to hallway
+					doorX := roomX + actualWidth/2
+					placeDoorInDoorway(g.tileMap, rng, doorX, hallwayY-wall, unit, false)
+				}
+			}
 		}
-		if g.overlapsAnyBuilding(candidate, rng) {
-			continue
+
+		if southHeight >= 2*unit {
+			roomCount := 2 + rng.Intn(3) // 2-4 rooms
+			roomWidth := fp.w / roomCount
+			for i := 0; i < roomCount; i++ {
+				roomX := fp.x + i*roomWidth
+				actualWidth := roomWidth
+				if i == roomCount-1 { // Last room gets any remainder
+					actualWidth = fp.x + fp.w - roomX
+				}
+				if actualWidth >= 2*unit {
+					*leafRooms = append(*leafRooms, interiorRoom{
+						rx: roomX, ry: hallwayY + hallwayWidth + wall, rw: actualWidth, rh: southHeight,
+					})
+
+					// Add door to hallway
+					doorX := roomX + actualWidth/2
+					placeDoorInDoorway(g.tileMap, rng, doorX, hallwayY+hallwayWidth, unit, false)
+				}
+			}
 		}
-		if rectOverlapsRoadTiles(g.tileMap, candidate) {
-			continue
+	} else {
+		// Vertical hallway running north-south
+		hallwayWidth := unit
+		hallwayX := fp.x + fp.w/2 - hallwayWidth/2
+
+		// Create hallway walls (west and east of corridor)
+		for wy := fp.y; wy < fp.y+fp.h; wy += wall {
+			// West hallway wall
+			if hallwayX > fp.x {
+				g.buildings = append(g.buildings, rect{x: hallwayX - wall, y: wy, w: wall, h: wall})
+			}
+			// East hallway wall
+			if hallwayX+hallwayWidth+wall < fp.x+fp.w {
+				g.buildings = append(g.buildings, rect{x: hallwayX + hallwayWidth, y: wy, w: wall, h: wall})
+			}
 		}
-		g.buildingFootprints = append(g.buildingFootprints, candidate)
-		g.addBuildingWalls(rng, candidate, wall, unit)
+
+		// Create rooms west and east of hallway
+		westWidth := hallwayX - wall - fp.x
+		eastWidth := fp.x + fp.w - (hallwayX + hallwayWidth + wall)
+
+		// Divide each side into 2-4 rooms
+		if westWidth >= 2*unit {
+			roomCount := 2 + rng.Intn(3) // 2-4 rooms
+			roomHeight := fp.h / roomCount
+			for i := 0; i < roomCount; i++ {
+				roomY := fp.y + i*roomHeight
+				actualHeight := roomHeight
+				if i == roomCount-1 { // Last room gets any remainder
+					actualHeight = fp.y + fp.h - roomY
+				}
+				if actualHeight >= 2*unit {
+					*leafRooms = append(*leafRooms, interiorRoom{
+						rx: fp.x, ry: roomY, rw: westWidth, rh: actualHeight,
+					})
+
+					// Add door to hallway
+					doorY := roomY + actualHeight/2
+					placeDoorInDoorway(g.tileMap, rng, hallwayX-wall, doorY, unit, false)
+				}
+			}
+		}
+
+		if eastWidth >= 2*unit {
+			roomCount := 2 + rng.Intn(3) // 2-4 rooms
+			roomHeight := fp.h / roomCount
+			for i := 0; i < roomCount; i++ {
+				roomY := fp.y + i*roomHeight
+				actualHeight := roomHeight
+				if i == roomCount-1 { // Last room gets any remainder
+					actualHeight = fp.y + fp.h - roomY
+				}
+				if actualHeight >= 2*unit {
+					*leafRooms = append(*leafRooms, interiorRoom{
+						rx: hallwayX + hallwayWidth + wall, ry: roomY, rw: eastWidth, rh: actualHeight,
+					})
+
+					// Add door to hallway
+					doorY := roomY + actualHeight/2
+					placeDoorInDoorway(g.tileMap, rng, hallwayX+hallwayWidth, doorY, unit, false)
+				}
+			}
+		}
 	}
 }
 
-// addBuildingWalls generates wall segments for a building footprint.
-// It places perimeter walls with doorways and windows, plus recursive
+// BuildingType represents the function/purpose of a building.
+type BuildingType uint8
+
+const (
+	// BuildingTypeResidential indicates houses, apartments, and residential structures.
+	BuildingTypeResidential BuildingType = iota // Houses, apartments, residential
+	// BuildingTypeCommercial indicates shops, offices, and services.
+	BuildingTypeCommercial // Shops, offices, services
+	// BuildingTypeIndustrial indicates warehouses and factories.
+	BuildingTypeIndustrial // Warehouses, factories, manufacturing
+	// BuildingTypeMilitary indicates bunkers and command posts.
+	BuildingTypeMilitary // Bunkers, barracks, command posts
+	// BuildingTypeAgricultural indicates barns and farm buildings.
+	BuildingTypeAgricultural // Barns, silos, farm buildings
+	// BuildingTypeGeneric indicates a fallback unknown type.
+	BuildingTypeGeneric // Fallback/unknown
+)
+
+// BuildingShape represents different building footprint shapes.
+type BuildingShape uint8
+
+const (
+	// ShapeRectangular indicates a standard rectangular building.
+	ShapeRectangular BuildingShape = iota // Standard rectangular building
+	// ShapeLShaped indicates an L-shaped building with two wings.
+	ShapeLShaped // L-shaped building with two wings
+	// ShapeTShaped indicates a T-shaped building footprint.
+	ShapeTShaped // T-shaped building with main body and perpendicular wing
+	// ShapeUShaped indicates a U-shaped building with a courtyard.
+	ShapeUShaped // U-shaped building with courtyard in center
+)
+
+// ComplexFootprint represents a building with multiple rectangular sections.
+type ComplexFootprint struct {
+	Sections []rect        // List of rectangular sections that make up the building
+	Shape    BuildingShape // Type of complex shape
+	Type     BuildingType  // Function/purpose of the building
+}
+
+// determineWallType returns the appropriate wall type based on building type and whether it's exterior/interior.
+func determineWallType(buildingType BuildingType, isExterior bool) WallType {
+	if isExterior {
+		switch buildingType {
+		case BuildingTypeResidential:
+			return WallTypeResidentialExterior
+		case BuildingTypeCommercial:
+			return WallTypeCommercialExterior
+		case BuildingTypeIndustrial:
+			return WallTypeIndustrialExterior
+		case BuildingTypeMilitary:
+			return WallTypeMilitaryExterior
+		case BuildingTypeAgricultural:
+			return WallTypeAgriculturalExterior
+		default:
+			return WallTypeResidentialExterior // Default fallback
+		}
+	} else {
+		switch buildingType {
+		case BuildingTypeResidential:
+			return WallTypeResidentialInterior
+		case BuildingTypeCommercial:
+			return WallTypeCommercialInterior
+		case BuildingTypeIndustrial:
+			return WallTypeIndustrialInterior
+		case BuildingTypeMilitary:
+			return WallTypeMilitaryInterior
+		case BuildingTypeAgricultural:
+			return WallTypeAgriculturalInterior
+		default:
+			return WallTypeResidentialInterior // Default fallback
+		}
+	}
+}
+
+// addBuildingWallsWithType generates building walls with type-specific customizations.
+func (g *Game) addBuildingWallsWithType(rng *rand.Rand, fp rect, wall, unit int, buildingType BuildingType) {
+	// Apply type-specific modifications to building generation
+	wUnits := fp.w / unit
+	hUnits := fp.h / unit
+
+	if wUnits < 3 {
+		wUnits = 3
+	}
+	if hUnits < 3 {
+		hUnits = 3
+	}
+
+	// Type-specific door count and placement preferences
+	var numDoors int
+	var preferFrontBack bool // vs all sides equally
+
+	switch buildingType {
+	case BuildingTypeResidential:
+		// Residential: usually front and back doors
+		numDoors = 1
+		if wUnits >= 5 || hUnits >= 5 {
+			numDoors = 2
+		}
+		preferFrontBack = true
+
+	case BuildingTypeCommercial:
+		// Commercial: front entrance emphasized, maybe service entrance
+		numDoors = 1
+		if wUnits >= 6 && hUnits >= 6 {
+			numDoors = 2 // Main + service entrance
+		}
+		preferFrontBack = true
+
+	case BuildingTypeIndustrial:
+		// Industrial: multiple loading/access doors
+		numDoors = 2
+		if wUnits >= 8 || hUnits >= 8 {
+			numDoors = 3 // Loading dock, office entrance, service door
+		}
+		preferFrontBack = false
+
+	case BuildingTypeMilitary:
+		// Military: minimal entrances (security)
+		numDoors = 1
+		if wUnits >= 7 && hUnits >= 7 {
+			numDoors = 2 // Main + emergency exit
+		}
+		preferFrontBack = false
+
+	case BuildingTypeAgricultural:
+		// Agricultural: large doors for equipment
+		numDoors = 1
+		if wUnits >= 6 {
+			numDoors = 2 // Large barn doors
+		}
+		preferFrontBack = false
+
+	default:
+		// Generic: use original logic
+		numDoors = 1
+		if wUnits >= 5 || hUnits >= 5 {
+			numDoors = 2
+		}
+		preferFrontBack = false
+	}
+
+	// Occasional extra door
+	if rng.Float64() < 0.3 {
+		numDoors++
+	}
+	if numDoors > 4 {
+		numDoors = 4
+	}
+
+	// Choose door faces with type-specific preferences
+	type face int
+	const (
+		faceN face = iota
+		faceS
+		faceE
+		faceW
+	)
+
+	var faces []face
+	if preferFrontBack {
+		// Residential/Commercial prefer N/S doors (front/back)
+		faces = []face{faceN, faceS, faceE, faceW}
+		// Weight toward N/S by putting them first
+		if rng.Intn(2) == 0 {
+			faces = []face{faceS, faceN, faceE, faceW} // Sometimes prefer south first
+		}
+	} else {
+		// Industrial/Military/Agricultural use all sides equally
+		faces = []face{faceN, faceS, faceE, faceW}
+		rng.Shuffle(len(faces), func(i, j int) { faces[i], faces[j] = faces[j], faces[i] })
+	}
+
+	doorFaces := make(map[face]bool)
+	for i := 0; i < numDoors && i < len(faces); i++ {
+		doorFaces[faces[i]] = true
+	}
+
+	// Use enhanced building walls with wall type tracking
+	g.addBuildingWallsEnhanced(rng, fp, wall, unit, buildingType)
+
+	// Type-specific post-processing could be added here in the future:
+	// - Different window patterns per building type
+	// - Military firing slits vs residential large windows
+	// - Industrial loading dock doors
+}
+
+// addBuildingWallsEnhanced generates building walls with proper wall type tracking.
+func (g *Game) addBuildingWallsEnhanced(rng *rand.Rand, fp rect, wall, unit int, buildingType BuildingType) {
+	// Determine wall types for this building
+	exteriorWallType := determineWallType(buildingType, true)
+	interiorWallType := determineWallType(buildingType, false)
+
+	// For now, use the existing addBuildingWalls but track the walls we create
+	beforeWallCount := len(g.buildings)
+
+	// Call existing building wall generation
+	g.addBuildingWalls(rng, fp, wall, unit)
+
+	// Post-process: assign wall types to newly created walls
+	// This is a simplified approach - future enhancement would integrate directly into wall placement
+	newWalls := g.buildings[beforeWallCount:]
+
+	// Clear the wall info for the new walls and rebuild with proper types
+	if len(g.wallInfo) < len(g.buildings) {
+		// Extend wallInfo to match buildings length
+		for len(g.wallInfo) < beforeWallCount {
+			g.wallInfo = append(g.wallInfo, WallInfo{}) // Fill gaps with empty info
+		}
+	}
+
+	// Analyze each new wall to determine if it's exterior or interior
+	for i, wallRect := range newWalls {
+		isExterior := isWallExterior(wallRect, fp, wall)
+		wallType := exteriorWallType
+		if !isExterior {
+			wallType = interiorWallType
+		}
+
+		g.wallInfo = append(g.wallInfo, WallInfo{
+			Rect:       wallRect,
+			WallType:   wallType,
+			IsExterior: isExterior,
+		})
+
+		// Update the wall index to track which building it belongs to
+		_ = i // Wall index within this building (could be used for future enhancements)
+	}
+}
+
+// isWallExterior determines if a wall segment is part of the building's exterior perimeter.
+func isWallExterior(wallRect, buildingFootprint rect, wallThickness int) bool {
+	// Check if the wall is at the building perimeter
+	// Exterior walls are those touching the building footprint edges
+
+	// Check if wall touches any edge of the building footprint
+	touchesNorth := wallRect.y <= buildingFootprint.y+wallThickness
+	touchesSouth := wallRect.y+wallRect.h >= buildingFootprint.y+buildingFootprint.h-wallThickness
+	touchesWest := wallRect.x <= buildingFootprint.x+wallThickness
+	touchesEast := wallRect.x+wallRect.w >= buildingFootprint.x+buildingFootprint.w-wallThickness
+
+	return touchesNorth || touchesSouth || touchesWest || touchesEast
+}
+
+// classifyBuildingType determines building type based on size and location context.
+func classifyBuildingType(fp rect, unit int, rng *rand.Rand) BuildingType {
+	wUnits := fp.w / unit
+	hUnits := fp.h / unit
+	area := wUnits * hUnits
+
+	// Very large buildings (100+ units) are usually industrial
+	if area >= 100 {
+		if rng.Float64() < 0.7 {
+			return BuildingTypeIndustrial // Warehouse/factory
+		}
+		return BuildingTypeMilitary // Large military facility
+	}
+
+	// Large buildings (60-99 units)
+	if area >= 60 {
+		typeRoll := rng.Float64()
+		switch {
+		case typeRoll < 0.4:
+			return BuildingTypeIndustrial // Warehouse
+		case typeRoll < 0.6:
+			return BuildingTypeCommercial // Large office/store
+		case typeRoll < 0.8:
+			return BuildingTypeResidential // Large house/apartment
+		default:
+			return BuildingTypeMilitary // Barracks/bunker
+		}
+	}
+
+	// Medium buildings (25-59 units)
+	if area >= 25 {
+		typeRoll := rng.Float64()
+		switch {
+		case typeRoll < 0.5:
+			return BuildingTypeResidential // House
+		case typeRoll < 0.7:
+			return BuildingTypeCommercial // Office/shop
+		case typeRoll < 0.85:
+			return BuildingTypeIndustrial // Small warehouse
+		default:
+			return BuildingTypeAgricultural // Barn
+		}
+	}
+
+	// Small buildings (< 25 units)
+	typeRoll := rng.Float64()
+	switch {
+	case typeRoll < 0.6:
+		return BuildingTypeResidential // Small house
+	case typeRoll < 0.8:
+		return BuildingTypeCommercial // Small shop/office
+	case typeRoll < 0.9:
+		return BuildingTypeAgricultural // Shed/outbuilding
+	default:
+		return BuildingTypeMilitary // Guard post/bunker
+	}
+}
+
+// generateLShapedFootprint creates an L-shaped building from a base rectangle.
+func generateLShapedFootprint(base rect, rng *rand.Rand) ComplexFootprint {
+	// L-shape consists of a primary wing and a secondary wing that meet at a corner
+
+	// Primary wing is the larger section (60-80% of base area)
+	primaryRatio := 0.6 + rng.Float64()*0.2 // 0.6 to 0.8
+
+	// Choose L orientation (4 possibilities)
+	orientation := rng.Intn(4)
+
+	var primary, secondary rect
+
+	switch orientation {
+	case 0: // Primary horizontal on bottom, secondary vertical on right
+		primaryH := int(float64(base.h) * primaryRatio)
+		primary = rect{x: base.x, y: base.y + base.h - primaryH, w: base.w, h: primaryH}
+
+		secondaryW := int(float64(base.w) * (0.4 + rng.Float64()*0.4)) // 0.4 to 0.8 of width
+		secondary = rect{x: base.x + base.w - secondaryW, y: base.y, w: secondaryW, h: base.h - primaryH}
+
+	case 1: // Primary horizontal on top, secondary vertical on right
+		primaryH := int(float64(base.h) * primaryRatio)
+		primary = rect{x: base.x, y: base.y, w: base.w, h: primaryH}
+
+		secondaryW := int(float64(base.w) * (0.4 + rng.Float64()*0.4))
+		secondary = rect{x: base.x + base.w - secondaryW, y: base.y + primaryH, w: secondaryW, h: base.h - primaryH}
+
+	case 2: // Primary horizontal on bottom, secondary vertical on left
+		primaryH := int(float64(base.h) * primaryRatio)
+		primary = rect{x: base.x, y: base.y + base.h - primaryH, w: base.w, h: primaryH}
+
+		secondaryW := int(float64(base.w) * (0.4 + rng.Float64()*0.4))
+		secondary = rect{x: base.x, y: base.y, w: secondaryW, h: base.h - primaryH}
+
+	default: // Primary horizontal on top, secondary vertical on left
+		primaryH := int(float64(base.h) * primaryRatio)
+		primary = rect{x: base.x, y: base.y, w: base.w, h: primaryH}
+
+		secondaryW := int(float64(base.w) * (0.4 + rng.Float64()*0.4))
+		secondary = rect{x: base.x, y: base.y + primaryH, w: secondaryW, h: base.h - primaryH}
+	}
+
+	// Ensure minimum sizes for both wings
+	if primary.w < 3*16 || primary.h < 3*16 || secondary.w < 3*16 || secondary.h < 3*16 {
+		// Fall back to rectangular if L-shape would be too small
+		return ComplexFootprint{
+			Sections: []rect{base},
+			Shape:    ShapeRectangular,
+		}
+	}
+
+	return ComplexFootprint{
+		Sections: []rect{primary, secondary},
+		Shape:    ShapeLShaped,
+	}
+}
+
+// generateTShapedFootprint creates a T-shaped building with main body and perpendicular wing.
+func generateTShapedFootprint(base rect, rng *rand.Rand) ComplexFootprint {
+	// T-shape consists of a main body (stem) and a perpendicular wing (crossbar)
+
+	// Choose orientation: horizontal T or vertical T
+	horizontal := rng.Intn(2) == 0
+
+	var mainBody, crossWing rect
+
+	if horizontal {
+		// Horizontal T: main body runs east-west, wing extends north or south
+		mainBodyH := int(float64(base.h) * (0.4 + rng.Float64()*0.3)) // 40-70% of height
+		mainBody = rect{x: base.x, y: base.y + (base.h-mainBodyH)/2, w: base.w, h: mainBodyH}
+
+		// Wing extends from center of main body
+		wingW := int(float64(base.w) * (0.4 + rng.Float64()*0.4)) // 40-80% of width
+		wingStart := base.x + (base.w-wingW)/2
+
+		if rng.Intn(2) == 0 {
+			// Wing extends north
+			crossWing = rect{x: wingStart, y: base.y, w: wingW, h: mainBody.y - base.y}
+		} else {
+			// Wing extends south
+			wingY := mainBody.y + mainBody.h
+			crossWing = rect{x: wingStart, y: wingY, w: wingW, h: base.y + base.h - wingY}
+		}
+	} else {
+		// Vertical T: main body runs north-south, wing extends east or west
+		mainBodyW := int(float64(base.w) * (0.4 + rng.Float64()*0.3)) // 40-70% of width
+		mainBody = rect{x: base.x + (base.w-mainBodyW)/2, y: base.y, w: mainBodyW, h: base.h}
+
+		// Wing extends from center of main body
+		wingH := int(float64(base.h) * (0.4 + rng.Float64()*0.4)) // 40-80% of height
+		wingStart := base.y + (base.h-wingH)/2
+
+		if rng.Intn(2) == 0 {
+			// Wing extends west
+			crossWing = rect{x: base.x, y: wingStart, w: mainBody.x - base.x, h: wingH}
+		} else {
+			// Wing extends east
+			wingX := mainBody.x + mainBody.w
+			crossWing = rect{x: wingX, y: wingStart, w: base.x + base.w - wingX, h: wingH}
+		}
+	}
+
+	// Ensure minimum sizes
+	if mainBody.w < 3*16 || mainBody.h < 3*16 || crossWing.w < 2*16 || crossWing.h < 2*16 {
+		// Fall back to rectangular if T-shape would be too small
+		return ComplexFootprint{
+			Sections: []rect{base},
+			Shape:    ShapeRectangular,
+		}
+	}
+
+	return ComplexFootprint{
+		Sections: []rect{mainBody, crossWing},
+		Shape:    ShapeTShaped,
+	}
+}
+
+// generateUShapedFootprint creates a U-shaped building with central courtyard.
+func generateUShapedFootprint(base rect, rng *rand.Rand) ComplexFootprint {
+	// U-shape consists of three sections: two side wings and a connecting section
+	// Creates a courtyard in the center
+
+	// Choose orientation: U opening north/south or east/west
+	horizontal := rng.Intn(2) == 0
+
+	var leftWing, rightWing, connecting rect
+	courtyardRatio := 0.3 + rng.Float64()*0.3 // Courtyard takes 30-60% of space
+
+	if horizontal {
+		// Horizontal U: opening to north or south
+		courtyardW := int(float64(base.w) * courtyardRatio)
+		wingW := (base.w - courtyardW) / 2
+
+		// Connecting section (back of U)
+		connectingH := int(float64(base.h) * (0.2 + rng.Float64()*0.2)) // 20-40% of height
+
+		if rng.Intn(2) == 0 {
+			// U opens to north
+			connecting = rect{x: base.x, y: base.y + base.h - connectingH, w: base.w, h: connectingH}
+
+			// Side wings
+			wingH := base.h - connectingH
+			leftWing = rect{x: base.x, y: base.y, w: wingW, h: wingH}
+			rightWing = rect{x: base.x + base.w - wingW, y: base.y, w: wingW, h: wingH}
+		} else {
+			// U opens to south
+			connecting = rect{x: base.x, y: base.y, w: base.w, h: connectingH}
+
+			// Side wings
+			wingH := base.h - connectingH
+			leftWing = rect{x: base.x, y: base.y + connectingH, w: wingW, h: wingH}
+			rightWing = rect{x: base.x + base.w - wingW, y: base.y + connectingH, w: wingW, h: wingH}
+		}
+	} else {
+		// Vertical U: opening to east or west
+		courtyardH := int(float64(base.h) * courtyardRatio)
+		wingH := (base.h - courtyardH) / 2
+
+		// Connecting section (back of U)
+		connectingW := int(float64(base.w) * (0.2 + rng.Float64()*0.2)) // 20-40% of width
+
+		if rng.Intn(2) == 0 {
+			// U opens to west
+			connecting = rect{x: base.x + base.w - connectingW, y: base.y, w: connectingW, h: base.h}
+
+			// Side wings
+			wingW := base.w - connectingW
+			leftWing = rect{x: base.x, y: base.y, w: wingW, h: wingH}
+			rightWing = rect{x: base.x, y: base.y + base.h - wingH, w: wingW, h: wingH}
+		} else {
+			// U opens to east
+			connecting = rect{x: base.x, y: base.y, w: connectingW, h: base.h}
+
+			// Side wings
+			wingW := base.w - connectingW
+			leftWing = rect{x: base.x + connectingW, y: base.y, w: wingW, h: wingH}
+			rightWing = rect{x: base.x + connectingW, y: base.y + base.h - wingH, w: wingW, h: wingH}
+		}
+	}
+
+	// Ensure minimum sizes for all sections
+	if leftWing.w < 2*16 || leftWing.h < 2*16 ||
+		rightWing.w < 2*16 || rightWing.h < 2*16 ||
+		connecting.w < 2*16 || connecting.h < 2*16 {
+		// Fall back to rectangular if U-shape would be too small
+		return ComplexFootprint{
+			Sections: []rect{base},
+			Shape:    ShapeRectangular,
+		}
+	}
+
+	return ComplexFootprint{
+		Sections: []rect{connecting, leftWing, rightWing},
+		Shape:    ShapeUShaped,
+	}
+}
+
+// GenerateBuildings creates building footprints and populates them with walls, doorways, and windows plus recursive
 // internal room subdivision. Windows are evenly spaced along each face,
 // proportional to the face length. Only 1-2 faces get exterior doorways.
 func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
@@ -771,7 +1529,7 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 			return
 		}
 		// Stop probabilistically at deeper levels.
-		if depth > 0 && rng.Float64() < 0.15 {
+		if depth > 0 && rng.Float64() < 0.05 {
 			leafRooms = append(leafRooms, interiorRoom{rx: rm.rx, ry: rm.ry, rw: rm.rw, rh: rm.rh})
 			return
 		}
@@ -852,9 +1610,15 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 	}
 
 	// Only subdivide buildings that are big enough (>=4 units on both axes).
-	if wUnits >= 4 && hUnits >= 4 {
-		subdivide(interior, 0)
-	} else if wUnits >= 4 || hUnits >= 4 {
+	switch {
+	case wUnits >= 4 && hUnits >= 4:
+		// For larger buildings (6+ units on both axes), 30% chance to use hallway layout.
+		if wUnits >= 6 && hUnits >= 6 && rng.Float64() < 0.30 {
+			g.generateHallwayLayout(rng, rect{x: interior.rx, y: interior.ry, w: interior.rw, h: interior.rh}, wall, unit, &leafRooms)
+		} else {
+			subdivide(interior, 0)
+		}
+	case wUnits >= 4 || hUnits >= 4:
 		// Simple single partition for medium buildings.
 		if rng.Intn(3) > 0 { // 66% chance
 			if wUnits >= 4 && rng.Intn(2) == 0 {
@@ -900,7 +1664,7 @@ func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
 			// No partition — whole interior is one room.
 			leafRooms = append(leafRooms, interiorRoom{rx: x + unit, ry: y + unit, rw: w - 2*unit, rh: h - 2*unit})
 		}
-	} else {
+	default:
 		// Small building — whole interior is one room.
 		leafRooms = append(leafRooms, interiorRoom{rx: x + unit, ry: y + unit, rw: w - 2*unit, rh: h - 2*unit})
 	}
@@ -930,7 +1694,7 @@ func (g *Game) overlapsAnyBuilding(r rect, rng *rand.Rand) bool {
 
 // findValidSpawnLocation searches for a walkable spawn position near the desired location.
 // Returns the validated position or the original if no valid position found within search radius.
-func (g *Game) findValidSpawnLocation(x, y float64, searchRadius float64) (float64, float64) {
+func (g *Game) findValidSpawnLocation(x, y, searchRadius float64) (float64, float64) {
 	cx, cy := WorldToCell(x, y)
 	if !g.navGrid.IsBlocked(cx, cy) {
 		return x, y
@@ -959,7 +1723,8 @@ func (g *Game) findValidSpawnLocation(x, y float64, searchRadius float64) (float
 
 // spawnCluster creates squadSize soldiers of the given team at startX,
 // spread vertically around clusterCenterY. Returns the created soldiers.
-func (g *Game) spawnCluster(rng *rand.Rand, team Team, squadSize int, clusterCenterY, startX, endX float64) []*Soldier {
+func (g *Game) spawnCluster(rng *rand.Rand, team Team, clusterCenterY, startX, endX float64) []*Soldier {
+	squadSize := 8
 	margin := 64.0
 	spacing := 18.0 // tighter — squad spawns as a compact cluster, not a long line
 	out := make([]*Soldier, 0, squadSize)
@@ -994,26 +1759,24 @@ func (g *Game) spawnCluster(rng *rand.Rand, team Team, squadSize int, clusterCen
 
 func (g *Game) initSoldiers() {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404
-	sqSz := 8
 	margin := 64.0
 	startX := margin
 	endX := float64(g.gameWidth) - margin
 	// Spawn 3 squads with better vertical distribution
-	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.20, startX, endX)...)
-	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.50, startX, endX)...)
-	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, sqSz, float64(g.gameHeight)*0.80, startX, endX)...)
+	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, float64(g.gameHeight)*0.20, startX, endX)...)
+	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, float64(g.gameHeight)*0.50, startX, endX)...)
+	g.soldiers = append(g.soldiers, g.spawnCluster(rng, TeamRed, float64(g.gameHeight)*0.80, startX, endX)...)
 }
 
 func (g *Game) initOpFor() {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 999)) // #nosec G404
-	sqSz := 8
 	margin := 64.0
 	startX := float64(g.gameWidth) - margin
 	endX := margin
 	// Spawn 3 squads with better vertical distribution
-	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.20, startX, endX)...)
-	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.50, startX, endX)...)
-	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, sqSz, float64(g.gameHeight)*0.80, startX, endX)...)
+	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, float64(g.gameHeight)*0.20, startX, endX)...)
+	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, float64(g.gameHeight)*0.50, startX, endX)...)
+	g.opfor = append(g.opfor, g.spawnCluster(rng, TeamBlue, float64(g.gameHeight)*0.80, startX, endX)...)
 }
 
 func (g *Game) initSquads() {
@@ -1050,10 +1813,12 @@ func (g *Game) initSquads() {
 	}
 }
 
-// randomiseProfiles gives each soldier slightly different stats so behaviour varies.
+// randomiseProfiles gives each soldier slightly different stats so behavior varies.
 func (g *Game) randomiseProfiles() {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 42)) // #nosec G404 -- game only, crypto/rand not needed
-	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
+	all = append(all, g.soldiers...)
+	all = append(all, g.opfor...)
 	for _, s := range all {
 		p := &s.profile
 		p.Physical.FitnessBase = 0.4 + rng.Float64()*0.5 // 0.4 - 0.9
@@ -1064,11 +1829,12 @@ func (g *Game) randomiseProfiles() {
 		p.Psych.Morale = 0.5 + rng.Float64()*0.4      // 0.5 - 0.9
 		p.Psych.Composure = 0.3 + rng.Float64()*0.5   // 0.3 - 0.8
 
-		// Initialise commitment-based decision thresholds from discipline.
-		s.blackboard.InitCommitment(p.Skills.Discipline)
+		// Initialize commitment-based decision thresholds from full profile.
+		s.blackboard.InitCommitmentWithProfile(p)
 	}
 }
 
+// Update advances simulation and handles per-frame logic.
 func (g *Game) Update() error {
 	// Handle input every frame regardless of sim speed.
 	g.handleInput()
@@ -1134,7 +1900,9 @@ func (g *Game) simTick() {
 	}
 
 	// 2. COMBAT: fire decisions and resolution.
-	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
+	all = append(all, g.soldiers...)
+	all = append(all, g.opfor...)
 	g.combat.ResetFireCounts(all)
 	g.combat.tick = g.tick
 	g.combat.ResolveCombat(g.soldiers, g.opfor, g.soldiers, g.buildings, all)
@@ -1185,7 +1953,7 @@ func (g *Game) simTick() {
 	// 7. SPEECH: update soldier speech bubbles.
 	g.UpdateSpeech(g.speechRng)
 
-	// 8. ANALYTICS: collect behaviour report every ~1s.
+	// 8. ANALYTICS: collect behavior report every ~1s.
 	if g.tick%60 == 0 && g.reporter != nil {
 		g.reporter.Collect(g.tick, g.soldiers, g.opfor, g.squads)
 	}
@@ -1331,10 +2099,11 @@ func (g *Game) handleInput() {
 
 	// F5-F8: toggle log category filters.
 	filterKeys := [logCatCount]ebiten.Key{ebiten.KeyF5, ebiten.KeyF6, ebiten.KeyF7, ebiten.KeyF8}
+	filterCats := [logCatCount]LogCategory{LogCatRadio, LogCatSquad, LogCatSpeech, LogCatThought}
 	for i, fk := range filterKeys {
 		currentKeys[fk] = ebiten.IsKeyPressed(fk)
 		if currentKeys[fk] && !g.prevKeys[fk] {
-			g.thoughtLog.ToggleFilter(LogCategory(i))
+			g.thoughtLog.ToggleFilter(filterCats[i])
 		}
 	}
 
@@ -1374,7 +2143,7 @@ func (g *Game) handleInput() {
 		g.camZoom = zoomMax
 	}
 
-	// Clamp camera centre to battlefield bounds (accounting for zoom).
+	// Clamp camera center to battlefield bounds (accounting for zoom).
 	halfVW := float64(g.gameWidth) / 2 / g.camZoom
 	halfVH := float64(g.gameHeight) / 2 / g.camZoom
 	if g.camX < halfVW {
@@ -1443,6 +2212,7 @@ func (g *Game) handleInput() {
 	g.prevKeys = currentKeys
 }
 
+// Draw renders one frame of world and UI.
 func (g *Game) Draw(screen *ebiten.Image) {
 	// Window background: very dark, outside battlefield.
 	screen.Fill(color.RGBA{R: 12, G: 14, B: 12, A: 255})
@@ -1454,7 +2224,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.worldBuf.Clear()
 	g.drawWorld(g.worldBuf)
 
-	// Camera transform: translate so camX/camY is at viewport centre, then scale.
+	// Camera transform: translate so camX/camY is at viewport center, then scale.
 	vpW := float64(g.gameWidth)
 	vpH := float64(g.gameHeight)
 	var cam ebiten.GeoM
@@ -1483,7 +2253,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	// Right-side column: squad status panels on top, thought log below.
 	logX := g.offX + g.gameWidth + g.offX
-	squadAreaH := g.drawSquadStatusPanels(screen, logX)
+	squadAreaH := drawSquadStatusPanels(g, screen, logX)
 
 	// Thought log panel — rendered to scaled buffer, then blitted below squad panels.
 	logBufW := logPanelWidth / logScale
@@ -1663,7 +2433,7 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 		for row := 0; row < g.tileMap.Rows; row++ {
 			for col := 0; col < g.tileMap.Cols; col++ {
 				gt := g.tileMap.Ground(col, row)
-				r, gr, b := groundBaseColour(gt)
+				r, gr, b := groundBaseColor(gt)
 				// Per-tile hash jitter for natural variation.
 				h := terrainHash(col, row)
 				jitter := int(h%13) - 6 // -6..+6
@@ -1698,7 +2468,7 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridCoarse, color.RGBA{R: 48, G: 68, B: 48, A: 255})
 
 	// Roads are now rendered as tarmac/pavement tiles in the ground layer above.
-	// Road centre-line dashes drawn on tarmac tiles for visual detail.
+	// Road center-line dashes drawn on tarmac tiles for visual detail.
 	if g.tileMap != nil {
 		cs := float32(cellSize)
 		markCol := color.RGBA{R: 70, G: 68, B: 58, A: 100}
@@ -1707,7 +2477,7 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 				if g.tileMap.Ground(col, row) != GroundTarmac {
 					continue
 				}
-				// Draw dashed centre-line on tarmac tiles that have tarmac neighbours
+				// Draw dashed center-line on tarmac tiles that have tarmac neighbors
 				// on both cross-axis sides (i.e. are interior road tiles).
 				hasL := col > 0 && g.tileMap.Ground(col-1, row) == GroundTarmac
 				hasR := col < g.tileMap.Cols-1 && g.tileMap.Ground(col+1, row) == GroundTarmac
@@ -1773,7 +2543,7 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 				tint = color.RGBA{R: 20, G: 40, B: 140, A: 35}
 			}
 			vector.FillRect(screen, x0, y0, bw, bh, tint, false)
-			// Thin team-colour border.
+			// Thin team-color border.
 			var border color.RGBA
 			if t == TeamRed {
 				border = color.RGBA{R: 200, G: 60, B: 40, A: 80}
@@ -1806,7 +2576,7 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 	}
 	solidSet := g.cachedSolidSet
 
-	// Wall segments — neighbour-aware lighting so edges/corners read correctly.
+	// Wall segments — neighbor-aware lighting so edges/corners read correctly.
 	wallFill := color.RGBA{R: 86, G: 80, B: 66, A: 255}
 	wallLight := color.RGBA{R: 124, G: 115, B: 96, A: 210}
 	wallDark := color.RGBA{R: 44, G: 40, B: 33, A: 220}
@@ -2105,13 +2875,13 @@ func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) {
 }
 
 // drawCoverObjects renders cover objects with orientation-aware visuals.
-// Chest-walls detect their H/V neighbours to draw correct cross-sections and corners.
+// Chest-walls detect their H/V neighbors to draw correct cross-sections and corners.
 func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
 	cs := float32(coverCellSize) // 16px
 	iCS := coverCellSize
 
-	// Build a fast set of chest-wall cell positions for neighbour lookup.
+	// Build a fast set of chest-wall cell positions for neighbor lookup.
 	type cellKey struct{ cx, cy int }
 	chestSet := map[cellKey]bool{}
 	for _, c := range g.covers {
@@ -2140,7 +2910,7 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
 			vector.StrokeLine(screen, x0, y0+cs, x0+cs, y0+cs, 1.0, color.RGBA{R: 45, G: 42, B: 34, A: 200}, false)
 
 		case CoverChestWall:
-			// Determine which neighbours exist.
+			// Determine which neighbors exist.
 			cx := c.x / iCS
 			cy := c.y / iCS
 			hasLeft := chestSet[cellKey{cx - 1, cy}]
@@ -2153,9 +2923,10 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
 			// Drop shadow first.
 			vector.FillRect(screen, x0+2, y0+2, cs, cs, slabShadow, false)
 
-			// Horizontal run: slab centred vertically across the cell (3D top-down wall).
-			// The "top" of the wall is a bright horizontal stripe across the centre.
-			if hasH && !hasV {
+			// Horizontal run: slab centered vertically across the cell (3D top-down wall).
+			// The "top" of the wall is a bright horizontal stripe across the center.
+			switch {
+			case hasH && !hasV:
 				// Pure horizontal — draw a horizontal slab.
 				mid := y0 + cs/2 - slabW/2
 				vector.FillRect(screen, x0, mid, cs, slabW, slabBody, false)
@@ -2168,7 +2939,7 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
 				if !hasRight {
 					vector.StrokeLine(screen, x0+cs, mid, x0+cs, mid+slabW, 1.0, slabSide, false)
 				}
-			} else if hasV && !hasH {
+			case hasV && !hasH:
 				// Pure vertical — draw a vertical slab.
 				mid := x0 + cs/2 - slabW/2
 				vector.FillRect(screen, mid, y0, slabW, cs, slabBody, false)
@@ -2180,7 +2951,7 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
 				if !hasDown {
 					vector.StrokeLine(screen, mid, y0+cs, mid+slabW, y0+cs, 1.0, slabSide, false)
 				}
-			} else {
+			default:
 				// Corner / T-junction / cross — draw both H and V slabs overlapping.
 				// Horizontal band.
 				midY := y0 + cs/2 - slabW/2
@@ -2195,20 +2966,21 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
 				vector.StrokeLine(screen, midX+slabW, y0, midX+slabW, y0+cs, 0.8, slabSide, false)
 			}
 
-		case CoverRubble:
-			vector.FillRect(screen, x0, y0, cs, cs, color.RGBA{R: 42, G: 38, B: 30, A: 160}, false)
-			vector.FillRect(screen, x0+1, y0+cs-7, 7, 5, color.RGBA{R: 92, G: 84, B: 68, A: 240}, false)
-			vector.StrokeLine(screen, x0+1, y0+cs-7, x0+8, y0+cs-7, 0.5, color.RGBA{R: 118, G: 110, B: 90, A: 200}, false)
-			vector.FillRect(screen, x0+cs-7, y0+2, 5, 4, color.RGBA{R: 82, G: 76, B: 62, A: 230}, false)
-			vector.FillRect(screen, x0+5, y0+5, 3, 3, color.RGBA{R: 100, G: 92, B: 76, A: 210}, false)
-			vector.FillRect(screen, x0+3, y0+cs-4, 2, 2, color.RGBA{R: 60, G: 55, B: 44, A: 180}, false)
-			vector.FillRect(screen, x0+cs-5, y0+cs-5, 2, 2, color.RGBA{R: 60, G: 55, B: 44, A: 160}, false)
-			vector.FillRect(screen, x0+8, y0+10, 2, 2, color.RGBA{R: 72, G: 66, B: 54, A: 150}, false)
+		case CoverRubbleLight:
+			g.drawRubbleLight(screen, x0, y0, cs, c.x, c.y)
+		case CoverRubbleMedium:
+			g.drawRubbleMedium(screen, x0, y0, cs, c.x, c.y)
+		case CoverRubbleHeavy:
+			g.drawRubbleHeavy(screen, x0, y0, cs, c.x, c.y)
+		case CoverRubbleMetal:
+			g.drawRubbleMetal(screen, x0, y0, cs, c.x, c.y)
+		case CoverRubbleWood:
+			g.drawRubbleWood(screen, x0, y0, cs, c.x, c.y)
 		}
 	}
 }
 
-// drawHeatLayer renders one HeatLayer as an alpha-blended colour wash.
+// drawHeatLayer renders one HeatLayer as an alpha-blended color wash.
 func (g *Game) drawHeatLayer(screen *ebiten.Image, layer *HeatLayer, baseCol color.RGBA) {
 	ox, oy := float32(0), float32(0)
 	cs := float32(cellSize)
@@ -2244,14 +3016,17 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 	}
 
 	speedStr := "1x"
-	if g.simSpeed == 0 {
+	switch g.simSpeed {
+	case 0:
 		speedStr = "PAUSED"
-	} else if g.simSpeed == 2 {
+	case 2:
 		speedStr = "2x"
-	} else if g.simSpeed == 4 {
+	case 4:
 		speedStr = "4x"
-	} else if g.simSpeed != 1 {
-		speedStr = fmt.Sprintf("%.1fx", g.simSpeed)
+	default:
+		if g.simSpeed != 1 {
+			speedStr = fmt.Sprintf("%.1fx", g.simSpeed)
+		}
 	}
 
 	lines := []string{
@@ -2265,9 +3040,12 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 		}
 		lines = append(lines, fmt.Sprintf("  [%d]%s %s", k+1, on, IntelMapKindName(k)))
 	}
-	lines = append(lines, "[H] toggle HUD")
-	lines = append(lines, "WASD/arrows=pan  scroll=zoom")
-	lines = append(lines, fmt.Sprintf("zoom: %.1fx  click=inspect", g.camZoom))
+	lines = append(
+		lines,
+		"[H] toggle HUD",
+		"WASD/arrows=pan  scroll=zoom",
+		fmt.Sprintf("zoom: %.1fx  click=inspect", g.camZoom),
+	)
 	// Log filter toggles.
 	filterLine := "Log:"
 	filterFKeys := [logCatCount]string{"F5", "F6", "F7", "F8"}
@@ -2360,7 +3138,9 @@ func (g *Game) drawFormationSlots(screen *ebiten.Image) {
 // drawSpottedIndicators renders a subtle "!" above soldiers who currently see enemies.
 func (g *Game) drawSpottedIndicators(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
-	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
+	all = append(all, g.soldiers...)
+	all = append(all, g.opfor...)
 	for _, s := range all {
 		if s.state == SoldierStateDead || len(s.vision.KnownContacts) == 0 {
 			continue
@@ -2630,6 +3410,7 @@ func drawGridOffset(screen *ebiten.Image, offX, offY, w, h, spacing int, c color
 	}
 }
 
+// Layout reports the fixed logical screen size for Ebiten.
 func (g *Game) Layout(_, _ int) (int, int) {
 	return g.width, g.height
 }

@@ -48,7 +48,7 @@ func TestLOS_DiagonalRay_Blocked(t *testing.T) {
 	}
 }
 
-func TestLOS_ZeroLength(t *testing.T) {
+func TestLOS_ZeroLength(_ *testing.T) {
 	buildings := []rect{{x: 0, y: 0, w: 100, h: 100}}
 	// Same start and end: ray is a point. Should not panic.
 	_ = HasLineOfSight(50, 50, 50, 50, buildings)

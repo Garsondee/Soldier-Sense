@@ -1,3 +1,4 @@
+// Package main runs repeated headless simulations and aggregate reporting.
 package main
 
 import (
@@ -16,65 +17,387 @@ const (
 )
 
 type soldierPerformance struct {
-	label                string
-	team                 game.Team
-	totalTicks           int
-	stationaryTicks      int
-	sawEnemyTicks        int
-	inRangeTicks         int
-	farFromLeaderTicks   int
-	neverSawEnemy        bool
-	neverInRange         bool
-	immobile             bool
-	excessivelySeparated bool
-	immobilityPct        float64
-	separationPct        float64
-
-	// Diagnostic information
+	proximityPartner string
+	label            string
 	goalChanges      []goalChange
 	stateChanges     []stateChange
 	stalledEvents    []stalledEvent
 	detachedEvents   []detachedEvent
-	proximityPartner string
-	proximityPct     float64
+
+	immobilityPct float64
+	separationPct float64
+	proximityPct  float64
+
+	team               game.Team
+	totalTicks         int
+	stationaryTicks    int
+	sawEnemyTicks      int
+	inRangeTicks       int
+	farFromLeaderTicks int
+
+	neverSawEnemy        bool
+	neverInRange         bool
+	immobile             bool
+	excessivelySeparated bool
+}
+
+type scenarioPsychState struct {
+	team      string
+	disobey   bool
+	panic     bool
+	surrender bool
+}
+
+type scenarioEventStats struct {
+	affected             map[string]struct{}
+	stalledEvents        int
+	detachedEvents       int
+	disobeyEvents        int
+	panicEvents          int
+	surrenderEvents      int
+	disobeyOnEvents      int
+	disobeyOffEvents     int
+	panicOnEvents        int
+	panicOffEvents       int
+	surrenderOnEvents    int
+	surrenderOffEvents   int
+	disobeyOnPreDeath    int
+	panicOnPreDeath      int
+	surrenderOnPreDeath  int
+	firstDisobeyOnTick   int
+	firstPanicOnTick     int
+	firstSurrenderOnTick int
+	peakRefusing         int
+	peakRefusingRed      int
+	peakRefusingBlue     int
+	peakRefusingTick     int
+	cohesionBreakEvents  int
+	cohesionReformEvents int
+}
+
+func analyzeScenarioEvents(entries []game.SimLogEntry, firstDeathTick int) scenarioEventStats {
+	stats := scenarioEventStats{
+		affected:             map[string]struct{}{},
+		firstDisobeyOnTick:   -1,
+		firstPanicOnTick:     -1,
+		firstSurrenderOnTick: -1,
+		peakRefusingTick:     -1,
+	}
+	psychBySoldier := map[string]scenarioPsychState{}
+
+	for _, e := range entries {
+		switch e.Category {
+		case "effectiveness":
+			handleScenarioEffectivenessEvent(&e, &stats)
+		case "psych":
+			handleScenarioPsychEvent(&e, firstDeathTick, &stats, psychBySoldier)
+		case "squad":
+			if e.Key == "cohesion" {
+				if strings.Contains(e.Value, "broken") {
+					stats.cohesionBreakEvents++
+				} else if strings.Contains(e.Value, "reformed") {
+					stats.cohesionReformEvents++
+				}
+			}
+		}
+	}
+
+	return stats
+}
+
+func handleScenarioEffectivenessEvent(e *game.SimLogEntry, stats *scenarioEventStats) {
+	switch e.Key {
+	case "stalled_in_combat":
+		stats.stalledEvents++
+		stats.affected[e.Soldier] = struct{}{}
+	case "detached_from_engagement":
+		stats.detachedEvents++
+		stats.affected[e.Soldier] = struct{}{}
+	}
+}
+
+func printPerfSummary(all []runStats) {
+	if len(all) == 0 {
+		return
+	}
+	setupMin, setupMax := all[0].setupDur, all[0].setupDur
+	simMin, simMax := all[0].simDur, all[0].simDur
+	postMin, postMax := all[0].postDur, all[0].postDur
+	totalMin, totalMax := all[0].totalDur, all[0].totalDur
+	var setupSum, simSum, postSum, totalSum time.Duration
+
+	for i := range all {
+		rs := &all[i]
+		setupSum += rs.setupDur
+		simSum += rs.simDur
+		postSum += rs.postDur
+		totalSum += rs.totalDur
+
+		if rs.setupDur < setupMin {
+			setupMin = rs.setupDur
+		}
+		if rs.setupDur > setupMax {
+			setupMax = rs.setupDur
+		}
+		if rs.simDur < simMin {
+			simMin = rs.simDur
+		}
+		if rs.simDur > simMax {
+			simMax = rs.simDur
+		}
+		if rs.postDur < postMin {
+			postMin = rs.postDur
+		}
+		if rs.postDur > postMax {
+			postMax = rs.postDur
+		}
+		if rs.totalDur < totalMin {
+			totalMin = rs.totalDur
+		}
+		if rs.totalDur > totalMax {
+			totalMax = rs.totalDur
+		}
+	}
+
+	setupAvg := setupSum / time.Duration(len(all))
+	simAvg := simSum / time.Duration(len(all))
+	postAvg := postSum / time.Duration(len(all))
+	totalAvg := totalSum / time.Duration(len(all))
+
+	fmt.Printf("=== Perf Summary (avg/min/max over %d runs) ===\n", len(all))
+	fmt.Printf("setup: %s / %s / %s\n", setupAvg, setupMin, setupMax)
+	fmt.Printf("sim:   %s / %s / %s\n", simAvg, simMin, simMax)
+	fmt.Printf("post:  %s / %s / %s\n", postAvg, postMin, postMax)
+	fmt.Printf("total: %s / %s / %s\n\n", totalAvg, totalMin, totalMax)
+}
+
+func printAggregateSoldierPerformance(agg *aggregateData) {
+	fmt.Println("\n=== Aggregate Soldier Performance ===")
+	type labelScore struct {
+		label    string
+		topGood  string
+		topBad   string
+		avgScore float64
+		survRate float64
+	}
+	rows := make([]labelScore, 0, len(agg.soldierAggs))
+	for label, ag := range agg.soldierAggs {
+		avgS := 0.0
+		if ag.count > 0 {
+			avgS = ag.scoreSum / float64(ag.count)
+		}
+		survR := 0.0
+		if ag.count > 0 {
+			survR = float64(ag.survived) / float64(ag.count) * 100
+		}
+		rows = append(rows, labelScore{label, topTrait(ag.good), topTrait(ag.bad), avgS, survR})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].label < rows[j].label
+	})
+	for _, r := range rows {
+		grade := game.PerfLetterGrade(r.avgScore)
+		fmt.Printf("  %s  %s (avg=%.1f)  survival=%.0f%%", r.label, grade, r.avgScore, r.survRate)
+		if r.topGood != "" {
+			fmt.Printf("  good=%s", r.topGood)
+		}
+		if r.topBad != "" {
+			fmt.Printf("  bad=%s", r.topBad)
+		}
+		fmt.Println()
+	}
+}
+
+func handleScenarioPsychEvent(
+	e *game.SimLogEntry,
+	firstDeathTick int,
+	stats *scenarioEventStats,
+	psychBySoldier map[string]scenarioPsychState,
+) {
+	ps := psychBySoldier[e.Soldier]
+	if ps.team == "" {
+		ps.team = e.Team
+	}
+
+	switch e.Key {
+	case "disobedience":
+		handleDisobedienceTransition(e, firstDeathTick, stats, &ps)
+	case "panic_retreat":
+		handlePanicTransition(e, firstDeathTick, stats, &ps)
+	case "surrender":
+		handleSurrenderTransition(e, firstDeathTick, stats, &ps)
+	}
+
+	psychBySoldier[e.Soldier] = ps
+	updatePeakRefusing(e.Tick, stats, psychBySoldier)
+}
+
+func handleDisobedienceTransition(
+	e *game.SimLogEntry,
+	firstDeathTick int,
+	stats *scenarioEventStats,
+	ps *scenarioPsychState,
+) {
+	stats.disobeyEvents++
+	stats.affected[e.Soldier] = struct{}{}
+	if strings.Contains(e.Value, "disobeying") {
+		stats.disobeyOnEvents++
+		ps.disobey = true
+		if stats.firstDisobeyOnTick < 0 {
+			stats.firstDisobeyOnTick = e.Tick
+		}
+		if firstDeathTick < 0 || e.Tick < firstDeathTick {
+			stats.disobeyOnPreDeath++
+		}
+		return
+	}
+	if strings.Contains(e.Value, "obeying") {
+		stats.disobeyOffEvents++
+		ps.disobey = false
+	}
+}
+
+func handlePanicTransition(
+	e *game.SimLogEntry,
+	firstDeathTick int,
+	stats *scenarioEventStats,
+	ps *scenarioPsychState,
+) {
+	stats.panicEvents++
+	stats.affected[e.Soldier] = struct{}{}
+	if strings.Contains(e.Value, "panic_retreat_on") {
+		stats.panicOnEvents++
+		ps.panic = true
+		if stats.firstPanicOnTick < 0 {
+			stats.firstPanicOnTick = e.Tick
+		}
+		if firstDeathTick < 0 || e.Tick < firstDeathTick {
+			stats.panicOnPreDeath++
+		}
+		return
+	}
+	if strings.Contains(e.Value, "panic_retreat_off") {
+		stats.panicOffEvents++
+		ps.panic = false
+	}
+}
+
+func handleSurrenderTransition(
+	e *game.SimLogEntry,
+	firstDeathTick int,
+	stats *scenarioEventStats,
+	ps *scenarioPsychState,
+) {
+	stats.surrenderEvents++
+	stats.affected[e.Soldier] = struct{}{}
+	if strings.Contains(e.Value, "surrender_on") {
+		stats.surrenderOnEvents++
+		ps.surrender = true
+		if stats.firstSurrenderOnTick < 0 {
+			stats.firstSurrenderOnTick = e.Tick
+		}
+		if firstDeathTick < 0 || e.Tick < firstDeathTick {
+			stats.surrenderOnPreDeath++
+		}
+		return
+	}
+	if strings.Contains(e.Value, "surrender_off") {
+		stats.surrenderOffEvents++
+		ps.surrender = false
+	}
+}
+
+func updatePeakRefusing(
+	tick int,
+	stats *scenarioEventStats,
+	psychBySoldier map[string]scenarioPsychState,
+) {
+	curRefusing := 0
+	curRefusingRed := 0
+	curRefusingBlue := 0
+	for _, st := range psychBySoldier {
+		if !(st.disobey || st.panic || st.surrender) {
+			continue
+		}
+		curRefusing++
+		if st.team == "red" {
+			curRefusingRed++
+		} else if st.team == "blue" {
+			curRefusingBlue++
+		}
+	}
+	if curRefusing <= stats.peakRefusing {
+		return
+	}
+	stats.peakRefusing = curRefusing
+	stats.peakRefusingRed = curRefusingRed
+	stats.peakRefusingBlue = curRefusingBlue
+	stats.peakRefusingTick = tick
+}
+
+func orderedProximityKey(a, b string) struct{ soldier1, soldier2 string } {
+	if a < b {
+		return struct{ soldier1, soldier2 string }{soldier1: a, soldier2: b}
+	}
+	return struct{ soldier1, soldier2 string }{soldier1: b, soldier2: a}
+}
+
+func countStallOverlap(left, right []stalledEvent) int {
+	overlap := 0
+	for i := range left {
+		for j := range right {
+			if abs(left[i].tick-right[j].tick) < 60 { // Within 1 second.
+				overlap++
+			}
+		}
+	}
+	return overlap
 }
 
 type goalChange struct {
-	tick     int
 	fromGoal string
 	toGoal   string
+	tick     int
 }
 
 type stateChange struct {
-	tick      int
 	fromState string
 	toState   string
+	tick      int
 }
 
 type stalledEvent struct {
-	tick   int
 	goal   string
 	intent string
 	moved  float64
+	tick   int
 }
 
 type detachedEvent struct {
-	tick       int
-	leaderDist float64
 	goal       string
 	intent     string
+	leaderDist float64
+	tick       int
 }
 
 type runStats struct {
-	runIndex int
-	seed     int64
-	ticks    int
+	outcomeReason       game.BattleOutcomeReason
+	affected            map[string]struct{}
+	windowSummary       *game.WindowReport
+	stalemateReason     string
+	grades              []game.SoldierGrade
+	soldierPerf         []soldierPerformance
+	problematicSoldiers []soldierPerformance
 
 	setupDur time.Duration
 	simDur   time.Duration
 	postDur  time.Duration
 	totalDur time.Duration
 
+	seed int64
+
+	runIndex             int
+	ticks                int
 	firstContactTick     int
 	firstEngageTick      int
 	firstRegroupTick     int
@@ -85,13 +408,11 @@ type runStats struct {
 	firstDisobeyOnTick   int
 	firstPanicOnTick     int
 	firstSurrenderOnTick int
-
-	intentChanges int
-	goalChanges   int
-	stateChanges  int
-	contactNew    int
-	contactLost   int
-
+	intentChanges        int
+	goalChanges          int
+	stateChanges         int
+	contactNew           int
+	contactLost          int
 	stalledEvents        int
 	detachedEvents       int
 	disobeyEvents        int
@@ -108,28 +429,17 @@ type runStats struct {
 	surrenderOnPreDeath  int
 	cohesionBreakEvents  int
 	cohesionReformEvents int
-	affected             map[string]struct{}
 	peakRefusing         int
 	peakRefusingRed      int
 	peakRefusingBlue     int
 	peakRefusingTick     int
+	redTotal             int
+	blueTotal            int
+	redSurvivors         int
+	blueSurvivors        int
 
-	windowSummary *game.WindowReport
-	grades        []game.SoldierGrade
-
-	redTotal      int
-	blueTotal     int
-	redSurvivors  int
-	blueSurvivors int
-
-	stalemate       bool
-	stalemateReason string
-
-	outcome       game.BattleOutcome
-	outcomeReason game.BattleOutcomeReason
-
-	soldierPerf         []soldierPerformance
-	problematicSoldiers []soldierPerformance
+	outcome   game.BattleOutcome
+	stalemate bool
 }
 
 const (
@@ -145,7 +455,8 @@ const (
 func analyzeSoldierPerformance(entries []game.SimLogEntry, grades []game.SoldierGrade, ticks int) []soldierPerformance {
 	perfMap := make(map[string]*soldierPerformance)
 
-	for _, g := range grades {
+	for i := range grades {
+		g := grades[i]
 		perfMap[g.Label] = &soldierPerformance{
 			label:      g.Label,
 			team:       g.Team,
@@ -167,69 +478,13 @@ func analyzeSoldierPerformance(entries []game.SimLogEntry, grades []game.Soldier
 
 		switch e.Category {
 		case "effectiveness":
-			if e.Key == "stalled_in_combat" {
-				stalledByLabel[e.Soldier]++
-				// Parse stalled event details
-				goal := extractField(e.Value, "goal=")
-				intent := extractField(e.Value, "intent=")
-				moved := extractFloatField(e.Value, "moved=")
-				perf.stalledEvents = append(perf.stalledEvents, stalledEvent{
-					tick:   e.Tick,
-					goal:   goal,
-					intent: intent,
-					moved:  moved,
-				})
-			} else if e.Key == "detached_from_engagement" {
-				detachedByLabel[e.Soldier]++
-				goal := extractField(e.Value, "goal=")
-				intent := extractField(e.Value, "intent=")
-				leaderDist := extractFloatField(e.Value, "leader_dist=")
-				perf.detachedEvents = append(perf.detachedEvents, detachedEvent{
-					tick:       e.Tick,
-					leaderDist: leaderDist,
-					goal:       goal,
-					intent:     intent,
-				})
-			}
+			handleEffectivenessEvent(&e, perf, stalledByLabel, detachedByLabel)
 		case "vision":
-			if e.Key == "contact_new" {
-				contactByLabel[e.Soldier]++
-				perf.sawEnemyTicks++
-			}
+			handleVisionEvent(&e, perf, contactByLabel)
 		case "goal":
-			if e.Key == "change" {
-				parts := strings.Split(e.Value, " → ")
-				if len(parts) == 2 {
-					from := strings.TrimSpace(parts[0])
-					to := strings.TrimSpace(parts[1])
-					if prev, exists := prevGoal[e.Soldier]; exists && prev != from {
-						from = prev
-					}
-					perf.goalChanges = append(perf.goalChanges, goalChange{
-						tick:     e.Tick,
-						fromGoal: from,
-						toGoal:   to,
-					})
-					prevGoal[e.Soldier] = to
-				}
-			}
+			handleGoalChangeEvent(&e, perf, prevGoal)
 		case "state":
-			if e.Key == "change" {
-				parts := strings.Split(e.Value, " → ")
-				if len(parts) == 2 {
-					from := strings.TrimSpace(parts[0])
-					to := strings.TrimSpace(parts[1])
-					if prev, exists := prevState[e.Soldier]; exists && prev != from {
-						from = prev
-					}
-					perf.stateChanges = append(perf.stateChanges, stateChange{
-						tick:      e.Tick,
-						fromState: from,
-						toState:   to,
-					})
-					prevState[e.Soldier] = to
-				}
-			}
+			handleStateChangeEvent(&e, perf, prevState)
 		}
 	}
 
@@ -261,6 +516,78 @@ func analyzeSoldierPerformance(entries []game.SimLogEntry, grades []game.Soldier
 	return result
 }
 
+func handleEffectivenessEvent(
+	e *game.SimLogEntry,
+	perf *soldierPerformance,
+	stalledByLabel map[string]int,
+	detachedByLabel map[string]int,
+) {
+	switch e.Key {
+	case "stalled_in_combat":
+		stalledByLabel[e.Soldier]++
+		perf.stalledEvents = append(perf.stalledEvents, stalledEvent{
+			tick:   e.Tick,
+			goal:   extractField(e.Value, "goal="),
+			intent: extractField(e.Value, "intent="),
+			moved:  extractFloatField(e.Value, "moved="),
+		})
+	case "detached_from_engagement":
+		detachedByLabel[e.Soldier]++
+		perf.detachedEvents = append(perf.detachedEvents, detachedEvent{
+			tick:       e.Tick,
+			leaderDist: extractFloatField(e.Value, "leader_dist="),
+			goal:       extractField(e.Value, "goal="),
+			intent:     extractField(e.Value, "intent="),
+		})
+	}
+}
+
+func handleVisionEvent(e *game.SimLogEntry, perf *soldierPerformance, contactByLabel map[string]int) {
+	if e.Key != "contact_new" {
+		return
+	}
+	contactByLabel[e.Soldier]++
+	perf.sawEnemyTicks++
+}
+
+func handleGoalChangeEvent(e *game.SimLogEntry, perf *soldierPerformance, prevGoal map[string]string) {
+	if e.Key != "change" {
+		return
+	}
+	from, to, ok := parseTransition(e.Value)
+	if !ok {
+		return
+	}
+	if prev, exists := prevGoal[e.Soldier]; exists && prev != from {
+		from = prev
+	}
+	perf.goalChanges = append(perf.goalChanges, goalChange{tick: e.Tick, fromGoal: from, toGoal: to})
+	prevGoal[e.Soldier] = to
+}
+
+func handleStateChangeEvent(e *game.SimLogEntry, perf *soldierPerformance, prevState map[string]string) {
+	if e.Key != "change" {
+		return
+	}
+	from, to, ok := parseTransition(e.Value)
+	if !ok {
+		return
+	}
+	if prev, exists := prevState[e.Soldier]; exists && prev != from {
+		from = prev
+	}
+	perf.stateChanges = append(perf.stateChanges, stateChange{tick: e.Tick, fromState: from, toState: to})
+	prevState[e.Soldier] = to
+}
+
+func parseTransition(value string) (string, string, bool) {
+	parts := strings.Split(value, " → ")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), true
+}
+
 func extractField(value, prefix string) string {
 	idx := strings.Index(value, prefix)
 	if idx < 0 {
@@ -287,6 +614,8 @@ func extractFloatField(value, prefix string) float64 {
 }
 
 func analyzeProximity(entries []game.SimLogEntry, perfMap map[string]*soldierPerformance, ticks int) {
+	_ = entries
+	_ = ticks
 	// Track which soldiers are frequently near each other during stalled periods
 	// This helps identify soldiers bouncing off each other
 	type proximityKey struct {
@@ -295,8 +624,6 @@ func analyzeProximity(entries []game.SimLogEntry, perfMap map[string]*soldierPer
 	}
 	proximityCount := make(map[proximityKey]int)
 
-	// For now, we'll use stalled events as a proxy for proximity issues
-	// In a full implementation, we'd track actual position data
 	for label, perf := range perfMap {
 		if len(perf.stalledEvents) == 0 {
 			continue
@@ -308,21 +635,10 @@ func analyzeProximity(entries []game.SimLogEntry, perfMap map[string]*soldierPer
 				continue
 			}
 
-			// Count overlapping stalled periods
-			overlap := 0
-			for _, se := range perf.stalledEvents {
-				for _, ose := range otherPerf.stalledEvents {
-					if abs(se.tick-ose.tick) < 60 { // Within 1 second
-						overlap++
-					}
-				}
-			}
+			overlap := countStallOverlap(perf.stalledEvents, otherPerf.stalledEvents)
 
 			if overlap > 0 {
-				key := proximityKey{soldier1: label, soldier2: otherLabel}
-				if label > otherLabel {
-					key = proximityKey{soldier1: otherLabel, soldier2: label}
-				}
+				key := orderedProximityKey(label, otherLabel)
 				proximityCount[key] += overlap
 			}
 		}
@@ -389,7 +705,7 @@ func main() {
 		seed := seedBase + int64(i)*seedStep
 		stats := runScenarioMutualAdvance(i+1, seed, ticks)
 		all = append(all, stats)
-		printRun(stats)
+		printRun(&stats)
 	}
 
 	printAggregate(all)
@@ -427,143 +743,15 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 
 	entries := ts.SimLog.Entries()
 	firstDeathTick := firstTick(entries, "state", "change", "→ dead")
-	affected := map[string]struct{}{}
-	stalledEvents := 0
-	detachedEvents := 0
-	disobeyEvents := 0
-	panicEvents := 0
-	surrenderEvents := 0
-	disobeyOnEvents := 0
-	disobeyOffEvents := 0
-	panicOnEvents := 0
-	panicOffEvents := 0
-	surrenderOnEvents := 0
-	surrenderOffEvents := 0
-	disobeyOnPreDeath := 0
-	panicOnPreDeath := 0
-	surrenderOnPreDeath := 0
-	firstDisobeyOnTick := -1
-	firstPanicOnTick := -1
-	firstSurrenderOnTick := -1
-
-	type psychState struct {
-		team      string
-		disobey   bool
-		panic     bool
-		surrender bool
-	}
-	psychBySoldier := map[string]psychState{}
-	peakRefusing := 0
-	peakRefusingRed := 0
-	peakRefusingBlue := 0
-	peakRefusingTick := -1
-	cohesionBreakEvents := 0
-	cohesionReformEvents := 0
-	for _, e := range entries {
-		switch e.Category {
-		case "effectiveness":
-			switch e.Key {
-			case "stalled_in_combat":
-				stalledEvents++
-				affected[e.Soldier] = struct{}{}
-			case "detached_from_engagement":
-				detachedEvents++
-				affected[e.Soldier] = struct{}{}
-			}
-		case "psych":
-			ps := psychBySoldier[e.Soldier]
-			if ps.team == "" {
-				ps.team = e.Team
-			}
-			switch e.Key {
-			case "disobedience":
-				disobeyEvents++
-				affected[e.Soldier] = struct{}{}
-				if strings.Contains(e.Value, "disobeying") {
-					disobeyOnEvents++
-					ps.disobey = true
-					if firstDisobeyOnTick < 0 {
-						firstDisobeyOnTick = e.Tick
-					}
-					if firstDeathTick < 0 || e.Tick < firstDeathTick {
-						disobeyOnPreDeath++
-					}
-				} else if strings.Contains(e.Value, "obeying") {
-					disobeyOffEvents++
-					ps.disobey = false
-				}
-			case "panic_retreat":
-				panicEvents++
-				affected[e.Soldier] = struct{}{}
-				if strings.Contains(e.Value, "panic_retreat_on") {
-					panicOnEvents++
-					ps.panic = true
-					if firstPanicOnTick < 0 {
-						firstPanicOnTick = e.Tick
-					}
-					if firstDeathTick < 0 || e.Tick < firstDeathTick {
-						panicOnPreDeath++
-					}
-				} else if strings.Contains(e.Value, "panic_retreat_off") {
-					panicOffEvents++
-					ps.panic = false
-				}
-			case "surrender":
-				surrenderEvents++
-				affected[e.Soldier] = struct{}{}
-				if strings.Contains(e.Value, "surrender_on") {
-					surrenderOnEvents++
-					ps.surrender = true
-					if firstSurrenderOnTick < 0 {
-						firstSurrenderOnTick = e.Tick
-					}
-					if firstDeathTick < 0 || e.Tick < firstDeathTick {
-						surrenderOnPreDeath++
-					}
-				} else if strings.Contains(e.Value, "surrender_off") {
-					surrenderOffEvents++
-					ps.surrender = false
-				}
-			}
-			psychBySoldier[e.Soldier] = ps
-
-			curRefusing := 0
-			curRefusingRed := 0
-			curRefusingBlue := 0
-			for _, st := range psychBySoldier {
-				if !(st.disobey || st.panic || st.surrender) {
-					continue
-				}
-				curRefusing++
-				if st.team == "red" {
-					curRefusingRed++
-				} else if st.team == "blue" {
-					curRefusingBlue++
-				}
-			}
-			if curRefusing > peakRefusing {
-				peakRefusing = curRefusing
-				peakRefusingRed = curRefusingRed
-				peakRefusingBlue = curRefusingBlue
-				peakRefusingTick = e.Tick
-			}
-		case "squad":
-			if e.Key == "cohesion" {
-				if strings.Contains(e.Value, "broken") {
-					cohesionBreakEvents++
-				} else if strings.Contains(e.Value, "reformed") {
-					cohesionReformEvents++
-				}
-			}
-		}
-	}
+	eventStats := analyzeScenarioEvents(entries, firstDeathTick)
 
 	grades := ts.SoldierGrades()
 	redTotal, blueTotal, redSurvivors, blueSurvivors := teamSurvivalCounts(grades)
 
 	soldierPerf := analyzeSoldierPerformance(entries, grades, ticks)
-	var problematicSoldiers []soldierPerformance
-	for _, perf := range soldierPerf {
+	problematicSoldiers := make([]soldierPerformance, 0, len(soldierPerf))
+	for i := range soldierPerf {
+		perf := soldierPerf[i]
 		if perf.immobile || perf.neverSawEnemy || perf.neverInRange || perf.excessivelySeparated {
 			problematicSoldiers = append(problematicSoldiers, perf)
 		}
@@ -580,35 +768,35 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		firstPanicTick:       firstTick(entries, "psych", "panic_retreat", "panic_retreat_on"),
 		firstSurrenderTick:   firstTick(entries, "psych", "surrender", "surrender_on"),
 		firstBreakTick:       firstTick(entries, "squad", "cohesion", "broken"),
-		firstDisobeyOnTick:   firstDisobeyOnTick,
-		firstPanicOnTick:     firstPanicOnTick,
-		firstSurrenderOnTick: firstSurrenderOnTick,
+		firstDisobeyOnTick:   eventStats.firstDisobeyOnTick,
+		firstPanicOnTick:     eventStats.firstPanicOnTick,
+		firstSurrenderOnTick: eventStats.firstSurrenderOnTick,
 		intentChanges:        ts.SimLog.CountCategory("squad", "intent_change"),
 		goalChanges:          ts.SimLog.CountCategory("goal", "change"),
 		stateChanges:         ts.SimLog.CountCategory("state", "change"),
 		contactNew:           ts.SimLog.CountCategory("vision", "contact_new"),
 		contactLost:          ts.SimLog.CountCategory("vision", "contact_lost"),
-		stalledEvents:        stalledEvents,
-		detachedEvents:       detachedEvents,
-		disobeyEvents:        disobeyEvents,
-		panicEvents:          panicEvents,
-		surrenderEvents:      surrenderEvents,
-		disobeyOnEvents:      disobeyOnEvents,
-		disobeyOffEvents:     disobeyOffEvents,
-		panicOnEvents:        panicOnEvents,
-		panicOffEvents:       panicOffEvents,
-		surrenderOnEvents:    surrenderOnEvents,
-		surrenderOffEvents:   surrenderOffEvents,
-		disobeyOnPreDeath:    disobeyOnPreDeath,
-		panicOnPreDeath:      panicOnPreDeath,
-		surrenderOnPreDeath:  surrenderOnPreDeath,
-		cohesionBreakEvents:  cohesionBreakEvents,
-		cohesionReformEvents: cohesionReformEvents,
-		affected:             affected,
-		peakRefusing:         peakRefusing,
-		peakRefusingRed:      peakRefusingRed,
-		peakRefusingBlue:     peakRefusingBlue,
-		peakRefusingTick:     peakRefusingTick,
+		stalledEvents:        eventStats.stalledEvents,
+		detachedEvents:       eventStats.detachedEvents,
+		disobeyEvents:        eventStats.disobeyEvents,
+		panicEvents:          eventStats.panicEvents,
+		surrenderEvents:      eventStats.surrenderEvents,
+		disobeyOnEvents:      eventStats.disobeyOnEvents,
+		disobeyOffEvents:     eventStats.disobeyOffEvents,
+		panicOnEvents:        eventStats.panicOnEvents,
+		panicOffEvents:       eventStats.panicOffEvents,
+		surrenderOnEvents:    eventStats.surrenderOnEvents,
+		surrenderOffEvents:   eventStats.surrenderOffEvents,
+		disobeyOnPreDeath:    eventStats.disobeyOnPreDeath,
+		panicOnPreDeath:      eventStats.panicOnPreDeath,
+		surrenderOnPreDeath:  eventStats.surrenderOnPreDeath,
+		cohesionBreakEvents:  eventStats.cohesionBreakEvents,
+		cohesionReformEvents: eventStats.cohesionReformEvents,
+		affected:             eventStats.affected,
+		peakRefusing:         eventStats.peakRefusing,
+		peakRefusingRed:      eventStats.peakRefusingRed,
+		peakRefusingBlue:     eventStats.peakRefusingBlue,
+		peakRefusingTick:     eventStats.peakRefusingTick,
 		windowSummary:        ts.Reporter.WindowSummary(),
 		grades:               grades,
 		redTotal:             redTotal,
@@ -620,7 +808,7 @@ func runScenarioMutualAdvance(runIndex int, seed int64, ticks int) runStats {
 		setupDur:             setupDur,
 		simDur:               simDur,
 	}
-	rs.stalemate, rs.stalemateReason = detectStalemate(rs)
+	rs.stalemate, rs.stalemateReason = detectStalemate(&rs)
 
 	// Determine battle outcome
 	redSoldiers := ts.AllByTeam(game.TeamRed)
@@ -655,7 +843,7 @@ func firstTick(entries []game.SimLogEntry, category, key, contains string) int {
 	return -1
 }
 
-func printProblematicSoldiers(rs runStats) {
+func printProblematicSoldiers(rs *runStats) {
 	if len(rs.problematicSoldiers) == 0 {
 		return
 	}
@@ -663,20 +851,9 @@ func printProblematicSoldiers(rs runStats) {
 	fmt.Printf("\n=== PROBLEMATIC SOLDIERS (Run %d, seed=%d) ===\n", rs.runIndex, rs.seed)
 	fmt.Printf("Found %d soldiers with significant performance issues:\n\n", len(rs.problematicSoldiers))
 
-	for i, perf := range rs.problematicSoldiers {
-		issues := []string{}
-		if perf.immobile {
-			issues = append(issues, fmt.Sprintf("IMMOBILE(%.1f%%)", perf.immobilityPct))
-		}
-		if perf.neverSawEnemy {
-			issues = append(issues, "NEVER_SAW_ENEMY")
-		}
-		if perf.neverInRange {
-			issues = append(issues, "NEVER_IN_RANGE")
-		}
-		if perf.excessivelySeparated {
-			issues = append(issues, fmt.Sprintf("SEPARATED(%.1f%%)", perf.separationPct))
-		}
+	for i := range rs.problematicSoldiers {
+		perf := &rs.problematicSoldiers[i]
+		issues := performanceIssues(perf)
 
 		fmt.Printf("[%d] %s [%s] - %s\n", i+1, perf.label, teamLabel(perf.team), strings.Join(issues, ", "))
 
@@ -691,68 +868,13 @@ func printProblematicSoldiers(rs runStats) {
 				perf.proximityPct, perf.proximityPartner)
 		}
 
-		// Goal pattern analysis
-		if len(perf.goalChanges) > 0 {
-			goalFreq := make(map[string]int)
-			for _, gc := range perf.goalChanges {
-				goalFreq[gc.toGoal]++
-			}
-
-			// Find most common goals
-			topGoals := []string{}
-			for goal, count := range goalFreq {
-				if count > 2 || len(goalFreq) <= 3 {
-					topGoals = append(topGoals, fmt.Sprintf("%s(%d)", goal, count))
-				}
-			}
-
-			if len(topGoals) > 0 {
-				fmt.Printf("  Goal pattern: %d changes, frequent: %s\n", len(perf.goalChanges), strings.Join(topGoals, ", "))
-			}
-
-			// Detect thrashing (rapid goal changes)
-			if len(perf.goalChanges) > 10 {
-				thrashCount := 0
-				for j := 1; j < len(perf.goalChanges); j++ {
-					if perf.goalChanges[j].tick-perf.goalChanges[j-1].tick < 30 {
-						thrashCount++
-					}
-				}
-				if thrashCount > 5 {
-					fmt.Printf("  GOAL THRASHING: %d rapid goal changes detected (possible decision loop)\n", thrashCount)
-				}
-			}
-		}
-
-		// State pattern analysis
-		if len(perf.stateChanges) > 0 {
-			stateFreq := make(map[string]int)
-			for _, sc := range perf.stateChanges {
-				stateFreq[sc.toState]++
-			}
-
-			// Detect idle/cover loops
-			idleCount := stateFreq["idle"]
-			coverCount := stateFreq["cover"]
-			if idleCount > 5 && coverCount > 5 {
-				fmt.Printf("  IDLE/COVER LOOP: %d idle, %d cover transitions (possible stuck behavior)\n", idleCount, coverCount)
-			}
-		}
+		printGoalPattern(perf)
+		printStatePattern(perf)
 
 		// Stalled event analysis
 		if len(perf.stalledEvents) > 0 {
 			fmt.Printf("  Stalled events: %d occurrences\n", len(perf.stalledEvents))
-
-			// Sample first, middle, and last stalled events
-			samples := []stalledEvent{}
-			if len(perf.stalledEvents) <= 3 {
-				samples = perf.stalledEvents
-			} else {
-				samples = append(samples, perf.stalledEvents[0])
-				samples = append(samples, perf.stalledEvents[len(perf.stalledEvents)/2])
-				samples = append(samples, perf.stalledEvents[len(perf.stalledEvents)-1])
-			}
-
+			samples := sampleStalledEvents(perf.stalledEvents)
 			for _, se := range samples {
 				fmt.Printf("    tick=%d goal=%s intent=%s moved=%.2f\n", se.tick, se.goal, se.intent, se.moved)
 			}
@@ -765,17 +887,7 @@ func printProblematicSoldiers(rs runStats) {
 		// Detached event analysis
 		if len(perf.detachedEvents) > 0 {
 			fmt.Printf("  Detached events: %d occurrences\n", len(perf.detachedEvents))
-
-			// Sample detached events
-			samples := []detachedEvent{}
-			if len(perf.detachedEvents) <= 3 {
-				samples = perf.detachedEvents
-			} else {
-				samples = append(samples, perf.detachedEvents[0])
-				samples = append(samples, perf.detachedEvents[len(perf.detachedEvents)/2])
-				samples = append(samples, perf.detachedEvents[len(perf.detachedEvents)-1])
-			}
-
+			samples := sampleDetachedEvents(perf.detachedEvents)
 			for _, de := range samples {
 				fmt.Printf("    tick=%d leader_dist=%.1f goal=%s intent=%s\n", de.tick, de.leaderDist, de.goal, de.intent)
 			}
@@ -785,31 +897,110 @@ func printProblematicSoldiers(rs runStats) {
 			}
 		}
 
-		// Root cause summary
-		fmt.Printf("  DIAGNOSIS: ")
-		diagnoses := []string{}
+		fmt.Printf("  DIAGNOSIS: %s\n\n", strings.Join(buildDiagnoses(perf), "; "))
+	}
+}
 
-		if perf.neverSawEnemy && len(perf.stalledEvents) > 0 {
-			diagnoses = append(diagnoses, "Stuck before reaching combat")
+func performanceIssues(perf *soldierPerformance) []string {
+	issues := make([]string, 0, 4)
+	if perf.immobile {
+		issues = append(issues, fmt.Sprintf("IMMOBILE(%.1f%%)", perf.immobilityPct))
+	}
+	if perf.neverSawEnemy {
+		issues = append(issues, "NEVER_SAW_ENEMY")
+	}
+	if perf.neverInRange {
+		issues = append(issues, "NEVER_IN_RANGE")
+	}
+	if perf.excessivelySeparated {
+		issues = append(issues, fmt.Sprintf("SEPARATED(%.1f%%)", perf.separationPct))
+	}
+	return issues
+}
+
+func printGoalPattern(perf *soldierPerformance) {
+	if len(perf.goalChanges) == 0 {
+		return
+	}
+	goalFreq := make(map[string]int)
+	for _, gc := range perf.goalChanges {
+		goalFreq[gc.toGoal]++
+	}
+	topGoals := []string{}
+	for goal, count := range goalFreq {
+		if count > 2 || len(goalFreq) <= 3 {
+			topGoals = append(topGoals, fmt.Sprintf("%s(%d)", goal, count))
 		}
-		if perf.proximityPartner != "" {
-			diagnoses = append(diagnoses, fmt.Sprintf("Collision with %s", perf.proximityPartner))
+	}
+	if len(topGoals) > 0 {
+		fmt.Printf("  Goal pattern: %d changes, frequent: %s\n", len(perf.goalChanges), strings.Join(topGoals, ", "))
+	}
+	if len(perf.goalChanges) <= 10 {
+		return
+	}
+	thrashCount := 0
+	for j := 1; j < len(perf.goalChanges); j++ {
+		if perf.goalChanges[j].tick-perf.goalChanges[j-1].tick < 30 {
+			thrashCount++
 		}
-		if len(perf.goalChanges) > 15 {
-			diagnoses = append(diagnoses, "Decision thrashing")
-		}
-		if len(perf.stalledEvents) > 0 && perf.stalledEvents[0].goal == "regroup" {
+	}
+	if thrashCount > 5 {
+		fmt.Printf("  GOAL THRASHING: %d rapid goal changes detected (possible decision loop)\n", thrashCount)
+	}
+}
+
+func printStatePattern(perf *soldierPerformance) {
+	if len(perf.stateChanges) == 0 {
+		return
+	}
+	stateFreq := make(map[string]int)
+	for _, sc := range perf.stateChanges {
+		stateFreq[sc.toState]++
+	}
+	idleCount := stateFreq["idle"]
+	coverCount := stateFreq["cover"]
+	if idleCount > 5 && coverCount > 5 {
+		fmt.Printf("  IDLE/COVER LOOP: %d idle, %d cover transitions (possible stuck behavior)\n", idleCount, coverCount)
+	}
+}
+
+func sampleStalledEvents(events []stalledEvent) []stalledEvent {
+	if len(events) <= 3 {
+		return events
+	}
+	return []stalledEvent{events[0], events[len(events)/2], events[len(events)-1]}
+}
+
+func sampleDetachedEvents(events []detachedEvent) []detachedEvent {
+	if len(events) <= 3 {
+		return events
+	}
+	return []detachedEvent{events[0], events[len(events)/2], events[len(events)-1]}
+}
+
+func buildDiagnoses(perf *soldierPerformance) []string {
+	diagnoses := []string{}
+	if perf.neverSawEnemy && len(perf.stalledEvents) > 0 {
+		diagnoses = append(diagnoses, "Stuck before reaching combat")
+	}
+	if perf.proximityPartner != "" {
+		diagnoses = append(diagnoses, fmt.Sprintf("Collision with %s", perf.proximityPartner))
+	}
+	if len(perf.goalChanges) > 15 {
+		diagnoses = append(diagnoses, "Decision thrashing")
+	}
+	if len(perf.stalledEvents) > 0 {
+		switch perf.stalledEvents[0].goal {
+		case "regroup":
 			diagnoses = append(diagnoses, "Stuck during regroup")
-		}
-		if len(perf.stalledEvents) > 0 && perf.stalledEvents[0].goal == "move_to_contact" {
+		case "move_to_contact":
 			diagnoses = append(diagnoses, "Pathfinding/movement failure")
 		}
-		if len(diagnoses) == 0 {
-			diagnoses = append(diagnoses, "Unknown - review event patterns above")
-		}
-
-		fmt.Printf("%s\n\n", strings.Join(diagnoses, "; "))
 	}
+	if len(diagnoses) == 0 {
+		return []string{"Unknown - review event patterns above"}
+	}
+	return diagnoses
 }
 
 func teamLabel(team game.Team) string {
@@ -819,7 +1010,7 @@ func teamLabel(team game.Team) string {
 	return "blue"
 }
 
-func printRun(rs runStats) {
+func printRun(rs *runStats) {
 	fmt.Printf("--- Run %d (seed=%d) ---\n", rs.runIndex, rs.seed)
 	if rs.simDur > 0 {
 		ticksPerSec := float64(rs.ticks) / rs.simDur.Seconds()
@@ -893,260 +1084,219 @@ func printRun(rs runStats) {
 	fmt.Println()
 }
 
-func printAggregate(all []runStats) {
-	if len(all) > 0 {
-		setupMin, setupMax := all[0].setupDur, all[0].setupDur
-		simMin, simMax := all[0].simDur, all[0].simDur
-		postMin, postMax := all[0].postDur, all[0].postDur
-		totalMin, totalMax := all[0].totalDur, all[0].totalDur
-		var setupSum, simSum, postSum, totalSum time.Duration
+type soldierAgg struct {
+	good     map[string]int
+	bad      map[string]int
+	scoreSum float64
+	count    int
+	survived int
+}
 
-		for _, rs := range all {
-			setupSum += rs.setupDur
-			simSum += rs.simDur
-			postSum += rs.postDur
-			totalSum += rs.totalDur
+type aggregateData struct {
+	affectedGlobal map[string]struct{}
+	soldierAggs    map[string]*soldierAgg
+	contactTicks   []int
+	engageTicks    []int
+	deathTicks     []int
+	panicTicks     []int
+	surrenderTicks []int
+	breakTicks     []int
 
-			if rs.setupDur < setupMin {
-				setupMin = rs.setupDur
-			}
-			if rs.setupDur > setupMax {
-				setupMax = rs.setupDur
-			}
-			if rs.simDur < simMin {
-				simMin = rs.simDur
-			}
-			if rs.simDur > simMax {
-				simMax = rs.simDur
-			}
-			if rs.postDur < postMin {
-				postMin = rs.postDur
-			}
-			if rs.postDur > postMax {
-				postMax = rs.postDur
-			}
-			if rs.totalDur < totalMin {
-				totalMin = rs.totalDur
-			}
-			if rs.totalDur > totalMax {
-				totalMax = rs.totalDur
-			}
-		}
+	totalStalled             int
+	totalDetached            int
+	totalDisobey             int
+	totalPanic               int
+	totalSurrender           int
+	totalDisobeyOn           int
+	totalDisobeyOff          int
+	totalPanicOn             int
+	totalPanicOff            int
+	totalSurrenderOn         int
+	totalSurrenderOff        int
+	totalDisobeyOnPreDeath   int
+	totalPanicOnPreDeath     int
+	totalSurrenderOnPreDeath int
+	totalPeakRefusing        int
+	totalPeakRefusingRed     int
+	totalPeakRefusingBlue    int
+	totalBreak               int
+	totalReform              int
+	totalIntent              int
+	totalGoal                int
+	totalState               int
+	totalContactNew          int
+	totalContactLost         int
+	totalRedSurvivors        int
+	totalBlueSurvivors       int
+	totalRedSoldiers         int
+	totalBlueSoldiers        int
+	stalemateRuns            int
+	redVictories             int
+	blueVictories            int
+	draws                    int
+	inconclusives            int
+}
 
-		setupAvg := setupSum / time.Duration(len(all))
-		simAvg := simSum / time.Duration(len(all))
-		postAvg := postSum / time.Duration(len(all))
-		totalAvg := totalSum / time.Duration(len(all))
-
-		fmt.Printf("=== Perf Summary (avg/min/max over %d runs) ===\n", len(all))
-		fmt.Printf("setup: %s / %s / %s\n", setupAvg, setupMin, setupMax)
-		fmt.Printf("sim:   %s / %s / %s\n", simAvg, simMin, simMax)
-		fmt.Printf("post:  %s / %s / %s\n", postAvg, postMin, postMax)
-		fmt.Printf("total: %s / %s / %s\n\n", totalAvg, totalMin, totalMax)
+func newAggregateData(runs int) *aggregateData {
+	return &aggregateData{
+		contactTicks:   make([]int, 0, runs),
+		engageTicks:    make([]int, 0, runs),
+		deathTicks:     make([]int, 0, runs),
+		panicTicks:     make([]int, 0, runs),
+		surrenderTicks: make([]int, 0, runs),
+		breakTicks:     make([]int, 0, runs),
+		affectedGlobal: map[string]struct{}{},
+		soldierAggs:    map[string]*soldierAgg{},
 	}
+}
 
-	totalStalled := 0
-	totalDetached := 0
-	totalDisobey := 0
-	totalPanic := 0
-	totalSurrender := 0
-	totalDisobeyOn := 0
-	totalDisobeyOff := 0
-	totalPanicOn := 0
-	totalPanicOff := 0
-	totalSurrenderOn := 0
-	totalSurrenderOff := 0
-	totalDisobeyOnPreDeath := 0
-	totalPanicOnPreDeath := 0
-	totalSurrenderOnPreDeath := 0
-	totalPeakRefusing := 0
-	totalPeakRefusingRed := 0
-	totalPeakRefusingBlue := 0
-	totalBreak := 0
-	totalReform := 0
-	totalIntent := 0
-	totalGoal := 0
-	totalState := 0
-	totalContactNew := 0
-	totalContactLost := 0
-	totalRedSurvivors := 0
-	totalBlueSurvivors := 0
-	totalRedSoldiers := 0
-	totalBlueSoldiers := 0
-	stalemateRuns := 0
-	redVictories := 0
-	blueVictories := 0
-	draws := 0
-	inconclusives := 0
+func accumulateRun(rs *runStats, agg *aggregateData) {
+	accumulateCounters(rs, agg)
+	accumulateOutcome(rs, agg)
+	appendPhaseTicks(rs, agg)
+	mergeAffected(rs, agg)
+	accumulateGrades(rs, agg)
+}
 
-	contactTicks := make([]int, 0, len(all))
-	engageTicks := make([]int, 0, len(all))
-	deathTicks := make([]int, 0, len(all))
-	panicTicks := make([]int, 0, len(all))
-	surrenderTicks := make([]int, 0, len(all))
-	breakTicks := make([]int, 0, len(all))
-	affectedGlobal := map[string]struct{}{}
+func accumulateCounters(rs *runStats, agg *aggregateData) {
+	agg.totalStalled += rs.stalledEvents
+	agg.totalDetached += rs.detachedEvents
+	agg.totalDisobey += rs.disobeyEvents
+	agg.totalPanic += rs.panicEvents
+	agg.totalSurrender += rs.surrenderEvents
+	agg.totalDisobeyOn += rs.disobeyOnEvents
+	agg.totalDisobeyOff += rs.disobeyOffEvents
+	agg.totalPanicOn += rs.panicOnEvents
+	agg.totalPanicOff += rs.panicOffEvents
+	agg.totalSurrenderOn += rs.surrenderOnEvents
+	agg.totalSurrenderOff += rs.surrenderOffEvents
+	agg.totalDisobeyOnPreDeath += rs.disobeyOnPreDeath
+	agg.totalPanicOnPreDeath += rs.panicOnPreDeath
+	agg.totalSurrenderOnPreDeath += rs.surrenderOnPreDeath
+	agg.totalPeakRefusing += rs.peakRefusing
+	agg.totalPeakRefusingRed += rs.peakRefusingRed
+	agg.totalPeakRefusingBlue += rs.peakRefusingBlue
+	agg.totalBreak += rs.cohesionBreakEvents
+	agg.totalReform += rs.cohesionReformEvents
+	agg.totalIntent += rs.intentChanges
+	agg.totalGoal += rs.goalChanges
+	agg.totalState += rs.stateChanges
+	agg.totalContactNew += rs.contactNew
+	agg.totalContactLost += rs.contactLost
+	agg.totalRedSurvivors += rs.redSurvivors
+	agg.totalBlueSurvivors += rs.blueSurvivors
+	agg.totalRedSoldiers += rs.redTotal
+	agg.totalBlueSoldiers += rs.blueTotal
+}
 
-	// Aggregate per-soldier scores across runs.
-	type soldierAgg struct {
-		scoreSum float64
-		count    int
-		survived int
-		good     map[string]int
-		bad      map[string]int
+func accumulateOutcome(rs *runStats, agg *aggregateData) {
+	if rs.stalemate {
+		agg.stalemateRuns++
 	}
-	soldierAggs := map[string]*soldierAgg{}
+	switch rs.outcome {
+	case game.OutcomeRedVictory:
+		agg.redVictories++
+	case game.OutcomeBlueVictory:
+		agg.blueVictories++
+	case game.OutcomeDraw:
+		agg.draws++
+	case game.OutcomeInconclusive:
+		agg.inconclusives++
+	}
+}
 
-	for _, rs := range all {
-		totalStalled += rs.stalledEvents
-		totalDetached += rs.detachedEvents
-		totalDisobey += rs.disobeyEvents
-		totalPanic += rs.panicEvents
-		totalSurrender += rs.surrenderEvents
-		totalDisobeyOn += rs.disobeyOnEvents
-		totalDisobeyOff += rs.disobeyOffEvents
-		totalPanicOn += rs.panicOnEvents
-		totalPanicOff += rs.panicOffEvents
-		totalSurrenderOn += rs.surrenderOnEvents
-		totalSurrenderOff += rs.surrenderOffEvents
-		totalDisobeyOnPreDeath += rs.disobeyOnPreDeath
-		totalPanicOnPreDeath += rs.panicOnPreDeath
-		totalSurrenderOnPreDeath += rs.surrenderOnPreDeath
-		totalPeakRefusing += rs.peakRefusing
-		totalPeakRefusingRed += rs.peakRefusingRed
-		totalPeakRefusingBlue += rs.peakRefusingBlue
-		totalBreak += rs.cohesionBreakEvents
-		totalReform += rs.cohesionReformEvents
-		totalIntent += rs.intentChanges
-		totalGoal += rs.goalChanges
-		totalState += rs.stateChanges
-		totalContactNew += rs.contactNew
-		totalContactLost += rs.contactLost
-		totalRedSurvivors += rs.redSurvivors
-		totalBlueSurvivors += rs.blueSurvivors
-		totalRedSoldiers += rs.redTotal
-		totalBlueSoldiers += rs.blueTotal
-		if rs.stalemate {
-			stalemateRuns++
+func appendPhaseTicks(rs *runStats, agg *aggregateData) {
+	if rs.firstContactTick >= 0 {
+		agg.contactTicks = append(agg.contactTicks, rs.firstContactTick)
+	}
+	if rs.firstEngageTick >= 0 {
+		agg.engageTicks = append(agg.engageTicks, rs.firstEngageTick)
+	}
+	if rs.firstDeathTick >= 0 {
+		agg.deathTicks = append(agg.deathTicks, rs.firstDeathTick)
+	}
+	if rs.firstPanicTick >= 0 {
+		agg.panicTicks = append(agg.panicTicks, rs.firstPanicTick)
+	}
+	if rs.firstSurrenderTick >= 0 {
+		agg.surrenderTicks = append(agg.surrenderTicks, rs.firstSurrenderTick)
+	}
+	if rs.firstBreakTick >= 0 {
+		agg.breakTicks = append(agg.breakTicks, rs.firstBreakTick)
+	}
+}
+
+func mergeAffected(rs *runStats, agg *aggregateData) {
+	for label := range rs.affected {
+		agg.affectedGlobal[label] = struct{}{}
+	}
+}
+
+func accumulateGrades(rs *runStats, agg *aggregateData) {
+	for j := range rs.grades {
+		g := rs.grades[j]
+		sa, ok := agg.soldierAggs[g.Label]
+		if !ok {
+			sa = &soldierAgg{good: map[string]int{}, bad: map[string]int{}}
+			agg.soldierAggs[g.Label] = sa
 		}
-		switch rs.outcome {
-		case game.OutcomeRedVictory:
-			redVictories++
-		case game.OutcomeBlueVictory:
-			blueVictories++
-		case game.OutcomeDraw:
-			draws++
-		case game.OutcomeInconclusive:
-			inconclusives++
+		sa.scoreSum += g.Score
+		sa.count++
+		if g.Survived {
+			sa.survived++
 		}
-		if rs.firstContactTick >= 0 {
-			contactTicks = append(contactTicks, rs.firstContactTick)
+		for _, t := range g.GoodTraits {
+			sa.good[t]++
 		}
-		if rs.firstEngageTick >= 0 {
-			engageTicks = append(engageTicks, rs.firstEngageTick)
-		}
-		if rs.firstDeathTick >= 0 {
-			deathTicks = append(deathTicks, rs.firstDeathTick)
-		}
-		if rs.firstPanicTick >= 0 {
-			panicTicks = append(panicTicks, rs.firstPanicTick)
-		}
-		if rs.firstSurrenderTick >= 0 {
-			surrenderTicks = append(surrenderTicks, rs.firstSurrenderTick)
-		}
-		if rs.firstBreakTick >= 0 {
-			breakTicks = append(breakTicks, rs.firstBreakTick)
-		}
-		for label := range rs.affected {
-			affectedGlobal[label] = struct{}{}
-		}
-		for _, g := range rs.grades {
-			ag, ok := soldierAggs[g.Label]
-			if !ok {
-				ag = &soldierAgg{good: map[string]int{}, bad: map[string]int{}}
-				soldierAggs[g.Label] = ag
-			}
-			ag.scoreSum += g.Score
-			ag.count++
-			if g.Survived {
-				ag.survived++
-			}
-			for _, t := range g.GoodTraits {
-				ag.good[t]++
-			}
-			for _, t := range g.BadTraits {
-				ag.bad[t]++
-			}
+		for _, t := range g.BadTraits {
+			sa.bad[t]++
 		}
 	}
+}
 
+func printAggregateMetrics(agg *aggregateData, runs int) {
 	fmt.Println("=== Aggregate AAR Inputs ===")
-	fmt.Printf("runs=%d\n", len(all))
+	fmt.Printf("runs=%d\n", runs)
 	fmt.Printf("avg_events_per_run: intent_change=%.1f goal_change=%.1f state_change=%.1f contact_new=%.1f contact_lost=%.1f\n",
-		avg(totalIntent, len(all)), avg(totalGoal, len(all)), avg(totalState, len(all)), avg(totalContactNew, len(all)), avg(totalContactLost, len(all)))
+		avg(agg.totalIntent, runs), avg(agg.totalGoal, runs), avg(agg.totalState, runs), avg(agg.totalContactNew, runs), avg(agg.totalContactLost, runs))
 	fmt.Printf("avg_effectiveness_per_run: stalled_in_combat=%.1f detached_from_engagement=%.1f\n",
-		avg(totalStalled, len(all)), avg(totalDetached, len(all)))
+		avg(agg.totalStalled, runs), avg(agg.totalDetached, runs))
 	fmt.Printf("avg_psych_events_per_run: disobedience=%.1f panic_retreat=%.1f surrender=%.1f squad_break=%.1f squad_reform=%.1f\n",
-		avg(totalDisobey, len(all)), avg(totalPanic, len(all)), avg(totalSurrender, len(all)), avg(totalBreak, len(all)), avg(totalReform, len(all)))
+		avg(agg.totalDisobey, runs), avg(agg.totalPanic, runs), avg(agg.totalSurrender, runs), avg(agg.totalBreak, runs), avg(agg.totalReform, runs))
 	fmt.Printf("avg_psych_refusal_transitions_per_run: disobey_on=%.1f disobey_off=%.1f panic_on=%.1f panic_off=%.1f surrender_on=%.1f surrender_off=%.1f\n",
-		avg(totalDisobeyOn, len(all)), avg(totalDisobeyOff, len(all)), avg(totalPanicOn, len(all)), avg(totalPanicOff, len(all)), avg(totalSurrenderOn, len(all)), avg(totalSurrenderOff, len(all)))
+		avg(agg.totalDisobeyOn, runs), avg(agg.totalDisobeyOff, runs), avg(agg.totalPanicOn, runs), avg(agg.totalPanicOff, runs), avg(agg.totalSurrenderOn, runs), avg(agg.totalSurrenderOff, runs))
 	fmt.Printf("avg_psych_refusal_onsets_pre_first_death_per_run: disobey_on=%.1f panic_on=%.1f surrender_on=%.1f\n",
-		avg(totalDisobeyOnPreDeath, len(all)), avg(totalPanicOnPreDeath, len(all)), avg(totalSurrenderOnPreDeath, len(all)))
+		avg(agg.totalDisobeyOnPreDeath, runs), avg(agg.totalPanicOnPreDeath, runs), avg(agg.totalSurrenderOnPreDeath, runs))
 	fmt.Printf("avg_peak_refusing_per_run: total=%.1f red=%.1f blue=%.1f\n",
-		avg(totalPeakRefusing, len(all)), avg(totalPeakRefusingRed, len(all)), avg(totalPeakRefusingBlue, len(all)))
+		avg(agg.totalPeakRefusing, runs), avg(agg.totalPeakRefusingRed, runs), avg(agg.totalPeakRefusingBlue, runs))
 	fmt.Printf("phase_marker_avg_ticks: first_contact=%s first_engage=%s first_death=%s first_panic=%s first_surrender=%s first_break=%s\n",
-		avgTickString(contactTicks), avgTickString(engageTicks), avgTickString(deathTicks), avgTickString(panicTicks), avgTickString(surrenderTicks), avgTickString(breakTicks))
-	fmt.Printf("unique_affected_labels=%d [%s]\n", len(affectedGlobal), joinSet(affectedGlobal))
-	fmt.Printf("stalemate_runs=%d/%d (%.1f%%)\n", stalemateRuns, len(all), avg(stalemateRuns*100, len(all)))
+		avgTickString(agg.contactTicks), avgTickString(agg.engageTicks), avgTickString(agg.deathTicks), avgTickString(agg.panicTicks), avgTickString(agg.surrenderTicks), avgTickString(agg.breakTicks))
+	fmt.Printf("unique_affected_labels=%d [%s]\n", len(agg.affectedGlobal), joinSet(agg.affectedGlobal))
+	fmt.Printf("stalemate_runs=%d/%d (%.1f%%)\n", agg.stalemateRuns, runs, avg(agg.stalemateRuns*100, runs))
 	fmt.Printf("battle_outcomes: red_victories=%d blue_victories=%d draws=%d inconclusive=%d\n",
-		redVictories, blueVictories, draws, inconclusives)
+		agg.redVictories, agg.blueVictories, agg.draws, agg.inconclusives)
 	fmt.Printf("outcome_percentages: red=%.1f%% blue=%.1f%% draw=%.1f%% inconclusive=%.1f%%\n",
-		avg(redVictories*100, len(all)), avg(blueVictories*100, len(all)),
-		avg(draws*100, len(all)), avg(inconclusives*100, len(all)))
-	if totalRedSoldiers > 0 && totalBlueSoldiers > 0 {
+		avg(agg.redVictories*100, runs), avg(agg.blueVictories*100, runs), avg(agg.draws*100, runs), avg(agg.inconclusives*100, runs))
+	if agg.totalRedSoldiers > 0 && agg.totalBlueSoldiers > 0 {
 		fmt.Printf("survival_rate: red=%.1f%% blue=%.1f%%\n",
-			float64(totalRedSurvivors)/float64(totalRedSoldiers)*100,
-			float64(totalBlueSurvivors)/float64(totalBlueSoldiers)*100,
+			float64(agg.totalRedSurvivors)/float64(agg.totalRedSoldiers)*100,
+			float64(agg.totalBlueSurvivors)/float64(agg.totalBlueSoldiers)*100,
 		)
 	}
+}
 
-	// Per-soldier aggregate performance.
-	fmt.Println("\n=== Aggregate Soldier Performance ===")
-	type labelScore struct {
-		label    string
-		avgScore float64
-		survRate float64
-		topGood  string
-		topBad   string
+func printAggregate(all []runStats) {
+	printPerfSummary(all)
+
+	agg := newAggregateData(len(all))
+
+	for i := range all {
+		accumulateRun(&all[i], agg)
 	}
-	var rows []labelScore
-	for label, ag := range soldierAggs {
-		avgS := 0.0
-		if ag.count > 0 {
-			avgS = ag.scoreSum / float64(ag.count)
-		}
-		survR := 0.0
-		if ag.count > 0 {
-			survR = float64(ag.survived) / float64(ag.count) * 100
-		}
-		tg := topTrait(ag.good)
-		tb := topTrait(ag.bad)
-		rows = append(rows, labelScore{label, avgS, survR, tg, tb})
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		return rows[i].label < rows[j].label
-	})
-	for _, r := range rows {
-		grade := game.PerfLetterGrade(r.avgScore)
-		fmt.Printf("  %s  %s (avg=%.1f)  survival=%.0f%%", r.label, grade, r.avgScore, r.survRate)
-		if r.topGood != "" {
-			fmt.Printf("  good=%s", r.topGood)
-		}
-		if r.topBad != "" {
-			fmt.Printf("  bad=%s", r.topBad)
-		}
-		fmt.Println()
-	}
+
+	printAggregateMetrics(agg, len(all))
+
+	printAggregateSoldierPerformance(agg)
 
 	// Team-level aggregate from last run's grades as representative.
 	if len(all) > 0 {
@@ -1155,7 +1305,7 @@ func printAggregate(all []runStats) {
 	}
 }
 
-func avg(sum int, n int) float64 {
+func avg(sum, n int) float64 {
 	if n <= 0 {
 		return 0
 	}
@@ -1197,14 +1347,16 @@ func topTrait(counts map[string]int) string {
 
 func collectAllGrades(all []runStats) []game.SoldierGrade {
 	var out []game.SoldierGrade
-	for _, rs := range all {
+	for i := range all {
+		rs := all[i]
 		out = append(out, rs.grades...)
 	}
 	return out
 }
 
 func teamSurvivalCounts(grades []game.SoldierGrade) (redTotal, blueTotal, redSurvivors, blueSurvivors int) {
-	for _, g := range grades {
+	for i := range grades {
+		g := grades[i]
 		switch g.Team {
 		case game.TeamRed:
 			redTotal++
@@ -1221,7 +1373,7 @@ func teamSurvivalCounts(grades []game.SoldierGrade) (redTotal, blueTotal, redSur
 	return redTotal, blueTotal, redSurvivors, blueSurvivors
 }
 
-func detectStalemate(rs runStats) (bool, string) {
+func detectStalemate(rs *runStats) (bool, string) {
 	if rs.redTotal <= 0 || rs.blueTotal <= 0 {
 		return false, "insufficient-team-data"
 	}

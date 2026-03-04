@@ -51,7 +51,7 @@ func TestLaboratory_MedicalStats_5Runs(t *testing.T) {
 	t.Logf("%s\n", sep)
 }
 
-func runLaboratoryMedicalStats(t *testing.T, seed int64) MedicalRunStats {
+func runLaboratoryMedicalStats(_t *testing.T, seed int64) MedicalRunStats {
 	startX := 100.0
 	startY := 300.0
 	targetX := 700.0
@@ -254,7 +254,7 @@ func TestLaboratory_InjuryResponse(t *testing.T) {
 	}
 }
 
-func runLaboratoryInjuryTest(t *testing.T, tc InjuryTestCase) InjuryObservation {
+func runLaboratoryInjuryTest(_t *testing.T, tc InjuryTestCase) InjuryObservation {
 	startX := 100.0
 	startY := 300.0
 	targetX := 700.0

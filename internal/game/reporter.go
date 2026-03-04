@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// reportWindowTicks is the default sliding window for recent-behaviour reports (~10s at 60TPS).
+// reportWindowTicks is the default sliding window for recent-behavior reports (~10s at 60TPS).
 const reportWindowTicks = 600
 
 // --- Snapshot types ---
@@ -381,7 +381,8 @@ func (r *SimReporter) WindowSummary() *WindowReport {
 	blueGoalTotal := make(map[GoalKind]float64)
 	var redTotal, blueTotal float64
 
-	for _, rpt := range window {
+	for i := range window {
+		rpt := &window[i]
 		for g, c := range rpt.RedGoals {
 			redGoalTotal[g] += float64(c)
 			redTotal += float64(c)
@@ -498,7 +499,7 @@ func (wr *WindowReport) Format() string {
 		return "No data collected yet.\n"
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "=== Behaviour Report (T=%d..%d, %d samples) ===\n",
+	fmt.Fprintf(&sb, "=== Behavior Report (T=%d..%d, %d samples) ===\n",
 		wr.FromTick, wr.ToTick, wr.SampleCount)
 
 	// Goal proportions.
@@ -665,5 +666,5 @@ func OutnumberedRatio(soldiers []*Soldier) (int, int, float64) {
 	return enemiesSeen, withContact, ratio
 }
 
-// ensure math import is used
+// Ensure math import is used.
 var _ = math.Max

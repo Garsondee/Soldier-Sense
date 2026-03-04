@@ -390,9 +390,10 @@ func (lv *LaboratoryVisualMode) drawEvents(screen *ebiten.Image) {
 		}
 
 		eventColor := color.RGBA{R: 180, G: 180, B: 180, A: 255}
-		if evt.EventType == "panic_retreat" || evt.EventType == "disobedience" {
+		switch evt.EventType {
+		case "panic_retreat", "disobedience":
 			eventColor = color.RGBA{R: 255, G: 200, B: 100, A: 255}
-		} else if evt.EventType == "first_contact" {
+		case "first_contact":
 			eventColor = color.RGBA{R: 255, G: 150, B: 150, A: 255}
 		}
 

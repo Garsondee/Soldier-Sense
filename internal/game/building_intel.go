@@ -28,7 +28,7 @@ func NewBuildingIntelMap() *BuildingIntelMap {
 // Called when shots are heard/seen from a building location.
 func (bim *BuildingIntelMap) UpdateFromGunfire(
 	footprintIdx int,
-	shooterX, shooterY float64,
+	_, _ float64,
 	footprints []rect,
 	tick int,
 	confidence float64,
@@ -57,7 +57,7 @@ func (bim *BuildingIntelMap) UpdateFromGunfire(
 // UpdateFromVisualContact records seeing an enemy in/near a building.
 func (bim *BuildingIntelMap) UpdateFromVisualContact(
 	footprintIdx int,
-	enemyX, enemyY float64,
+	_, _ float64,
 	footprints []rect,
 	tick int,
 ) {
@@ -101,7 +101,7 @@ func (bim *BuildingIntelMap) UpdateFromProximity(
 }
 
 // MarkCleared marks a building as cleared by friendly forces.
-func (bim *BuildingIntelMap) MarkCleared(footprintIdx int, tick int) {
+func (bim *BuildingIntelMap) MarkCleared(footprintIdx, tick int) {
 	intel, exists := bim.buildings[footprintIdx]
 	if !exists {
 		intel = &BuildingIntel{

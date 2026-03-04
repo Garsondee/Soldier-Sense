@@ -14,31 +14,32 @@ type DecisionTracker struct {
 
 // DecisionEntry captures one goal selection decision with utility scores.
 type DecisionEntry struct {
+	Utilities  map[GoalKind]float64
+	Label      string
+	Context    DecisionContext
+	WinnerUtil float64
+	RunnerUtil float64
+	Margin     float64 // winner - runnerup
 	Tick       int
 	SoldierID  int
-	Label      string
 	Team       Team
 	PrevGoal   GoalKind
 	NewGoal    GoalKind
-	Utilities  map[GoalKind]float64
 	Winner     GoalKind
-	WinnerUtil float64
 	RunnerUp   GoalKind
-	RunnerUtil float64
-	Margin     float64 // winner - runnerup
-	Context    DecisionContext
 }
 
 // DecisionContext captures relevant state at decision time.
 type DecisionContext struct {
+	Fear   float64
+	Morale float64
+	Health float64
+
 	VisibleThreats   int
-	SquadHasContact  bool
 	IncomingFire     int
-	UnderSuppression bool
-	Fear             float64
-	Morale           float64
-	Health           float64
 	SquadIntent      SquadIntentKind
+	SquadHasContact  bool
+	UnderSuppression bool
 	SquadBroken      bool
 	IsActivated      bool
 }
@@ -59,7 +60,7 @@ func (dt *DecisionTracker) Record(tick int, s *Soldier, prevGoal, newGoal GoalKi
 		goal GoalKind
 		util float64
 	}
-	var scores []scored
+	scores := make([]scored, 0, len(utilities))
 	for g, u := range utilities {
 		scores = append(scores, scored{g, u})
 	}
@@ -116,12 +117,13 @@ func (dt *DecisionTracker) Entries() []DecisionEntry {
 }
 
 // FindOscillations detects goal oscillations (A→B→A within N ticks).
-func (dt *DecisionTracker) FindOscillations(soldierID int, windowTicks int) []OscillationReport {
+func (dt *DecisionTracker) FindOscillations(soldierID, windowTicks int) []OscillationReport {
 	var reports []OscillationReport
 
 	// Group entries by soldier
 	soldierEntries := make(map[int][]DecisionEntry)
-	for _, e := range dt.entries {
+	for i := range dt.entries {
+		e := dt.entries[i]
 		soldierEntries[e.SoldierID] = append(soldierEntries[e.SoldierID], e)
 	}
 
@@ -159,16 +161,16 @@ func (dt *DecisionTracker) FindOscillations(soldierID int, windowTicks int) []Os
 
 // OscillationReport describes a detected goal oscillation.
 type OscillationReport struct {
-	SoldierID  int
 	Label      string
+	Entries    []DecisionEntry
+	AvgMarginA float64 // average utility margin when selecting A
+	AvgMarginB float64 // average utility margin when selecting B
+	SoldierID  int
 	StartTick  int
 	EndTick    int
 	Duration   int
 	GoalA      GoalKind
 	GoalB      GoalKind
-	Entries    []DecisionEntry
-	AvgMarginA float64 // average utility margin when selecting A
-	AvgMarginB float64 // average utility margin when selecting B
 }
 
 // String formats the oscillation report.
@@ -181,7 +183,8 @@ func (or OscillationReport) String() string {
 // FindLowMarginDecisions finds decisions where winner barely beat runner-up.
 func (dt *DecisionTracker) FindLowMarginDecisions(threshold float64) []DecisionEntry {
 	var low []DecisionEntry
-	for _, e := range dt.entries {
+	for i := range dt.entries {
+		e := dt.entries[i]
 		if e.Margin < threshold && e.Margin > 0 {
 			low = append(low, e)
 		}
@@ -192,7 +195,8 @@ func (dt *DecisionTracker) FindLowMarginDecisions(threshold float64) []DecisionE
 // FindGoalChanges returns all entries where goal actually changed.
 func (dt *DecisionTracker) FindGoalChanges() []DecisionEntry {
 	var changes []DecisionEntry
-	for _, e := range dt.entries {
+	for i := range dt.entries {
+		e := dt.entries[i]
 		if e.PrevGoal != e.NewGoal {
 			changes = append(changes, e)
 		}
@@ -203,7 +207,8 @@ func (dt *DecisionTracker) FindGoalChanges() []DecisionEntry {
 // SummarizeOscillations generates a report of all oscillations found.
 func (dt *DecisionTracker) SummarizeOscillations(windowTicks int) string {
 	soldierIDs := make(map[int]bool)
-	for _, e := range dt.entries {
+	for i := range dt.entries {
+		e := dt.entries[i]
 		soldierIDs[e.SoldierID] = true
 	}
 

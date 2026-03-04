@@ -6,29 +6,35 @@ import "math"
 type BuildingEntryState int
 
 const (
-	EntryStateNone        BuildingEntryState = iota
-	EntryStateApproaching                    // squad moving toward building
-	EntryStateStacking                       // entry team at door, overwatch covering
-	EntryStateBreaching                      // entry team entering
-	EntryStateClearing                       // inside, clearing rooms
-	EntryStateSecured                        // building cleared and occupied
+	// EntryStateNone indicates no active entry process.
+	EntryStateNone BuildingEntryState = iota
+	// EntryStateApproaching indicates the squad is moving toward the building.
+	EntryStateApproaching // squad moving toward building
+	// EntryStateStacking indicates the entry team is staged at the door.
+	EntryStateStacking // entry team at door, overwatch covering
+	// EntryStateBreaching indicates the entry team is crossing the threshold.
+	EntryStateBreaching // entry team entering
+	// EntryStateClearing indicates the interior is being cleared.
+	EntryStateClearing // inside, clearing rooms
+	// EntryStateSecured indicates the building is cleared and occupied.
+	EntryStateSecured // building cleared and occupied
 )
 
 // BuildingEntryPlan coordinates squad entry into a building.
 type BuildingEntryPlan struct {
-	TargetBuildingIdx int
-	State             BuildingEntryState
 	EntryTeam         []*Soldier // soldiers designated to enter
 	OverwatchTeam     []*Soldier // soldiers providing cover
 	EntryPointX       float64    // door/breach point
 	EntryPointY       float64
+	TargetBuildingIdx int
 	InitiatedTick     int
 	StateChangeTick   int
+	State             BuildingEntryState
 }
 
 // CreateEntryPlan designates entry and overwatch teams for building assault.
-// Entry team: 2-3 soldiers with highest discipline
-// Overwatch team: remainder, provide suppressive fire
+// Entry team: 2-3 soldiers with highest discipline.
+// Overwatch team: remainder, provide suppressive fire.
 func CreateEntryPlan(
 	buildingIdx int,
 	footprints []rect,
@@ -113,11 +119,52 @@ func CreateEntryPlan(
 	}
 }
 
+func (plan *BuildingEntryPlan) entryTeamAllNearPoint() bool {
+	for _, s := range plan.EntryTeam {
+		if s.state == SoldierStateDead {
+			continue
+		}
+		dist := math.Hypot(s.x-plan.EntryPointX, s.y-plan.EntryPointY)
+		if dist > float64(cellSize)*3 {
+			return false
+		}
+	}
+	return true
+}
+
+func (plan *BuildingEntryPlan) entryTeamAnyInside() bool {
+	for _, s := range plan.EntryTeam {
+		if s.state == SoldierStateDead {
+			continue
+		}
+		if s.blackboard.AtInterior {
+			return true
+		}
+	}
+	return false
+}
+
+func (plan *BuildingEntryPlan) entryTeamClearStatus() (allInside, anyThreats bool) {
+	allInside = true
+	for _, s := range plan.EntryTeam {
+		if s.state == SoldierStateDead {
+			continue
+		}
+		if !s.blackboard.AtInterior {
+			allInside = false
+		}
+		if s.blackboard.VisibleThreatCount() > 0 {
+			anyThreats = true
+		}
+	}
+	return allInside, anyThreats
+}
+
 // findBestEntryPoint identifies the best door/breach point for entry.
 // Prefers doors on the side away from enemy (safer approach).
 func findBestEntryPoint(
 	building rect,
-	squad []*Soldier,
+	_ []*Soldier,
 	enemyBearing float64,
 ) (float64, float64) {
 	// Building center
@@ -149,20 +196,7 @@ func (plan *BuildingEntryPlan) UpdateEntryState(tick int, footprints []rect) {
 
 	switch plan.State {
 	case EntryStateApproaching:
-		// Check if entry team is near entry point
-		allNear := true
-		for _, s := range plan.EntryTeam {
-			if s.state == SoldierStateDead {
-				continue
-			}
-			dist := math.Hypot(s.x-plan.EntryPointX, s.y-plan.EntryPointY)
-			if dist > float64(cellSize)*3 {
-				allNear = false
-				break
-			}
-		}
-
-		if allNear {
+		if plan.entryTeamAllNearPoint() {
 			plan.State = EntryStateStacking
 			plan.StateChangeTick = tick
 		}
@@ -176,39 +210,13 @@ func (plan *BuildingEntryPlan) UpdateEntryState(tick int, footprints []rect) {
 		}
 
 	case EntryStateBreaching:
-		// Check if entry team is inside building
-		anyInside := false
-		for _, s := range plan.EntryTeam {
-			if s.state == SoldierStateDead {
-				continue
-			}
-			if s.blackboard.AtInterior {
-				anyInside = true
-				break
-			}
-		}
-
-		if anyInside {
+		if plan.entryTeamAnyInside() {
 			plan.State = EntryStateClearing
 			plan.StateChangeTick = tick
 		}
 
 	case EntryStateClearing:
-		// Check if all entry team is inside and no visible threats
-		allInside := true
-		anyThreats := false
-
-		for _, s := range plan.EntryTeam {
-			if s.state == SoldierStateDead {
-				continue
-			}
-			if !s.blackboard.AtInterior {
-				allInside = false
-			}
-			if s.blackboard.VisibleThreatCount() > 0 {
-				anyThreats = true
-			}
-		}
+		allInside, anyThreats := plan.entryTeamClearStatus()
 
 		// Secured if all inside and no threats for 3+ seconds
 		elapsed := tick - plan.StateChangeTick

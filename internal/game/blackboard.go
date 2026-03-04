@@ -1,3 +1,4 @@
+// Package game contains the Soldier-Sense simulation domain and systems.
 package game
 
 import "math"
@@ -8,19 +9,32 @@ import "math"
 type GoalKind int
 
 const (
-	GoalAdvance           GoalKind = iota // push toward objective (far side of map)
-	GoalMaintainFormation                 // follow formation slot
-	GoalRegroup                           // rally on leader / tighten up
-	GoalHoldPosition                      // stay put, scan for threats
-	GoalSurvive                           // seek cover / break LOS / flee
-	GoalEngage                            // visible enemy: hold ground, face, shoot
-	GoalMoveToContact                     // no LOS but squad has contact: close distance
-	GoalFallback                          // retreat away from contact under fire
-	GoalFlank                             // move perpendicular to enemy then decision point
-	GoalOverwatch                         // hold a high-sightline position, scan for threats
-	GoalPeek                              // cautious peek around a corner or through a window
-	GoalHelpCasualty                      // render medical aid to wounded squad member
-	GoalSearch                            // cautious search of nearby dangerous/uncertain areas when not in contact
+	// GoalAdvance pushes toward the objective (far side of map).
+	GoalAdvance GoalKind = iota // push toward objective (far side of map)
+	// GoalMaintainFormation follows the assigned formation slot.
+	GoalMaintainFormation
+	// GoalRegroup rallies on the leader and tightens spacing.
+	GoalRegroup
+	// GoalHoldPosition stays put and scans for threats.
+	GoalHoldPosition
+	// GoalSurvive seeks cover, breaks line of sight, or flees.
+	GoalSurvive
+	// GoalEngage faces and fires at visible enemies.
+	GoalEngage
+	// GoalMoveToContact closes distance when squad has contact but no LOS.
+	GoalMoveToContact
+	// GoalFallback retreats away from contact while under fire.
+	GoalFallback
+	// GoalFlank moves perpendicular to enemy before re-evaluating.
+	GoalFlank
+	// GoalOverwatch holds a high-sightline scanning position.
+	GoalOverwatch
+	// GoalPeek performs a cautious corner/window peek.
+	GoalPeek
+	// GoalHelpCasualty renders aid to a wounded squad member.
+	GoalHelpCasualty
+	// GoalSearch scans nearby dangerous or uncertain areas when out of contact.
+	GoalSearch
 )
 
 func (g GoalKind) String() string {
@@ -54,7 +68,6 @@ func (g GoalKind) String() string {
 	default:
 		return "unknown"
 	}
-
 }
 
 func overwatchDistanceFactor(contactRange float64) float64 {
@@ -80,14 +93,23 @@ func overwatchDistanceFactor(contactRange float64) float64 {
 type OfficerCommandKind int
 
 const (
+	// CmdNone indicates no explicit active command.
 	CmdNone OfficerCommandKind = iota
+	// CmdMoveTo directs movement to a specific location.
 	CmdMoveTo
+	// CmdHold directs units to hold position.
 	CmdHold
+	// CmdRegroup directs units to regroup.
 	CmdRegroup
+	// CmdBoundForward directs alternating bound movement.
 	CmdBoundForward
+	// CmdForm directs a formation change.
 	CmdForm
+	// CmdFanOut directs lateral spacing increase.
 	CmdFanOut
+	// CmdAssault directs aggressive advance to contact.
 	CmdAssault
+	// CmdSearch directs deliberate area search.
 	CmdSearch
 )
 
@@ -118,9 +140,13 @@ func (oc OfficerCommandKind) String() string {
 type OfficerOrderState int
 
 const (
+	// OfficerOrderInactive indicates no active order.
 	OfficerOrderInactive OfficerOrderState = iota
+	// OfficerOrderActive indicates an active order.
 	OfficerOrderActive
+	// OfficerOrderExpired indicates an order timing out.
 	OfficerOrderExpired
+	// OfficerOrderCancelled indicates manual cancellation.
 	OfficerOrderCancelled
 )
 
@@ -139,8 +165,8 @@ type OfficerOrder struct {
 	State       OfficerOrderState
 }
 
-// IsActiveAt reports whether this order should currently influence behaviour.
-func (o OfficerOrder) IsActiveAt(tick int) bool {
+// IsActiveAt reports whether this order should currently influence behavior.
+func (o *OfficerOrder) IsActiveAt(tick int) bool {
 	if o.State != OfficerOrderActive || o.Kind == CmdNone {
 		return false
 	}
@@ -156,11 +182,16 @@ func (o OfficerOrder) IsActiveAt(tick int) bool {
 type SquadIntentKind int
 
 const (
-	IntentAdvance  SquadIntentKind = iota // move toward objective
-	IntentHold                            // maintain position, engage targets of opportunity
-	IntentRegroup                         // rally on leader
-	IntentWithdraw                        // pull back
-	IntentEngage                          // active firefight: spread tactically, move to contact
+	// IntentAdvance moves toward the objective.
+	IntentAdvance SquadIntentKind = iota
+	// IntentHold maintains position and engages targets of opportunity.
+	IntentHold
+	// IntentRegroup rallies on the leader.
+	IntentRegroup
+	// IntentWithdraw pulls back from contact.
+	IntentWithdraw
+	// IntentEngage spreads tactically and moves to contact in firefight.
+	IntentEngage
 )
 
 func (si SquadIntentKind) String() string {
@@ -184,249 +215,131 @@ func (si SquadIntentKind) String() string {
 
 // ThreatFact is a single remembered enemy contact on the blackboard.
 type ThreatFact struct {
-	Source     *Soldier // identity pointer — nil for old positional memories
-	X, Y       float64  // last known position
-	Confidence float64  // 0-1, decays over time
-	LastTick   int      // tick when last observed
-	IsVisible  bool     // true = currently in vision cone this tick
+	Source              *Soldier // identity pointer — nil for old positional memories
+	X, Y                float64  // last known position
+	Confidence          float64  // 0-1, decays over time
+	LastTick            int      // tick when last observed
+	IsVisible           bool     // true = currently in vision cone this tick
+	SpottingAccumulator float64  // 0-1, detection progress toward confirmation
 }
 
 // --- Blackboard ---
 
 // Blackboard is a soldier's personal working memory.
 type Blackboard struct {
-	Threats           []ThreatFact
-	CurrentGoal       GoalKind
-	SquadIntent       SquadIntentKind // set by leader via order
-	OrderReceived     bool            // true if an order was written this cycle
-	IncomingFireCount int             // shots received (hit or miss) this tick — reset each tick
+	Threats []ThreatFact
 
-	IrrelevantCoverTicks int // ticks spent in safe cover with poor contribution while squad is in combat motion
-
-	// Active officer-order signal propagated from squad leader.
-	OfficerOrderKind     OfficerCommandKind
-	OfficerOrderTargetX  float64
-	OfficerOrderTargetY  float64
-	OfficerOrderRadius   float64
-	OfficerOrderPriority float64 // 0..1
-	OfficerOrderStrength float64 // 0..1
-	OfficerOrderActive   bool
-	// OfficerOrderImmediate is true when this soldier obeys immediately this cycle.
-	OfficerOrderImmediate bool
-	// OfficerOrderObedienceChance is the 0..1 immediate-compliance probability
-	// derived from squad cohesion and local psych state.
+	OfficerOrderTargetX         float64
+	OfficerOrderTargetY         float64
+	OfficerOrderRadius          float64
+	OfficerOrderPriority        float64
+	OfficerOrderStrength        float64
 	OfficerOrderObedienceChance float64
+	SquadContactX               float64
+	SquadContactY               float64
+	RadioContactX               float64
+	RadioContactY               float64
+	SquadCasualtyRate           float64
+	SquadStress                 float64
+	SquadCohesion               float64
+	OrderMoveX                  float64
+	OrderMoveY                  float64
+	RetreatTargetX              float64
+	RetreatTargetY              float64
+	ShatterPressure             float64
+	ShatterThreshold            float64
+	DecisionDebt                float64
+	HysteresisMargin            float64
+	HeardGunfireX               float64
+	HeardGunfireY               float64
+	CombatMemoryStrength        float64
+	CombatMemoryX               float64
+	CombatMemoryY               float64
+	SearchDrive                 float64
+	SearchTargetX               float64
+	SearchTargetY               float64
+	FlankTargetX                float64
+	FlankTargetY                float64
+	LocalSightlineScore         float64
+	PositionDesirability        float64
+	BestNearbyX                 float64
+	BestNearbyY                 float64
+	BestNearbyScore             float64
+	ClaimedBuildingX            float64
+	ClaimedBuildingY            float64
+	ReinforceMemberX            float64
+	ReinforceMemberY            float64
+	FlankSide                   float64
+	SquadEnemyBearing           float64
+	OutnumberedFactor           float64
+	SquadPosture                float64
+	SquadAvgFear                float64
+	SquadFearDelta              float64
+	CloseAllyPressure           float64
+	SuppressLevel               float64
+	SuppressDir                 float64
 
-	// Internal models each soldier's personal tactical drive for this tick.
-	Internal SoldierInternalGoals
-
-	// Shared contact: squad leader writes the last-known enemy position so
-	// members without LOS can still move toward the fight.
-	SquadContactX   float64
-	SquadContactY   float64
-	SquadHasContact bool // true when the squad has an active known contact
-	// Radio-derived contact and comms metadata (Phase A).
-	RadioHasContact      bool
-	RadioContactX        float64
-	RadioContactY        float64
-	RadioContactTick     int
-	RadioLastHeardTick   int
-	RadioLastSenderID    int
+	CurrentGoal          GoalKind
+	SquadIntent          SquadIntentKind
+	OfficerOrderKind     OfficerCommandKind
 	RadioLastMessageType RadioMessageType
-	UnresponsiveMembers  int
-	// SquadBroken indicates cohesion collapse (members act more autonomously).
-	SquadBroken bool
-	// SquadCasualtyRate is dead_members / total_members.
-	SquadCasualtyRate float64
-	// SquadStress is a 0..1 aggregate stress pressure for the squad.
-	SquadStress float64
-	// SquadCohesion is the 0..1 cohesion signal from squad-level state.
-	SquadCohesion float64
-	// SquadHasCasualties is true when the squad has wounded members needing aid.
-	SquadHasCasualties bool
 
-	// Per-member move order: leader assigns each member a spread position to
-	// advance toward during IntentEngage, rather than all converging on one point.
-	OrderMoveX   float64
-	OrderMoveY   float64
-	HasMoveOrder bool
-
-	// --- Decision pacing ---
-	PanicLocked bool // true when fear is so high the soldier can't decide effectively
-	// DisobeyingOrders indicates the soldier is currently resisting squad orders.
-	DisobeyingOrders bool
-	// PanicRetreatActive indicates the soldier is in full panic retreat mode.
-	PanicRetreatActive bool
-	// Surrendered indicates the soldier has ceased fighting and movement.
-	Surrendered bool
-	// Retreat style and state (used when PanicRetreatActive=true).
-	RetreatToOwnLines     bool
-	RetreatTargetX        float64
-	RetreatTargetY        float64
-	HasRetreatTarget      bool
+	IncomingFireCount     int
+	IrrelevantCoverTicks  int
+	RadioContactTick      int
+	RadioLastHeardTick    int
+	RadioLastSenderID     int
+	UnresponsiveMembers   int
 	RetreatDecisionCount  int
 	RetreatRecoveries     int
 	RetreatReconsiderTick int
+	CommitPhaseTick       int
+	CommitDuration        int
+	SustainDuration       int
+	GoalStreak            int
+	NextDecisionTick      int
+	IdleCombatTicks       int
+	HeardGunfireTick      int
+	FlankCompleteCooldown int
+	PeekNoContactCount    int
+	PeekCooldown          int
+	ConsecutiveMisses     int
+	ClaimedBuildingIdx    int
+	VisibleAllyCount      int
+	IsolatedTicks         int
+	BoundGroup            int
+	Internal              SoldierInternalGoals
 
-	// --- Commitment-based decision architecture ---
-	// ShatterPressure accumulates from incoming fire, suppression spikes, etc.
-	// Only when it exceeds ShatterThreshold does a re-evaluation actually fire.
-	// Discipline raises the threshold — veterans are harder to rattle.
-	ShatterPressure  float64 // 0+, accumulates from disruptive events
-	ShatterThreshold float64 // set once from discipline; typically 0.4–0.8
+	OrderReceived         bool
+	OfficerOrderActive    bool
+	OfficerOrderImmediate bool
+	SquadHasContact       bool
+	RadioHasContact       bool
+	SquadBroken           bool
+	SquadHasCasualties    bool
+	HasMoveOrder          bool
+	PanicLocked           bool
+	DisobeyingOrders      bool
+	PanicRetreatActive    bool
+	Surrendered           bool
+	RetreatToOwnLines     bool
+	HasRetreatTarget      bool
+	ShatterEvent          bool
+	ForceAdvance          bool
+	HeardGunfire          bool
+	HasSearchTarget       bool
 
-	// Commitment phase: commit → sustain → review.
-	// During commit (first N ticks), shatter pressure is halved (soldier is focused).
-	// During sustain, normal pressure applies.
-	// During review (lock expired), full re-evaluation runs.
-	CommitPhaseTick int // tick when current commitment phase started
-	CommitDuration  int // ticks of the commit (immune) phase
-	SustainDuration int // ticks of the sustain phase (after commit ends)
-
-	// Decision debt: switching goals incurs a penalty that makes the *next*
-	// switch harder. Decays over ~3s. Prevents A→B→A→B cycling.
-	DecisionDebt float64 // 0+, added to hysteresis margin on each switch
-
-	// GoalStreak counts consecutive evaluations the same goal won.
-	GoalStreak int
-
-	// Hysteresis: the current goal gets a loyalty bonus in SelectGoal.
-	// To switch, a competing goal must exceed current by HysteresisMargin.
-	// The margin grows with streak depth and decision debt.
-	HysteresisMargin float64
-
-	// Legacy fields still needed.
-	NextDecisionTick int  // tick at which next review phase begins
-	ShatterEvent     bool // kept for backward compat — converted to pressure internally
-	IdleCombatTicks  int  // ticks spent far from both combat and allies
-	ForceAdvance     bool // override: ignore other drives, move toward nearest ally/contact
-
-	// --- Gunfire hearing (single-tick) ---
-	HeardGunfireX    float64 // world position of last heard gunfire
-	HeardGunfireY    float64
-	HeardGunfire     bool // true if gunfire was heard THIS tick (reset each tick)
-	HeardGunfireTick int  // tick when last gunfire was heard
-
-	// --- Combat memory (persistent) ---
-	// CombatMemoryStrength decays from 1→0 over ~3600 ticks (60s at 60TPS).
-	// Soldiers with memory > 0 are "activated" and will not idle passively.
-	CombatMemoryStrength float64 // 0-1, how strongly combat is remembered
-	CombatMemoryX        float64 // last gunfire position stored in memory
-	CombatMemoryY        float64
-
-	// --- Search behaviour ---
-	// SearchDrive is a 0..1 scalar populated from intel layers indicating how
-	// worthwhile it is to search nearby dangerous/uncertain areas.
-	SearchDrive float64
-	// Search target waypoint (world coords) used during GoalSearch.
-	SearchTargetX   float64
-	SearchTargetY   float64
-	HasSearchTarget bool
-
-	// --- Flanking state ---
-	FlankComplete         bool    // true when the perpendicular leg is done
-	FlankCompleteCooldown int     // ticks remaining before flank goal can be selected again
-	FlankTargetX          float64 // world position of flank waypoint
-	FlankTargetY          float64
-
-	// --- Sightline awareness ---
-	LocalSightlineScore float64 // 0-1, how many cells visible from current position
-
-	// --- Peeking state ---
-	// PeekNoContactCount counts how many consecutive empty peeks at nearby corners.
-	// Reduces peek utility so soldiers don't obsessively peek the same empty spot.
-	PeekNoContactCount int
-	PeekCooldown       int // ticks remaining before another peek is allowed
-
-	// --- Shoot outcome tracking ---
-	// ConsecutiveMisses counts unbroken run of missed shots.
-	// After 3+, forces a behavioural re-evaluation.
-	ConsecutiveMisses int
-
-	// --- Tactical position awareness ---
-	PositionDesirability float64 // -1..+1, how tactically valuable current position is
-	AtCorner             bool    // true if at a building corner
-	AtDoorway            bool    // true if standing in a doorway (bad)
-	AtWall               bool    // true if adjacent to a wall
-	AtWindowAdj          bool    // true if at an interior cell next to a window (overwatch)
-	AtInterior           bool    // true if inside a building footprint
-
-	// --- Position scanning result ---
-	// BestNearbyX/Y is the world position of the best nearby tile found
-	// by the periodic position scanner. Score is its desirability.
-	BestNearbyX     float64
-	BestNearbyY     float64
-	BestNearbyScore float64
-	HasBestNearby   bool // true if a good position was found
-
-	// --- Building takeover ---
-	// ClaimedBuildingIdx is the index of the building footprint the squad has claimed.
-	// -1 means no building is claimed.
-	ClaimedBuildingIdx int
-	ClaimedBuildingX   float64 // centroid of claimed building
-	ClaimedBuildingY   float64
-
-	// --- Morale-driven reinforcement ---
-	// Set by SquadThink when a calm soldier is directed toward a distressed one.
-	ShouldReinforce  bool
-	ReinforceMemberX float64
-	ReinforceMemberY float64
-
-	// --- Flanking assignment ---
-	// FlankSide: +1 = flank left (bearing - 90°), -1 = flank right (bearing + 90°).
-	// Set by SquadThink so members fan out consistently relative to the enemy normal.
-	FlankSide         float64
-	SquadEnemyBearing float64 // bearing from squad centroid to enemy, radians
-
-	// --- Outnumbered awareness ---
-	// OutnumberedFactor: >1 means we see more enemies than friendlies see enemies
-	// (we're outnumbered). <1 means we outnumber them. 1.0 = even.
-	// Updated by SquadThink each cycle.
-	OutnumberedFactor float64
-
-	// --- Squad posture tracking ---
-	// SquadPosture: -1 = full defensive, 0 = balanced, +1 = full offensive.
-	// Derived from OutnumberedFactor, squad intent, and casualty state.
-	SquadPosture float64
-
-	// --- Social awareness ---
-	// VisibleAllyCount is the number of squadmates currently visible to this soldier.
-	VisibleAllyCount int
-	// SquadAvgFear is the smoothed effective fear of visible/alive squadmates.
-	SquadAvgFear float64
-	// SquadFearDelta is the per-tick change in SquadAvgFear.
-	// Positive values mean ally stress is rising.
-	SquadFearDelta float64
-	// IsolatedTicks counts consecutive ticks with no visible enemies and no visible allies.
-	IsolatedTicks int
-	// CloseAllyPressure is a 0..1 crowding signal based on nearby ally spacing.
-	// Higher values mean allies are too close and spacing movement is needed.
-	CloseAllyPressure float64
-
-	// --- Buddy bounding (squad-level fire and movement) ---
-	// BoundGroup: 0 or 1, assigned by squad leader. Groups alternate: one moves
-	// while the other overwatches during MoveToContact.
-	BoundGroup int
-	// BoundRole: true = this soldier should move this cycle; false = overwatch.
-	// Toggled by SquadThink each bound cycle.
-	BoundMover bool
-
-	// --- Suppression state ---
-	// SuppressLevel is a persistent 0-1 value representing how pinned down
-	// this soldier is. Unlike IncomingFireCount (reset every tick), this
-	// accumulates from hits and near-misses and decays over several seconds.
-	// A suppressed soldier stays suppressed across ticks — eliminating the
-	// oscillation caused by per-tick fire count resets.
-	SuppressLevel float64
-	// SuppressDir is the bearing (radians) of the fire that is suppressing
-	// this soldier, used to orient cover-seeking correctly.
-	SuppressDir float64
-	// suppressSpiked is true during the tick when suppression first crosses
-	// the SuppressThreshold — used to trigger an immediate ShatterEvent.
-	suppressSpiked bool
-	// suppressed is a hysteresis-smoothed suppression state.
-	// Enter at SuppressThreshold, clear at suppressClearThreshold.
-	suppressed bool
+	FlankComplete   bool
+	AtCorner        bool
+	AtDoorway       bool
+	AtWall          bool
+	AtWindowAdj     bool
+	AtInterior      bool
+	HasBestNearby   bool
+	ShouldReinforce bool
+	BoundMover      bool
+	suppressSpiked  bool
+	suppressed      bool
 }
 
 // GoalThresholds controls when a soldier prefers to shoot, push, or seek safety.
@@ -464,17 +377,38 @@ func defaultGoalThresholds() GoalThresholds {
 	}
 }
 
+// defaultGoalThresholdsForProfile returns thresholds adjusted for soldier traits.
+// Experience lowers engagement thresholds (veterans are bolder).
+// Composure raises fear tolerance (composed soldiers need more fear to seek cover).
+func defaultGoalThresholdsForProfile(profile *SoldierProfile) GoalThresholds {
+	base := defaultGoalThresholds()
+
+	exp := profile.Psych.Experience
+	comp := profile.Psych.Composure
+
+	// Veterans engage at lower quality thresholds
+	base.EngageShotQuality -= exp * 0.10
+	base.LongRangeShotQuality -= exp * 0.08
+	base.PushOnMissMomentum -= exp * 0.05
+	base.HoldOnHitMomentum -= exp * 0.04
+
+	// High composure soldiers tolerate more fear before seeking cover
+	base.CoverFear += comp * 0.15
+
+	return base
+}
+
 func (bb *Blackboard) ensureInternalDefaults() {
 	if bb.Internal.Thresholds.EngageShotQuality <= 0 {
 		bb.Internal.Thresholds = defaultGoalThresholds()
 	}
-	// Default shatter threshold if not yet initialised (set properly by InitCommitment).
+	// Default shatter threshold if not yet initialized (set properly by InitCommitment).
 	if bb.ShatterThreshold <= 0 {
 		bb.ShatterThreshold = defaultShatterThreshold
 	}
 }
 
-// --- Commitment-based decision constants ---
+// --- Commitment-based decision constants ---.
 const (
 	defaultShatterThreshold = 0.50        // base pressure needed to force re-evaluation
 	shatterPressureDecay    = 0.012       // per tick decay (~83 ticks to fully clear from 1.0)
@@ -488,12 +422,22 @@ const (
 	desireEMAAlpha          = 0.08        // blending factor for smoothed desires (lower = smoother)
 )
 
-// InitCommitment sets up the shatter threshold from the soldier's discipline.
-// Called once when the soldier is created or profiles are randomised.
+// InitCommitment sets up the shatter threshold and decision thresholds from the soldier's profile.
+// Called once when the soldier is created or profiles are randomized.
 func (bb *Blackboard) InitCommitment(discipline float64) {
 	// Disciplined soldiers: threshold 0.6–0.8 (hard to rattle).
 	// Green soldiers: threshold 0.35–0.5 (easily disrupted).
 	bb.ShatterThreshold = 0.35 + discipline*0.45
+}
+
+// InitCommitmentWithProfile sets up thresholds based on full soldier profile.
+// This should be called instead of InitCommitment when profile is available.
+func (bb *Blackboard) InitCommitmentWithProfile(profile *SoldierProfile) {
+	// Set shatter threshold from discipline
+	bb.ShatterThreshold = 0.35 + profile.Skills.Discipline*0.45
+
+	// Initialize decision thresholds adjusted for experience and composure
+	bb.Internal.Thresholds = defaultGoalThresholdsForProfile(profile)
 }
 
 // AddShatterPressure adds disruptive pressure from an external event.
@@ -597,7 +541,7 @@ func (bb *Blackboard) EvolveThresholds(currentGoal GoalKind, stress float64) {
 	// Drift rate: slow so thresholds take ~300 ticks to fully move.
 	const driftRate = 1.0 / 300.0
 
-	// Adaptive drift based on current goal — reinforce the current behaviour.
+	// Adaptive drift based on current goal — reinforce the current behavior.
 	switch currentGoal {
 	case GoalEngage, GoalFlank, GoalMoveToContact:
 		// Soldier is actively fighting — lower the bar to keep engaging.
@@ -670,8 +614,8 @@ func clamp(v, lo, hi float64) float64 {
 	return v
 }
 
-// emaBlend smoothly blends a previous value toward a new target using exponential moving average.
-// alpha controls responsiveness: 0.08 = smooth (12-tick half-life), 1.0 = instant.
+// BlendWithEMA smoothly blends a previous value toward a new target using an exponential moving average.
+// Alpha controls responsiveness: 0.08 = smooth (12-tick half-life), 1.0 = instant.
 func emaBlend(prev, target, alpha float64) float64 {
 	return prev*(1.0-alpha) + target*alpha
 }
@@ -741,7 +685,7 @@ func (bb *Blackboard) RefreshInternalGoals(profile *SoldierProfile, selfX, selfY
 }
 
 // RecordShotOutcome updates momentum and consecutive-miss counter.
-// Returns true when the miss streak is long enough to force a behaviour change.
+// Returns true when the miss streak is long enough to force a behavior change.
 func (bb *Blackboard) RecordShotOutcome(hit bool, expectedHitChance, shotDist float64) bool {
 	bb.ensureInternalDefaults()
 
@@ -773,6 +717,13 @@ func estimateHitChanceAtRange(profile *SoldierProfile, dist float64) float64 {
 // Existing threats are matched by pointer identity so a moving soldier's
 // position is always up-to-date and dead soldiers are purged immediately.
 func (bb *Blackboard) UpdateThreats(contacts []*Soldier, currentTick int) {
+	bb.UpdateThreatsWithAwareness(contacts, currentTick, 0.0)
+}
+
+// UpdateThreatsWithAwareness refreshes the blackboard from the current vision contacts.
+// And scales LKP fade rate by tactical awareness (Phase 2).
+// TacticalAwareness is a 0-1 value; higher retains LKP longer.
+func (bb *Blackboard) UpdateThreatsWithAwareness(contacts []*Soldier, currentTick int, tacticalAwareness float64) {
 	// Mark all existing as not visible this tick.
 	for i := range bb.Threats {
 		bb.Threats[i].IsVisible = false
@@ -781,27 +732,28 @@ func (bb *Blackboard) UpdateThreats(contacts []*Soldier, currentTick int) {
 	// Refresh or add from current contacts.
 	for _, c := range contacts {
 		// Dead contacts are never added or refreshed.
-		if c.state == SoldierStateDead {
+		if c == nil || !c.IsAlive() {
 			continue
 		}
 		found := false
 		for i := range bb.Threats {
-			if bb.Threats[i].Source == c {
-				// Identity match — always use current position.
-				bb.Threats[i].X = c.x
-				bb.Threats[i].Y = c.y
-				bb.Threats[i].Confidence = 1.0
-				bb.Threats[i].LastTick = currentTick
-				bb.Threats[i].IsVisible = true
-				found = true
-				break
+			if bb.Threats[i].Source != c {
+				continue
 			}
+			bb.Threats[i].X = c.x
+			bb.Threats[i].Y = c.y
+			bb.Threats[i].Confidence = 1.0
+			bb.Threats[i].LastTick = currentTick
+			bb.Threats[i].IsVisible = true
+			bb.Threats[i].SpottingAccumulator = 1.0
+			found = true
+			break
 		}
 		if !found {
 			bb.Threats = append(bb.Threats, ThreatFact{
 				Source:     c,
-				X:          c.x,
 				Y:          c.y,
+				X:          c.x,
 				Confidence: 1.0,
 				LastTick:   currentTick,
 				IsVisible:  true,
@@ -810,6 +762,11 @@ func (bb *Blackboard) UpdateThreats(contacts []*Soldier, currentTick int) {
 	}
 
 	// Decay stale threats and purge dead sources.
+	// Phase 2: Scale fade rate by TacticalAwareness
+	// Base: 0.008/tick ≈ full decay in ~125 ticks (~2s at 60TPS)
+	// High awareness (0.70): fadeRate = 0.008 * 0.58 ≈ 0.0046/tick (~5s to fade)
+	fadeRate := 0.008 * (1.0 - tacticalAwareness*0.6)
+
 	kept := bb.Threats[:0]
 	for _, t := range bb.Threats {
 		// Immediately drop threats whose source is now dead.
@@ -817,9 +774,8 @@ func (bb *Blackboard) UpdateThreats(contacts []*Soldier, currentTick int) {
 			continue
 		}
 		if !t.IsVisible {
-			// Decay by tick delta: 0.008/tick ≈ full decay in ~125 ticks (~2s at 60TPS).
 			age := float64(currentTick - t.LastTick)
-			t.Confidence = math.Max(0, t.Confidence-age*0.008)
+			t.Confidence = math.Max(0, t.Confidence-age*fadeRate)
 		}
 		if t.Confidence > 0.01 {
 			kept = append(kept, t)
@@ -921,33 +877,32 @@ func (bb *Blackboard) IsActivated() bool {
 // --- Suppression ---
 
 const (
-	// SuppressThreshold: SuppressLevel above this means the soldier is
+	// SuppressThreshold is the SuppressLevel threshold where the soldier is
 	// meaningfully pinned — goal selection will react.
 	SuppressThreshold = 0.30
-	// suppressClearThreshold is lower than SuppressThreshold to avoid
+	// SuppressClearThreshold is lower than SuppressThreshold to avoid
 	// suppression chatter at the boundary.
-	suppressClearThreshold = 0.22
+	SuppressClearThreshold = 0.22
 
-	// suppressDecayPerTick decays suppression toward zero.
+	// SuppressDecayPerTick decays suppression toward zero.
 	// ~4s to fully clear from 1.0 at 60TPS (1/240 ≈ 0.00417).
-	suppressDecayPerTick = 1.0 / 240.0
+	SuppressDecayPerTick = 1.0 / 240.0
 
-	// suppressHitDelta: suppression added per bullet that hits.
-	suppressHitDelta = 0.28
+	// SuppressHitDelta is suppression added per bullet that hits.
+	SuppressHitDelta = 0.20
 
-	// suppressNearMissDelta: suppression added per bullet that narrowly misses.
-	suppressNearMissDelta = 0.14
+	// SuppressNearMissDelta is suppression added per bullet that narrowly misses.
+	SuppressNearMissDelta = 0.11
 )
 
 // AccumulateSuppression adds suppression from an incoming round and records
-// the direction of the threat so cover-seeking is oriented correctly.
-// fromX, fromY is the shooter's position.
+// direction for tactical cover-seeking.
 func (bb *Blackboard) AccumulateSuppression(hit bool, fromX, fromY, toX, toY float64) {
 	prev := bb.SuppressLevel
 	if hit {
-		bb.SuppressLevel = math.Min(1.0, bb.SuppressLevel+suppressHitDelta)
+		bb.SuppressLevel = math.Min(1.0, bb.SuppressLevel+SuppressHitDelta)
 	} else {
-		bb.SuppressLevel = math.Min(1.0, bb.SuppressLevel+suppressNearMissDelta)
+		bb.SuppressLevel = math.Min(1.0, bb.SuppressLevel+SuppressNearMissDelta)
 	}
 	bb.updateSuppressedState()
 	// Update the suppression direction (bearing FROM the target TOWARD the shooter —
@@ -966,7 +921,7 @@ func (bb *Blackboard) AccumulateSuppression(hit bool, fromX, fromY, toX, toY flo
 // DecaySuppression should be called once per tick. Decays suppression toward
 // zero. Returns true if a spike was consumed this tick (for shatter events).
 func (bb *Blackboard) DecaySuppression() bool {
-	bb.SuppressLevel = math.Max(0, bb.SuppressLevel-suppressDecayPerTick)
+	bb.SuppressLevel = math.Max(0.0, bb.SuppressLevel-SuppressDecayPerTick)
 	bb.updateSuppressedState()
 	spiked := bb.suppressSpiked
 	bb.suppressSpiked = false
@@ -975,7 +930,7 @@ func (bb *Blackboard) DecaySuppression() bool {
 
 func (bb *Blackboard) updateSuppressedState() {
 	if bb.suppressed {
-		if bb.SuppressLevel < suppressClearThreshold {
+		if bb.SuppressLevel <= SuppressClearThreshold {
 			bb.suppressed = false
 		}
 		return
@@ -986,7 +941,7 @@ func (bb *Blackboard) updateSuppressedState() {
 }
 
 // IsSuppressed returns true when the soldier's suppression is high enough
-// to meaningfully change their behaviour.
+// to meaningfully change their behavior.
 func (bb *Blackboard) IsSuppressed() bool {
 	bb.updateSuppressedState()
 	return bb.suppressed
@@ -1008,7 +963,7 @@ func socialMovePressure(bb *Blackboard, ef float64) (isolationPush, supportPush 
 }
 
 // officerOrderBias computes an additive utility bias for a specific goal when a
-// squad leader order is active. It nudges behaviour strongly but does not force
+// squad leader order is active. It nudges behavior strongly but does not force
 // outcomes, preserving self-preservation and local context effects.
 func officerOrderBias(goal GoalKind, bb *Blackboard, profile *SoldierProfile) float64 {
 	if !bb.OfficerOrderActive || bb.OfficerOrderKind == CmdNone {
@@ -1018,6 +973,12 @@ func officerOrderBias(goal GoalKind, bb *Blackboard, profile *SoldierProfile) fl
 		return 0
 	}
 
+	compliance := officerOrderCompliance(bb, profile)
+	base := (0.15 + bb.OfficerOrderPriority*0.20 + bb.OfficerOrderStrength*0.35) * compliance
+	return base * officerOrderGoalMultiplier(bb.OfficerOrderKind, goal)
+}
+
+func officerOrderCompliance(bb *Blackboard, profile *SoldierProfile) float64 {
 	ef := profile.Psych.EffectiveFear()
 	compliance := (0.45 + profile.Skills.Discipline*0.55) * (1.0 - ef*0.45)
 	if bb.OfficerOrderObedienceChance > 0 {
@@ -1032,75 +993,51 @@ func officerOrderBias(goal GoalKind, bb *Blackboard, profile *SoldierProfile) fl
 	if bb.SquadBroken {
 		compliance *= 0.65
 	}
-	if compliance < 0.1 {
-		compliance = 0.1
-	}
-	if compliance > 1.0 {
-		compliance = 1.0
-	}
+	return clamp01(math.Max(0.1, compliance))
+}
 
-	base := (0.15 + bb.OfficerOrderPriority*0.20 + bb.OfficerOrderStrength*0.35) * compliance
+var officerOrderGoalMultipliers = map[OfficerCommandKind]map[GoalKind]float64{
+	CmdMoveTo: {
+		GoalMaintainFormation: 1.15,
+		GoalAdvance:           1.00,
+		GoalMoveToContact:     0.50,
+	},
+	CmdHold: {
+		GoalHoldPosition: 1.20,
+		GoalOverwatch:    0.75,
+	},
+	CmdRegroup: {
+		GoalRegroup:           1.25,
+		GoalMaintainFormation: 0.60,
+	},
+	CmdBoundForward: {
+		GoalMoveToContact: 1.00,
+		GoalOverwatch:     0.90,
+	},
+	CmdForm: {
+		GoalMaintainFormation: 1.20,
+	},
+	CmdFanOut: {
+		GoalFlank:         1.10,
+		GoalMoveToContact: 0.85,
+		GoalOverwatch:     0.35,
+	},
+	CmdAssault: {
+		GoalMoveToContact: 1.20,
+		GoalEngage:        0.95,
+		GoalFlank:         0.55,
+	},
+	CmdSearch: {
+		GoalSearch: 1.25,
+	},
+}
 
-	switch bb.OfficerOrderKind {
-	case CmdMoveTo:
-		switch goal {
-		case GoalMaintainFormation:
-			return base * 1.15
-		case GoalAdvance:
-			return base * 1.00
-		case GoalMoveToContact:
-			return base * 0.50
-		}
-	case CmdHold:
-		switch goal {
-		case GoalHoldPosition:
-			return base * 1.20
-		case GoalOverwatch:
-			return base * 0.75
-		}
-	case CmdRegroup:
-		switch goal {
-		case GoalRegroup:
-			return base * 1.25
-		case GoalMaintainFormation:
-			return base * 0.60
-		}
-	case CmdBoundForward:
-		switch goal {
-		case GoalMoveToContact:
-			return base * 1.00
-		case GoalOverwatch:
-			return base * 0.90
-		}
-	case CmdForm:
-		if goal == GoalMaintainFormation {
-			return base * 1.20
-		}
-	case CmdFanOut:
-		switch goal {
-		case GoalFlank:
-			return base * 1.10
-		case GoalMoveToContact:
-			return base * 0.85
-		case GoalOverwatch:
-			return base * 0.35
-		}
-	case CmdAssault:
-		switch goal {
-		case GoalMoveToContact:
-			return base * 1.20
-		case GoalEngage:
-			return base * 0.95
-		case GoalFlank:
-			return base * 0.55
-		}
-	case CmdSearch:
-		if goal == GoalSearch {
-			return base * 1.25
-		}
+func officerOrderGoalMultiplier(order OfficerCommandKind, goal GoalKind) float64 {
+	goals, ok := officerOrderGoalMultipliers[order]
+	if !ok {
+		return 0
 	}
-
-	return 0
+	return goals[goal]
 }
 
 // SelectGoal evaluates competing goals and returns the highest-utility one.
@@ -1115,7 +1052,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	suppress := bb.SuppressLevel // 0-1 persistent suppression level
 	ef := profile.Psych.EffectiveFear()
 
-	// activated is true whenever combat memory is strong enough to drive behaviour.
+	// activated is true whenever combat memory is strong enough to drive behavior.
 	// This persists for up to ~60s after the last heard shot.
 	activated := bb.IsActivated()
 	// mem scales 0→1 indicating how fresh the combat memory is.
@@ -1137,7 +1074,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	// --- Engage: visible enemy, controlled fire. ---
 	engageUtil := 0.0
 	if visibleThreats > 0 {
-		engageUtil = 0.45 + profile.Skills.Discipline*0.15 + internal.ShootDesire*0.45
+		engageUtil = 0.45 + profile.Skills.Discipline*0.15 + internal.ShootDesire*0.45 + profile.Personality.Aggression*0.10
 		if internal.LastEstimatedHitChance >= internal.Thresholds.EngageShotQuality {
 			engageUtil += 0.20
 		}
@@ -1146,6 +1083,11 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		}
 		if internal.LastRange > accurateFireRange && internal.LastEstimatedHitChance < internal.Thresholds.LongRangeShotQuality {
 			engageUtil -= 0.18
+		}
+		// Risk assessment reduces engagement in dangerous situations
+		if visibleThreats > 1 || bb.IncomingFireCount > 0 {
+			riskPenalty := profile.Survival.RiskAssessment * 0.15 * float64(visibleThreats)
+			engageUtil -= riskPenalty
 		}
 		// Range band stability: if currently engaging and near threshold, add hysteresis bonus
 		if bb.CurrentGoal == GoalEngage && internal.LastRange > accurateFireRange {
@@ -1161,7 +1103,9 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		}
 		// Suppression pins the soldier: heavy fire halves the urge to stand and fight.
 		// Disciplined soldiers resist this more — they return fire from cover.
-		engageUtil -= suppress * (0.40 - profile.Skills.Discipline*0.25)
+		// Aggressive soldiers also resist suppression and maintain offensive action.
+		suppressionResistance := profile.Skills.Discipline*0.25 + profile.Personality.Aggression*0.20
+		engageUtil -= suppress * (0.40 - suppressionResistance)
 		// Outnumbered posture: push engage harder when aggressive.
 		if posture > 0 {
 			engageUtil += posture * 0.15
@@ -1169,54 +1113,56 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	}
 
 	// --- Fallback: retreat away from contact. ---
-	// Active under fire as before. Also available to activated HIGH-FEAR soldiers
-	// even when the shooting has stopped — they want distance from the last known
-	// contact area.
 	fallbackUtil := 0.0
-	{
-		if underFire && anyContact {
-			if ef > 0.25 {
-				fallbackUtil = (ef-0.25)*1.4 + 0.1*float64(bb.IncomingFireCount)
-				fallbackUtil -= profile.Skills.Discipline * 0.5
-				fallbackUtil += internal.CoverDesire * 0.15
+	if underFire && anyContact {
+		if ef > 0.25 {
+			fallbackUtil = (ef-0.25)*1.4 + 0.1*float64(bb.IncomingFireCount)
+			fallbackUtil -= profile.Skills.Discipline * 0.5
+			fallbackUtil += internal.CoverDesire * 0.15
+			fallbackUtil += profile.Survival.BreakContact * 0.18
+			if bb.SquadCasualtyRate > 0.15 {
+				fallbackUtil += profile.Survival.Survivalism * bb.SquadCasualtyRate * 0.50
 			}
-			// Sustained suppression at high levels pushes even disciplined soldiers back.
-			// This only kicks in when truly pinned (suppress > 0.6) — not on every hit.
-			if suppress > 0.60 {
-				fallbackUtil += (suppress-0.60)*0.9 - profile.Skills.Discipline*0.3
-			}
-			// Even when fear isn't yet high, getting pinned can force a short withdrawal
-			// to break LOS and re-find cover rather than freezing in place.
-			fallbackUtil += suppress*0.10 + 0.03*float64(bb.IncomingFireCount)
-		} else if activated && visibleThreats == 0 && ef > 0.35 {
-			// Post-combat anxiety: high-fear soldiers keep retreating after a fight.
-			fallbackUtil = (ef-0.35)*1.0*mem - profile.Skills.Discipline*0.55
 		}
-		// Outnumbered posture: suppress fallback when we need to push.
-		if posture > 0 {
-			fallbackUtil -= posture * 0.20
+		if suppress > 0.60 {
+			fallbackUtil += (suppress-0.60)*0.9 - profile.Skills.Discipline*0.3
 		}
-		// Outnumbering posture: fallback is more acceptable when defensive.
-		if posture < 0 {
-			fallbackUtil += (-posture) * 0.10
+		fallbackUtil += suppress*0.10 + 0.03*float64(bb.IncomingFireCount)
+	} else if activated && visibleThreats == 0 && ef > 0.35 {
+		fallbackUtil = (ef-0.35)*1.0*mem - profile.Skills.Discipline*0.55
+		if bb.SquadCasualtyRate > 0.20 {
+			fallbackUtil += profile.Survival.Survivalism * bb.SquadCasualtyRate * 0.40
 		}
-		if bb.SquadIntent == IntentWithdraw {
-			fallbackUtil += 0.22
-		}
-		if bb.SquadBroken {
-			fallbackUtil += 0.18 + bb.SquadStress*0.30
-		}
-		if bb.DisobeyingOrders {
-			fallbackUtil += 0.12
-		}
+	}
+	if posture > 0 {
+		fallbackUtil -= posture * 0.20
+	}
+	if posture < 0 {
+		fallbackUtil += (-posture) * 0.10
+	}
+	if bb.SquadIntent == IntentWithdraw {
+		fallbackUtil += 0.22
+	}
+	if bb.SquadBroken {
+		fallbackUtil += 0.18 + bb.SquadStress*0.30
+	}
+	if bb.DisobeyingOrders {
+		fallbackUtil += 0.12
 	}
 
 	// --- Survive: panic / freeze / seek cover — last resort. ---
 	surviveUtil := 0.0
 	if ef > internal.Thresholds.CoverFear {
 		surviveUtil = (ef - internal.Thresholds.CoverFear) * 2.0
+		surviveUtil += profile.Personality.Caution * 0.12       // Cautious soldiers seek cover more readily
+		surviveUtil += profile.Survival.SelfPreservation * 0.20 // Self-preservation instinct drives cover-seeking
+		surviveUtil += profile.Survival.Survivalism * 0.15      // General survival instincts enhance cover-seeking
 		if underFire {
 			surviveUtil += 0.05 * float64(bb.IncomingFireCount)
+			// Self-preservation makes soldiers more reactive to incoming fire
+			surviveUtil += profile.Survival.SelfPreservation * 0.08 * float64(bb.IncomingFireCount)
+			// Survivalism enhances threat response
+			surviveUtil += profile.Survival.Survivalism * 0.06 * float64(bb.IncomingFireCount)
 		}
 		// Activated soldiers with very high fear stay in survive longer.
 		if activated {
@@ -1248,7 +1194,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	moveToContactUtil := 0.0
 	lowQualityLongRange := visibleThreats > 0 && internal.LastRange > accurateFireRange && internal.LastEstimatedHitChance < internal.Thresholds.LongRangeShotQuality
 	if anyContact && (visibleThreats == 0 || lowQualityLongRange) {
-		moveToContactUtil = 0.50 + profile.Skills.Discipline*0.1 + internal.MoveDesire*0.30
+		moveToContactUtil = 0.50 + profile.Skills.Discipline*0.1 + internal.MoveDesire*0.30 + profile.Personality.Aggression*0.15
 		if lowQualityLongRange {
 			// Stronger urgency: the further out of range, the more they need to close.
 			rangePressure := clamp01((internal.LastRange - accurateFireRange) / accurateFireRange)
@@ -1301,17 +1247,19 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	flankUtil := 0.0
 	if anyContact && !bb.FlankComplete && bb.FlankCompleteCooldown <= 0 {
 		if visibleThreats == 0 {
-			flankUtil = 0.35 + profile.Skills.Fieldcraft*0.35 + internal.MoveDesire*0.20
+			flankUtil = 0.35 + profile.Skills.Fieldcraft*0.35 + internal.MoveDesire*0.20 + profile.Personality.Aggression*0.12 + profile.Preferences.PreferFlanking*0.25
+			// Initiative trait: proactive soldiers recognize flanking opportunities
+			flankUtil += profile.Personality.Initiative * 0.20
 			// Memory-only: scale by memory freshness and fieldcraft.
 			if activated && !bb.SquadHasContact && !hasAudioContact {
 				flankUtil *= mem * 0.9
 			}
 		} else if lowQualityLongRange {
 			// Visible enemy at poor range: aggressive soldiers choose to flank.
-			flankUtil = 0.20 + profile.Skills.Fieldcraft*0.40 + internal.MoveDesire*0.15
+			flankUtil = 0.20 + profile.Skills.Fieldcraft*0.40 + internal.MoveDesire*0.15 + profile.Personality.Aggression*0.18 + profile.Preferences.PreferFlanking*0.30
 		}
 		flankUtil -= ef * 0.30
-		// A suppressed soldier can't safely manoeuvre — flanking requires movement.
+		// A suppressed soldier can't safely maneuver — flanking requires movement.
 		flankUtil -= suppress * 0.35
 		if isLeader {
 			flankUtil -= 0.25
@@ -1330,11 +1278,24 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		overwatchUtil = 0.70 + profile.Skills.Fieldcraft*0.15
 	} else if bb.LocalSightlineScore > 0.5 && visibleThreats == 0 && anyContact {
 		overwatchUtil = 0.40 + bb.LocalSightlineScore*0.25 + profile.Skills.Discipline*0.15
+		// Fieldcraft improves terrain reading - better evaluation of tactical positions
+		overwatchUtil += profile.Skills.Fieldcraft * 0.20
 		// Memory-only: scale with freshness and calm disposition.
 		if activated && !bb.SquadHasContact && !hasAudioContact {
 			overwatchUtil *= mem*0.7 + (1.0-ef)*0.3
 		}
 		overwatchUtil -= ef * 0.20
+	}
+
+	// SuppressiveSupport: bonus to overwatch when in bounding overwatch role
+	// High trait values make soldiers more willing to provide covering fire for moving squadmates
+	if !bb.BoundMover && bb.BoundGroup >= 0 && profile.Cooperation.SuppressiveSupport > 0.3 {
+		// Not the mover = overwatch role in bounding
+		overwatchBonus := profile.Cooperation.SuppressiveSupport * 0.25
+		if anyContact {
+			overwatchBonus += profile.Cooperation.SuppressiveSupport * 0.15 // Extra bonus during contact
+		}
+		overwatchUtil += overwatchBonus
 	}
 	// Tactical position bonus: corners and wall-adjacent cells are great overwatch spots.
 	if bb.AtCorner {
@@ -1359,13 +1320,13 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 		overwatchUtil *= overwatchDistanceFactor(internal.LastContactRange)
 	}
 	if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
-		overwatchUtil -= 0.25
+		overwatchUtil -= 0.55
 	}
 
 	// --- Regroup: cohesion emergency.
 	regroupUtil := 0.0
 	if bb.SquadIntent == IntentRegroup && !isLeader {
-		regroupUtil = 0.75 + profile.Skills.Discipline*0.2
+		regroupUtil = 0.75 + profile.Skills.Discipline*0.2 + profile.Personality.Caution*0.15
 		if visibleThreats > 0 {
 			regroupUtil *= 0.6
 		}
@@ -1374,7 +1335,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	// --- Hold: disciplined stationary fire.
 	holdUtil := 0.0
 	if bb.SquadIntent == IntentHold {
-		holdUtil = 0.5 + profile.Skills.Discipline*0.25
+		holdUtil = 0.5 + profile.Skills.Discipline*0.25 + profile.Personality.Caution*0.10
 		// Good tactical positions reinforce holding.
 		if bb.PositionDesirability > 0 {
 			holdUtil += bb.PositionDesirability * 0.15
@@ -1400,7 +1361,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	if !isLeader {
 		switch bb.SquadIntent {
 		case IntentAdvance:
-			formationUtil = 0.45 + profile.Skills.Discipline*0.2
+			formationUtil = 0.45 + profile.Skills.Discipline*0.2 + profile.Personality.Caution*0.08 + profile.Personality.Teamwork*0.12
 			if visibleThreats > 0 {
 				formationUtil *= 0.2
 			}
@@ -1409,12 +1370,12 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 				formationUtil *= (1.0 - mem*0.7)
 			}
 		case IntentHold:
-			formationUtil = 0.3 + profile.Skills.Discipline*0.1
+			formationUtil = 0.3 + profile.Skills.Discipline*0.1 + profile.Personality.Teamwork*0.08
 			if visibleThreats > 0 {
 				formationUtil *= 0.4
 			}
 		case IntentRegroup:
-			formationUtil = 0.55 + profile.Skills.Discipline*0.15
+			formationUtil = 0.55 + profile.Skills.Discipline*0.15 + profile.Personality.Caution*0.12 + profile.Personality.Teamwork*0.15
 			if visibleThreats > 0 {
 				formationUtil *= 0.7
 			}
@@ -1436,12 +1397,25 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 	}
 
 	// --- Advance: baseline objective drive.
-	advanceUtil := 0.3
+	advanceUtil := 0.3 + profile.Personality.Aggression*0.08
 	if bb.SquadIntent == IntentAdvance {
-		advanceUtil = 0.5
+		advanceUtil = 0.5 + profile.Personality.Aggression*0.10
+	}
+	// Initiative trait: soldiers act independently when squad lacks clear direction
+	if bb.SquadIntent == IntentHold && !anyContact && !isLeader {
+		advanceUtil += profile.Personality.Initiative * 0.25
 	}
 	if !isLeader && !anyContact && bb.SquadIntent == IntentAdvance {
-		advanceUtil *= 0.62
+		// Initiative trait: soldiers with high initiative are more willing to act independently
+		// when no orders are given, especially non-leaders when isolated or lacking clear squad direction
+		if !isLeader && bb.SquadIntent == IntentHold {
+			advanceUtil += profile.Personality.Initiative * 0.15
+		}
+		// Survivalism reduces advance desire when squad has taken casualties
+		// High survivalism soldiers recognize when advancing is tactically unsound
+		if bb.SquadCasualtyRate > 0.20 {
+			advanceUtil -= profile.Survival.Survivalism * bb.SquadCasualtyRate * 0.35
+		}
 	}
 	if bb.SquadIntent == IntentWithdraw {
 		advanceUtil *= 0.25
@@ -1471,7 +1445,12 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 
 		if hasCasualties {
 			// Base urgency: should beat pure advance in most non-contact situations.
-			baseUrgency := 0.72 + profile.Skills.FirstAid*0.35
+			// Cautious soldiers are more likely to help wounded comrades.
+			baseUrgency := 0.72 + profile.Skills.FirstAid*0.35 + profile.Personality.Caution*0.10
+			// BuddyAidPriority trait: willingness to help squadmates vs self-preservation
+			baseUrgency += profile.Cooperation.BuddyAidPriority * 0.30
+			// Teamwork trait: team-oriented soldiers prioritize collective effectiveness
+			baseUrgency += profile.Personality.Teamwork * 0.25
 			if bb.Internal.IsMedic {
 				baseUrgency = 1.05 // medics have extremely strong drive to help
 			}
@@ -1482,14 +1461,22 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 			}
 
 			// Reduce if under fire or visible threats.
+			// BuddyAidPriority reduces this penalty - high values mean more willing to help under fire
+			underFirePenalty := 0.45
+			visibleThreatPenalty := 0.30
+			if profile.Cooperation.BuddyAidPriority > 0.6 {
+				underFirePenalty *= (1.0 - (profile.Cooperation.BuddyAidPriority-0.6)*0.5)
+				visibleThreatPenalty *= (1.0 - (profile.Cooperation.BuddyAidPriority-0.6)*0.5)
+			}
 			if visibleThreats > 0 {
-				baseUrgency *= 0.55
+				baseUrgency *= (1.0 - visibleThreatPenalty)
 			} else if underFire {
-				baseUrgency *= 0.70
+				baseUrgency *= (1.0 - underFirePenalty)
 			}
 
 			// Fear penalty (medics resist this much better).
-			fearPenalty := ef * 0.25
+			// BuddyAidPriority also reduces fear penalty when helping others
+			fearPenalty := ef * 0.25 * (1.0 - profile.Cooperation.BuddyAidPriority*0.3)
 			if bb.Internal.IsMedic {
 				fearPenalty *= 0.3 // medics trained to work under stress
 			}
@@ -1648,7 +1635,7 @@ func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath 
 // blackboard's HysteresisMargin as a loyalty bonus to the current goal.
 // A competing goal must exceed the current goal's utility by at least
 // HysteresisMargin to cause a switch.
-func SelectGoalWithHysteresis(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath bool) GoalKind {
+func SelectGoalWithHysteresis(bb *Blackboard, profile *SoldierProfile, isLeader, hasPath bool) GoalKind {
 	candidate := SelectGoal(bb, profile, isLeader, hasPath)
 	if candidate == bb.CurrentGoal {
 		return candidate
@@ -1881,7 +1868,7 @@ func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasP
 			u *= overwatchDistanceFactor(internal.LastContactRange)
 		}
 		if bb.SquadIntent == IntentEngage && visibleThreats == 0 {
-			u -= 0.25
+			u -= 0.55
 		}
 		u -= isolationPush * 0.55
 		u -= supportPush * 0.25

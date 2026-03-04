@@ -35,7 +35,7 @@ func TestDetectStalemate_TrueWhenMutualSurvivalAndFrictionHigh(t *testing.T) {
 		cohesionBreakEvents: 0,
 	}
 
-	isStalemate, reason := detectStalemate(rs)
+	isStalemate, reason := detectStalemate(&rs)
 	if !isStalemate {
 		t.Fatalf("expected stalemate=true, got false (reason=%s)", reason)
 	}
@@ -55,7 +55,7 @@ func TestDetectStalemate_FalseWhenSquadBreakOccurs(t *testing.T) {
 		cohesionBreakEvents: 1,
 	}
 
-	isStalemate, reason := detectStalemate(rs)
+	isStalemate, reason := detectStalemate(&rs)
 	if isStalemate {
 		t.Fatalf("expected stalemate=false when cohesion breaks occur (reason=%s)", reason)
 	}
@@ -72,7 +72,7 @@ func TestDetectStalemate_FalseWhenAttritionDecisive(t *testing.T) {
 		cohesionBreakEvents: 0,
 	}
 
-	isStalemate, reason := detectStalemate(rs)
+	isStalemate, reason := detectStalemate(&rs)
 	if isStalemate {
 		t.Fatalf("expected stalemate=false under decisive attrition (reason=%s)", reason)
 	}

@@ -2,7 +2,7 @@ package game
 
 import "math"
 
-// SteeringBehavior computes movement forces for a soldier using flow fields
+// SteeringBehavior computes movement forces for a soldier using flow fields.
 type SteeringBehavior struct {
 	soldier *Soldier
 
@@ -21,6 +21,7 @@ type SteeringBehavior struct {
 	lastX, lastY float64
 }
 
+// NewSteeringBehavior creates a steering behavior for one soldier.
 func NewSteeringBehavior(soldier *Soldier) *SteeringBehavior {
 	return &SteeringBehavior{
 		soldier:          soldier,
@@ -33,7 +34,7 @@ func NewSteeringBehavior(soldier *Soldier) *SteeringBehavior {
 	}
 }
 
-// ComputeDesiredVelocity calculates the desired movement vector
+// ComputeDesiredVelocity calculates the desired movement vector.
 func (sb *SteeringBehavior) ComputeDesiredVelocity(flowController *SquadFlowController, tacticalWeight float64) Vec2 {
 	if flowController == nil {
 		return Vec2{0, 0}
@@ -62,7 +63,7 @@ func (sb *SteeringBehavior) ComputeDesiredVelocity(flowController *SquadFlowCont
 	return desired
 }
 
-// computeSeparation pushes soldier away from nearby teammates
+// computeSeparation pushes soldier away from nearby teammates.
 func (sb *SteeringBehavior) computeSeparation() Vec2 {
 	if sb.soldier.squad == nil {
 		return Vec2{0, 0}
@@ -92,7 +93,7 @@ func (sb *SteeringBehavior) computeSeparation() Vec2 {
 	return force
 }
 
-// computeCohesion pulls soldier toward squad center
+// computeCohesion pulls soldier toward squad center.
 func (sb *SteeringBehavior) computeCohesion() Vec2 {
 	if sb.soldier.squad == nil {
 		return Vec2{0, 0}
@@ -131,7 +132,7 @@ func (sb *SteeringBehavior) computeCohesion() Vec2 {
 	return Vec2{0, 0}
 }
 
-// detectImmediateObstacle checks if movement will collide with obstacle
+// detectImmediateObstacle checks if movement will collide with an obstacle.
 func (sb *SteeringBehavior) detectImmediateObstacle(velocity Vec2) *Vec2 {
 	if velocity.Length() < 0.1 {
 		return nil
@@ -154,7 +155,7 @@ func (sb *SteeringBehavior) detectImmediateObstacle(velocity Vec2) *Vec2 {
 	return nil
 }
 
-// avoidObstacle adjusts velocity to slide along obstacle
+// avoidObstacle adjusts velocity to slide along an obstacle.
 func (sb *SteeringBehavior) avoidObstacle(obstacle *Vec2, velocity Vec2) Vec2 {
 	// Compute vector to obstacle
 	toObstacle := Vec2{obstacle.X - sb.soldier.x, obstacle.Y - sb.soldier.y}
@@ -178,7 +179,7 @@ func (sb *SteeringBehavior) avoidObstacle(obstacle *Vec2, velocity Vec2) Vec2 {
 	return slide
 }
 
-// ApplyMovement updates soldier position based on desired velocity
+// ApplyMovement updates soldier position based on desired velocity.
 func (sb *SteeringBehavior) ApplyMovement(desired Vec2, dt float64) {
 	// Get max speed based on stance and state
 	sb.maxSpeed = sb.getMaxSpeed()
@@ -214,7 +215,7 @@ func (sb *SteeringBehavior) ApplyMovement(desired Vec2, dt float64) {
 	}
 }
 
-// getMaxSpeed returns max speed based on soldier state and stance
+// getMaxSpeed returns max speed based on soldier state and stance.
 func (sb *SteeringBehavior) getMaxSpeed() float64 {
 	// Base speeds (pixels per second)
 	baseSpeed := 100.0
@@ -240,7 +241,7 @@ func (sb *SteeringBehavior) getMaxSpeed() float64 {
 	return baseSpeed
 }
 
-// applyUnstuckBehavior attempts to free a stuck soldier
+// applyUnstuckBehavior attempts to free a stuck soldier.
 func (sb *SteeringBehavior) applyUnstuckBehavior() {
 	// Apply random jitter using soldier's deterministic RNG
 	jitterX := (sb.soldier.psychRoll(sb.stuckTicks*7) - 0.5) * 40.0
@@ -259,8 +260,8 @@ func (sb *SteeringBehavior) applyUnstuckBehavior() {
 	}
 }
 
-// GetTacticalWeight determines how much to blend tactical vs strategic flow
-// Returns 0.0 for pure strategic, 1.0 for pure tactical
+// GetTacticalWeight determines how much to blend tactical vs strategic flow.
+// Returns 0.0 for pure strategic, 1.0 for pure tactical.
 func (sb *SteeringBehavior) GetTacticalWeight() float64 {
 	if sb.soldier.squad == nil || sb.soldier.squad.flowController == nil {
 		return 0.0

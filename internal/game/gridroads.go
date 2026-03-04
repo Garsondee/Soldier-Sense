@@ -8,7 +8,7 @@ import (
 // gridRoadConfig holds tuneable parameters for grid road generation.
 type gridRoadConfig struct {
 	MainRoadCount   int     // number of main roads (horizontal + vertical)
-	MainRoadWidth   int     // width in tiles (odd numbers centre nicely)
+	MainRoadWidth   int     // width in tiles (odd numbers center nicely)
 	SideStreetCount int     // maximum side streets
 	SideStreetWidth int     // width in tiles
 	PavementChance  float64 // probability of pavement on each road edge
@@ -26,52 +26,54 @@ var defaultRoadConfig = gridRoadConfig{
 
 // gridRoadPath stores a single road as an ordered list of tile coordinates.
 type gridRoadPath struct {
-	tiles [][2]int // (col, row) centres
+	tiles [][2]int // (col, row) centers
 	width int      // total width in tiles
 }
 
-// generateGridRoads creates grid-aligned roads and stamps them into the tile map.
-// Roads are axis-aligned paths that traverse the map with occasional 90° turns.
+// generateGridRoads creates a simple grid-aligned road network and stamps it
+// into the tile map.
 func generateGridRoads(tm *TileMap, rng *rand.Rand, cfg gridRoadConfig) []gridRoadPath {
 	paths := make([]gridRoadPath, 0, cfg.MainRoadCount+cfg.SideStreetCount)
 
-	// Horizontal-ish roads.
-	numH := 2
-	numV := cfg.MainRoadCount - numH
-	if numV < 1 {
-		numV = 1
+	mainCount := cfg.MainRoadCount
+	if mainCount <= 0 {
+		mainCount = 1
 	}
 
-	// Spread horizontal roads across the map height.
-	hSlots := spreadSlots(tm.Rows, numH, rng)
-	for _, baseRow := range hSlots {
-		path := generateSingleRoad(tm, rng, true, baseRow, cfg.MainRoadWidth, cfg.MinStraightRun)
-		if len(path.tiles) > 0 {
-			stampRoad(tm, path, cfg.PavementChance, rng)
-			paths = append(paths, path)
-		}
+	// Split main roads into horizontal + vertical.
+	hCount := mainCount / 2
+	if hCount == 0 {
+		hCount = 1
+	}
+	vCount := mainCount - hCount
+	if vCount == 0 {
+		vCount = 1
 	}
 
-	// Vertical-ish roads.
-	vSlots := spreadSlots(tm.Cols, numV, rng)
-	for _, baseCol := range vSlots {
-		path := generateSingleRoad(tm, rng, false, baseCol, cfg.MainRoadWidth, cfg.MinStraightRun)
-		if len(path.tiles) > 0 {
-			stampRoad(tm, path, cfg.PavementChance, rng)
-			paths = append(paths, path)
-		}
+	// Create main roads.
+	hSlots := _spreadSlots(tm.Rows, hCount, rng)
+	for _, r := range hSlots {
+		p := _generateSingleRoad(tm, rng, true, r, cfg.MainRoadWidth, cfg.MinStraightRun)
+		paths = append(paths, p)
+		_stampRoad(tm, p, cfg.PavementChance, rng)
+	}
+	vSlots := _spreadSlots(tm.Cols, vCount, rng)
+	for _, c := range vSlots {
+		p := _generateSingleRoad(tm, rng, false, c, cfg.MainRoadWidth, cfg.MinStraightRun)
+		paths = append(paths, p)
+		_stampRoad(tm, p, cfg.PavementChance, rng)
 	}
 
-	// Side streets: short stubs branching off main roads.
-	for i := 0; i < cfg.SideStreetCount; i++ {
-		if len(paths) == 0 {
-			break
-		}
-		parent := paths[rng.Intn(len(paths))]
-		side := generateSideStreet(tm, rng, parent, cfg.SideStreetWidth, cfg.MinStraightRun)
-		if len(side.tiles) > 0 {
-			stampRoad(tm, side, cfg.PavementChance*0.5, rng)
-			paths = append(paths, side)
+	// Side streets branch off main roads.
+	if cfg.SideStreetCount > 0 && len(paths) > 0 {
+		for i := 0; i < cfg.SideStreetCount; i++ {
+			parent := paths[rng.Intn(len(paths))]
+			p := _generateSideStreet(tm, rng, parent, cfg.SideStreetWidth, cfg.MinStraightRun)
+			if len(p.tiles) == 0 {
+				continue
+			}
+			paths = append(paths, p)
+			_stampRoad(tm, p, cfg.PavementChance, rng)
 		}
 	}
 
@@ -79,7 +81,7 @@ func generateGridRoads(tm *TileMap, rng *rand.Rand, cfg gridRoadConfig) []gridRo
 }
 
 // spreadSlots distributes n slots evenly across mapSize with jitter.
-func spreadSlots(mapSize, n int, rng *rand.Rand) []int {
+func _spreadSlots(mapSize, n int, rng *rand.Rand) []int {
 	slots := make([]int, 0, n)
 	margin := mapSize / 8
 	usable := mapSize - 2*margin
@@ -105,7 +107,7 @@ func spreadSlots(mapSize, n int, rng *rand.Rand) []int {
 // generateSingleRoad creates a road path that traverses the map.
 // If horizontal=true, it goes left→right; otherwise top→bottom.
 // The road mostly follows basePos but can shift by ±1 row/col occasionally.
-func generateSingleRoad(tm *TileMap, rng *rand.Rand, horizontal bool, basePos, width, minStraight int) gridRoadPath {
+func _generateSingleRoad(tm *TileMap, rng *rand.Rand, horizontal bool, basePos, width, minStraight int) gridRoadPath {
 	var path gridRoadPath
 	path.width = width
 
@@ -179,7 +181,7 @@ func generateSingleRoad(tm *TileMap, rng *rand.Rand, horizontal bool, basePos, w
 }
 
 // generateSideStreet creates a short road branching perpendicular from a parent road.
-func generateSideStreet(tm *TileMap, rng *rand.Rand, parent gridRoadPath, width, minStraight int) gridRoadPath {
+func _generateSideStreet(tm *TileMap, rng *rand.Rand, parent gridRoadPath, width, _ int) gridRoadPath {
 	var path gridRoadPath
 	path.width = width
 
@@ -232,12 +234,12 @@ func generateSideStreet(tm *TileMap, rng *rand.Rand, parent gridRoadPath, width,
 	return path
 }
 
-// stampRoad writes road tiles into the tile map, expanding from centre line by width.
-func stampRoad(tm *TileMap, path gridRoadPath, pavementChance float64, rng *rand.Rand) {
+// stampRoad writes road tiles into the tile map, expanding from center line by width.
+func _stampRoad(tm *TileMap, path gridRoadPath, pavementChance float64, rng *rand.Rand) {
 	hw := path.width / 2
 	hasPavement := rng.Float64() < pavementChance
 
-	// Build a set for fast lookup of road centre tiles.
+	// Build a set for fast lookup of road center tiles.
 	centreSet := make(map[[2]int]bool, len(path.tiles))
 	for _, t := range path.tiles {
 		centreSet[t] = true

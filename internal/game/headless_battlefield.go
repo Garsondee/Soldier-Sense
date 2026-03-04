@@ -4,6 +4,7 @@ import (
 	"math/rand"
 )
 
+// HeadlessBattlefield bundles generated map state for headless simulation flows.
 type HeadlessBattlefield struct {
 	Width  int
 	Height int
@@ -19,6 +20,7 @@ type HeadlessBattlefield struct {
 	MapSeed     int64
 }
 
+// NewHeadlessBattlefield generates a deterministic battlefield from the given seed and dimensions.
 func NewHeadlessBattlefield(mapSeed int64, battleW, battleH int) *HeadlessBattlefield {
 	g := &Game{
 		gameWidth:  battleW,
@@ -28,8 +30,19 @@ func NewHeadlessBattlefield(mapSeed int64, battleW, battleH int) *HeadlessBattle
 
 	mapRng := rand.New(rand.NewSource(mapSeed)) // #nosec G404 -- deterministic sim
 	g.tileMap = NewTileMap(battleW/cellSize, battleH/cellSize)
-	generateGridRoads(g.tileMap, mapRng, defaultRoadConfig)
-	g.initBuildings(mapRng)
+
+	// Generate organic road network
+	organicRoads := generateOrganicRoadNetwork(g.tileMap, mapRng)
+
+	// Generate lot subdivision based on roads
+	lots := generateLotSubdivision(g.tileMap, organicRoads, mapRng)
+
+	// Generate buildings within lots
+	g.initBuildingsFromLots(lots, mapRng)
+
+	// Store road and lot data
+	g.organicRoads = organicRoads
+	g.lots = lots
 
 	coverRng := rand.New(rand.NewSource(mapSeed + 12345)) // #nosec G404 -- deterministic sim
 	var rubble []*CoverObject
@@ -37,7 +50,7 @@ func NewHeadlessBattlefield(mapSeed int64, battleW, battleH int) *HeadlessBattle
 	g.applyBuildingDamage(rubble)
 
 	g.initTileMap()
-	generateBiome(g.tileMap, mapRng, defaultBiomeConfig)
+	generateBiome(g.tileMap, mapRng, &defaultBiomeConfig)
 	generateFortifications(g.tileMap, mapRng, defaultFortConfig)
 
 	g.navGrid = NewNavGrid(g.gameWidth, g.gameHeight, g.buildings, soldierRadius, g.covers, g.windows)

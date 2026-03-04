@@ -1,3 +1,4 @@
+// Package main runs the laboratory scenario harness.
 package main
 
 import (

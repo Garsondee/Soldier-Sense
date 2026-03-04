@@ -9,7 +9,7 @@ func sqr(x float64) float64 {
 
 // withinRadius returns true if the offset (dx, dy) from an origin falls
 // within radius r. Uses squared distance to avoid sqrt in hot paths.
-func withinRadius(dx, dy, r float64) bool { //nolint:unused
+func withinRadius(dx, dy, r float64) bool {
 	return dx*dx+dy*dy <= r*r
 }
 

@@ -63,7 +63,7 @@ func rayHitsAnyBuilding(ox, oy, ex, ey float64, buildings []rect) bool {
 
 // FindBestSightlinePosition searches nearby walkable cells for the one with the
 // highest sightline score. Returns the world position and the score.
-// searchRadius is in grid cells.
+// SearchRadius is in grid cells.
 func FindBestSightlinePosition(wx, wy float64, searchRadius int, ng *NavGrid, buildings []rect) (float64, float64, float64) {
 	cx, cy := WorldToCell(wx, wy)
 	bestX, bestY := wx, wy

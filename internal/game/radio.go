@@ -28,13 +28,17 @@ const (
 	radioRequestTransitAllowance = 180
 )
 
-// RadioMessageType categorises squad radio traffic.
+// RadioMessageType categorizes squad radio traffic.
 type RadioMessageType uint8
 
 const (
+	// RadioMsgContactReport reports visual enemy contact and distance.
 	RadioMsgContactReport RadioMessageType = iota
+	// RadioMsgStatusReport reports member health/status.
 	RadioMsgStatusReport
+	// RadioMsgFearReport reports acute fear/collapse risk.
 	RadioMsgFearReport
+	// RadioMsgStatusRequest asks a member to transmit a status reply.
 	RadioMsgStatusRequest
 )
 
@@ -53,7 +57,7 @@ func (t RadioMessageType) String() string {
 	}
 }
 
-func (sq *Squad) radioTransmitDurationTicks(msg RadioMessage, sender *Soldier) int {
+func (sq *Squad) radioTransmitDurationTicks(msg *RadioMessage, sender *Soldier) int {
 	chars := len(msg.Summary)
 	if chars < 1 {
 		chars = 1
@@ -88,38 +92,42 @@ func (sq *Squad) radioTransmitDurationTicks(msg RadioMessage, sender *Soldier) i
 type RadioPriority uint8
 
 const (
+	// RadioPriRoutine is normal traffic priority.
 	RadioPriRoutine RadioPriority = iota
+	// RadioPriUrgent preempts routine traffic.
 	RadioPriUrgent
+	// RadioPriCritical preempts all lower-priority traffic.
 	RadioPriCritical
 )
 
 // RadioMessage is the phase-A structured packet used on a squad net.
 type RadioMessage struct {
+	SenderLabel   string
+	ReceiverLabel string
+	Summary       string
+
+	ContactX float64
+	ContactY float64
+	Distance float64
+	Fear     float64
+
 	ID          uint64
 	TickCreated int
 	NetID       int
 
-	SenderID      int
-	SenderLabel   string
-	ReceiverID    int
-	ReceiverLabel string
+	SenderID   int
+	ReceiverID int
 
-	Type     RadioMessageType
-	Priority RadioPriority
-	Summary  string
-
-	ContactX     float64
-	ContactY     float64
+	Type         RadioMessageType
+	Priority     RadioPriority
 	ContactCount int
-	Distance     float64
-	Fear         float64
 	Injured      bool
 }
 
 type radioNet struct {
-	netID   int
-	nextID  uint64
 	pending []RadioMessage
+	nextID  uint64
+	netID   int
 }
 
 type radioVisualEvent struct {
@@ -136,27 +144,29 @@ type radioVisualEvent struct {
 }
 
 type radioChatLine struct {
-	Tick     int
 	Sender   string
 	Message  string
 	Receiver string
 	Quality  string
+
+	Tick     int
 	Duration int
 }
 
 type radioTransmission struct {
-	msg          RadioMessage
+	msg         RadioMessage
+	resolvedMsg RadioMessage
+
 	dispatchTick int
 	arrivalTick  int
-	resolvedMsg  RadioMessage
 	outcome      radioDeliveryOutcome
 }
 
-func (rn *radioNet) enqueue(msg RadioMessage) {
+func (rn *radioNet) enqueue(msg *RadioMessage) {
 	rn.nextID++
 	msg.ID = rn.nextID
 	msg.NetID = rn.netID
-	rn.pending = append(rn.pending, msg)
+	rn.pending = append(rn.pending, *msg)
 }
 
 func (rn *radioNet) dequeue() (RadioMessage, bool) {
@@ -195,7 +205,7 @@ func (sq *Squad) ensureRadioState() {
 	}
 }
 
-func (sq *Squad) queueRadio(msg RadioMessage) {
+func (sq *Squad) queueRadio(msg *RadioMessage) {
 	sq.ensureRadioState()
 	sq.radioNet.enqueue(msg)
 	sq.RadioQueued++
@@ -220,22 +230,22 @@ func (sq *Squad) PlanComms(tick int) {
 		if deadline, ok := sq.radioPendingStatus[m.id]; ok {
 			if tick <= deadline && !sq.radioStatusReplyQueued[m.id] {
 				reply := m.buildStatusReportMessage(sq.Leader, tick, RadioPriUrgent, "STATUS REPLY")
-				sq.queueRadio(reply)
+				sq.queueRadio(&reply)
 				sq.radioStatusReplyQueued[m.id] = true
 				continue
 			}
 		}
 
 		if msg, ok := m.buildContactReportMessage(sq.Leader, tick); ok {
-			sq.queueRadio(msg)
+			sq.queueRadio(&msg)
 			continue
 		}
 		if msg, ok := m.buildInjuryStatusMessage(sq.Leader, tick); ok {
-			sq.queueRadio(msg)
+			sq.queueRadio(&msg)
 			continue
 		}
 		if msg, ok := m.buildFearReportMessage(sq.Leader, tick); ok {
-			sq.queueRadio(msg)
+			sq.queueRadio(&msg)
 		}
 	}
 }
@@ -266,7 +276,7 @@ func (sq *Squad) planLeaderStatusRequest(tick int) {
 			Priority:      RadioPriRoutine,
 			Summary:       "STATUS?",
 		}
-		sq.queueRadio(msg)
+		sq.queueRadio(&msg)
 		sq.radioPendingStatus[m.id] = tick + radioStatusReplyWindow + radioRequestTransitAllowance
 		sq.radioStatusReplyQueued[m.id] = false
 		sq.radioStatusRequestCursor = (idx + 1) % len(sq.Members)
@@ -298,9 +308,9 @@ func (sq *Squad) ResolveComms(tick int, tl *ThoughtLog) {
 	}
 
 	sender := sq.memberByID(msg.SenderID)
-	transmitTicks := sq.radioTransmitDurationTicks(msg, sender)
+	transmitTicks := sq.radioTransmitDurationTicks(&msg, sender)
 	arrivalTick := tick + transmitTicks
-	resolvedMsg, outcome := sq.resolveDelivery(msg, tick)
+	resolvedMsg, outcome := sq.resolveDelivery(&msg, tick)
 
 	sq.radioInFlight = &radioTransmission{
 		msg:          msg,
@@ -321,8 +331,8 @@ func (sq *Squad) resolveInFlightTransmission(tick int, tl *ThoughtLog) {
 	tx := sq.radioInFlight
 	sq.radioInFlight = nil
 
-	sq.pushRadioVisualEvent(tx.resolvedMsg, tx.outcome, tx.dispatchTick, tx.arrivalTick-tx.dispatchTick)
-	sq.pushRadioChatLine(tx.resolvedMsg, tx.outcome, tick)
+	sq.pushRadioVisualEvent(&tx.resolvedMsg, tx.outcome, tx.dispatchTick, tx.arrivalTick-tx.dispatchTick)
+	sq.pushRadioChatLine(&tx.resolvedMsg, tx.outcome, tick)
 	switch tx.outcome {
 	case radioDeliveryDrop:
 		sq.RadioDropped++
@@ -344,7 +354,7 @@ func (sq *Squad) resolveInFlightTransmission(tick int, tl *ThoughtLog) {
 
 	if tx.resolvedMsg.ReceiverID == sq.Leader.id {
 		sq.RadioReceived++
-		sq.applyRadioMessage(tx.resolvedMsg, tick)
+		sq.applyRadioMessage(&tx.resolvedMsg, tick)
 	}
 	if sq.radioChannelBusyUntil < tick+radioResponsePauseTicks {
 		sq.radioChannelBusyUntil = tick + radioResponsePauseTicks
@@ -385,7 +395,7 @@ func (sq *Squad) resolveStatusTimeouts(tick int, tl *ThoughtLog) {
 	}
 }
 
-func (sq *Squad) applyRadioMessage(msg RadioMessage, tick int) {
+func (sq *Squad) applyRadioMessage(msg *RadioMessage, tick int) {
 	if sq.Leader == nil {
 		return
 	}
@@ -442,11 +452,11 @@ const (
 	radioDeliveryClear
 )
 
-func (sq *Squad) resolveDelivery(msg RadioMessage, tick int) (RadioMessage, radioDeliveryOutcome) {
+func (sq *Squad) resolveDelivery(msg *RadioMessage, tick int) (RadioMessage, radioDeliveryOutcome) {
 	sender := sq.memberByID(msg.SenderID)
 	receiver := sq.memberByID(msg.ReceiverID)
 	if sender == nil || receiver == nil || sender.state == SoldierStateDead || receiver.state == SoldierStateDead {
-		return msg, radioDeliveryDrop
+		return *msg, radioDeliveryDrop
 	}
 
 	dist := math.Hypot(sender.x-receiver.x, sender.y-receiver.y)
@@ -458,22 +468,22 @@ func (sq *Squad) resolveDelivery(msg RadioMessage, tick int) (RadioMessage, radi
 	quality := 1.0 - (0.55 * distancePenalty) - (0.20 * senderFear) - (0.13 * receiverFear) - noisePenalty
 	quality = clamp01(quality)
 	if quality < radioDropThreshold {
-		return msg, radioDeliveryDrop
+		return *msg, radioDeliveryDrop
 	}
 	if quality < radioGarbleThreshold {
 		return sq.garbledMessage(msg, tick), radioDeliveryGarbled
 	}
-	return msg, radioDeliveryClear
+	return *msg, radioDeliveryClear
 }
 
-func (sq *Squad) radioDeterministicNoise(msg RadioMessage, tick int) float64 {
+func (sq *Squad) radioDeterministicNoise(msg *RadioMessage, tick int) float64 {
 	phase := float64(msg.ID*17+uint64(msg.SenderID*31)+uint64(msg.ReceiverID*13)+uint64(tick*7)+uint64(sq.ID*19)) * 0.071 // #nosec G115 -- intentional bit-mixing for deterministic noise
 	v := math.Sin(phase)
 	return (v + 1.0) * 0.5
 }
 
-func (sq *Squad) garbledMessage(msg RadioMessage, tick int) RadioMessage {
-	garbled := msg
+func (sq *Squad) garbledMessage(msg *RadioMessage, tick int) RadioMessage {
+	garbled := *msg
 	jitter := sq.radioDeterministicNoise(msg, tick)
 	garbled.Summary = "GARBLED " + msg.Summary
 
@@ -502,7 +512,7 @@ func (sq *Squad) memberByID(id int) *Soldier {
 	return nil
 }
 
-func (sq *Squad) pushRadioVisualEvent(msg RadioMessage, outcome radioDeliveryOutcome, tick int, transmitTicks int) {
+func (sq *Squad) pushRadioVisualEvent(msg *RadioMessage, outcome radioDeliveryOutcome, tick, transmitTicks int) {
 	sender := sq.memberByID(msg.SenderID)
 	receiver := sq.memberByID(msg.ReceiverID)
 	if sender == nil || receiver == nil {
@@ -545,7 +555,7 @@ func (sq *Squad) pruneRadioVisualEvents(tick int) {
 	sq.radioVisualEvents = kept
 }
 
-func (sq *Squad) pushRadioChatLine(msg RadioMessage, outcome radioDeliveryOutcome, tick int) {
+func (sq *Squad) pushRadioChatLine(msg *RadioMessage, outcome radioDeliveryOutcome, tick int) {
 	quality := "CLEAR"
 	switch outcome {
 	case radioDeliveryDrop:
@@ -568,7 +578,7 @@ func (sq *Squad) pushRadioChatLine(msg RadioMessage, outcome radioDeliveryOutcom
 	}
 }
 
-func (sq *Squad) pruneRadioChatLines(tick int) { // nolint:unused
+func (sq *Squad) pruneRadioChatLines(tick int) {
 	if len(sq.radioChatLines) == 0 {
 		return
 	}

@@ -1,3 +1,4 @@
+// Package game contains the Soldier-Sense simulation domain and systems.
 package game
 
 import (
@@ -43,7 +44,7 @@ var defaultBiomeConfig = biomeConfig{
 
 // generateBiome applies noise-driven ground variation and vegetation to the TileMap.
 // Runs after roads and buildings are stamped, so it skips those tiles.
-func generateBiome(tm *TileMap, rng *rand.Rand, cfg biomeConfig) {
+func generateBiome(tm *TileMap, rng *rand.Rand, cfg *biomeConfig) {
 	// Generate three independent noise seeds.
 	vegSeed := rng.Int63()
 	roughSeed := rng.Int63()
@@ -84,15 +85,16 @@ func generateBiome(tm *TileMap, rng *rand.Rand, cfg biomeConfig) {
 			moistNoise := valueNoise2D(mx, my, moistSeed)
 
 			// --- Ground variation ---
-			if moistNoise > cfg.MudThreshold && roughNoise < 0.4 {
+			switch {
+			case moistNoise > cfg.MudThreshold && roughNoise < 0.4:
 				t.Ground = GroundMud
-			} else if roughNoise > cfg.GravelThreshold {
+			case roughNoise > cfg.GravelThreshold:
 				t.Ground = GroundGravel
-			} else if roughNoise > cfg.DirtThreshold && vegNoise < 0.3 {
+			case roughNoise > cfg.DirtThreshold && vegNoise < 0.3:
 				t.Ground = GroundDirt
-			} else if vegNoise > cfg.ScrubThreshold && vegNoise < cfg.BushThreshold {
+			case vegNoise > cfg.ScrubThreshold && vegNoise < cfg.BushThreshold:
 				t.Ground = GroundScrub
-			} else if vegNoise > cfg.LongGrassThresh {
+			case vegNoise > cfg.LongGrassThresh:
 				t.Ground = GroundGrassLong
 			}
 			// else stays GroundGrass (default)
@@ -144,7 +146,7 @@ func generateBiome(tm *TileMap, rng *rand.Rand, cfg biomeConfig) {
 }
 
 // canPlaceTree checks if a tree can be placed at (col,row) — needs the cell
-// and its cardinal neighbours to be clear outdoor ground.
+// and its cardinal neighbors to be clear outdoor ground.
 func canPlaceTree(tm *TileMap, col, row int) bool {
 	for dr := -1; dr <= 1; dr++ {
 		for dc := -1; dc <= 1; dc++ {
@@ -159,7 +161,7 @@ func canPlaceTree(tm *TileMap, col, row int) bool {
 			if t.Ground == GroundTarmac || t.Ground == GroundPavement {
 				return false
 			}
-			// Centre cell must be empty; neighbours must not have blocking objects.
+			// Center cell must be empty; neighbors must not have blocking objects.
 			if dc == 0 && dr == 0 {
 				if t.Object != ObjectNone {
 					return false

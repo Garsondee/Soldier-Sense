@@ -36,7 +36,7 @@ const (
 	peekCooldownHit   = 180 // cooldown after contact peek (~3s)
 
 	// Decision pacing.
-	// baseDecisionInterval is the MINIMUM re-evaluation window at zero stress.
+	// BaseDecisionInterval is the MINIMUM re-evaluation window at zero stress.
 	// Under stress, the window GROWS (soldiers commit longer when scared).
 	baseDecisionInterval   = 60    // ticks (~1s at 60 TPS) — generous baseline
 	minDecisionInterval    = 30    // floor: never re-evaluate faster than 0.5s
@@ -56,10 +56,10 @@ const (
 	reloadBaseTicks         = 85
 	reloadMinTicks          = 45
 
-	// Pinned-down behaviour thresholds.
+	// Pinned-down behavior thresholds.
 	suppressedRunThreshold = 0.65 // heavy suppression where only resilient soldiers may still run
 	pinnedSuppressionLevel = 0.82 // above this, soldiers are effectively pinned and must crawl/freeze
-	extremeFearProneLevel  = 0.78 // extreme fear while suppressed forces prone crawl behaviour
+	extremeFearProneLevel  = 0.78 // extreme fear while suppressed forces prone crawl behavior
 
 	// Pinned crawl movement is intentionally very slow.
 	pinnedCrawlSpeedMul = 0.35
@@ -70,6 +70,7 @@ const (
 // FireMode represents the soldier's current weapon engagement mode.
 type FireMode int
 
+// FireMode values.
 const (
 	FireModeSingle FireMode = iota // deliberate single shots — long range
 	FireModeBurst                  // 3-round bursts — mid range
@@ -89,7 +90,8 @@ func (fm FireMode) String() string {
 	}
 }
 
-type SoldierDebugSnapshot struct {
+// SoldierDebugSnapshot captures a compact per-tick state useful for debug logs.
+type SoldierDebugSnapshot struct { //nolint:govet
 	Tick int
 
 	X  float64
@@ -151,7 +153,8 @@ type SoldierDebugSnapshot struct {
 	PostArrivalTimer     int
 }
 
-func (ss SoldierDebugSnapshot) CompactString(label string) string {
+// CompactString formats the snapshot into a single log line.
+func (ss SoldierDebugSnapshot) CompactString(label string) string { //nolint:gocritic
 	var b strings.Builder
 	fmt.Fprintf(&b, "[T=%03d] %-3s ", ss.Tick, label)
 	fmt.Fprintf(&b, "pos:(%.0f,%.0f) hp:%.0f%% ", ss.X, ss.Y, ss.HP*100)
@@ -325,7 +328,7 @@ func (s *Soldier) psychPressure() float64 {
 	return clamp01(pressure)
 }
 
-func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) {
+func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	targetX, targetY := s.startTarget[0], s.startTarget[1]
 	if retreatToOwnLines || bb.SquadBroken {
@@ -337,7 +340,8 @@ func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) {
 	} else {
 		var cX, cY float64
 		hasContact := false
-		if bb.VisibleThreatCount() > 0 {
+		switch {
+		case bb.VisibleThreatCount() > 0:
 			best := math.MaxFloat64
 			for _, t := range bb.Threats {
 				if !t.IsVisible {
@@ -350,10 +354,10 @@ func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) {
 					hasContact = true
 				}
 			}
-		} else if bb.SquadHasContact {
+		case bb.SquadHasContact:
 			cX, cY = bb.SquadContactX, bb.SquadContactY
 			hasContact = true
-		} else if bb.HeardGunfire {
+		case bb.HeardGunfire:
 			cX, cY = bb.HeardGunfireX, bb.HeardGunfireY
 			hasContact = true
 		}
@@ -401,7 +405,7 @@ func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) {
 	s.pathIndex = 0
 }
 
-func (s *Soldier) updatePsychCrisis(tick int) {
+func (s *Soldier) updatePsychCrisis(tick int) { //nolint:gocognit
 	bb := &s.blackboard
 	pressure := s.psychPressure()
 
@@ -505,7 +509,10 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 	// Require either meaningful casualties/cohesion break, or very high squad stress
 	// combined with low morale.
 	disobeyEligible := collapseEligible && bb.OfficerOrderActive
-	panicEligible := collapseEligible && pressure > 0.90 && directThreat && (veryLowMorale || heavyCasualties || bb.SquadBroken)
+	// Survivalism makes soldiers recognize losing situations earlier
+	// High survivalism soldiers see the writing on the wall when casualties mount
+	survivalismAwareness := s.profile.Survival.Survivalism * bb.SquadCasualtyRate * 0.30
+	panicEligible := collapseEligible && (pressure+survivalismAwareness) > 0.90 && directThreat && (veryLowMorale || heavyCasualties || bb.SquadBroken)
 
 	disobeyDrive := pressure - (s.profile.Skills.Discipline*0.42 + s.profile.Psych.Morale*0.22 + s.profile.Psych.Composure*0.18)
 	if bb.DisobeyingOrders {
@@ -516,7 +523,7 @@ func (s *Soldier) updatePsychCrisis(tick int) {
 		bb.DisobeyingOrders = true
 	}
 
-	panicDrive := pressure + bb.SquadStress*0.15 + bb.SquadCasualtyRate*0.20 - s.profile.Skills.Discipline*0.20
+	panicDrive := pressure + bb.SquadStress*0.15 + bb.SquadCasualtyRate*0.20 - s.profile.Skills.Discipline*0.20 + s.profile.Personality.PanicThreshold*0.25 - s.profile.Survival.Survivalism*0.12
 	if panicEligible && (panicDrive > 1.03 || (panicDrive > 0.95 && s.psychRoll(53) < panicDrive-0.88)) {
 		retreatToOwn := s.psychRoll(59) < (0.45 + s.profile.Skills.Discipline*0.35)
 		bb.PanicRetreatActive = true
@@ -632,36 +639,38 @@ func (s *Soldier) recoveryTargetHint() (float64, float64) {
 
 // Fire mode distance thresholds (in pixels).
 const (
-	// autoRange: 10 tiles — CQB range. Auto only triggers here AND in low-sightline terrain.
+	// Auto range: 10 tiles — CQB range. Auto only triggers here AND in low-sightline terrain.
 	autoRange = 10 * cellSize // 160px
-	// burstRange: 20 tiles — mid-range, committed engagement.
+	// Burst range: 20 tiles — mid-range, committed engagement.
 	burstRange = 20 * cellSize // 320px
-	// singleRange: up to maxFireRange — deliberate long-range fire.
+	// Single range: up to maxFireRange — deliberate long-range fire.
 	// Below this, single is always available.
 
 	// Sightline threshold for auto mode — tight/enclosed terrain.
 	autoSightlineThresh = 0.40
 
-	// modeSwitchTicks: firing pause while changing mode (~0.4s at 60TPS).
+	// Mode switch ticks: firing pause while changing mode (~0.4s at 60TPS).
 	modeSwitchTicks = 25
 
-	// proxEnemyStressRange: distance at which nearby enemies cause stress (pixels).
+	// Prox enemy stress range: distance at which nearby enemies cause stress (pixels).
 	proxEnemyStressRange = 6 * cellSize // 96px
-	// proxFriendCrowdRange: distance causing crowding stress from friendlies.
+	// Prox friend crowd range: distance causing crowding stress from friendlies.
 	proxFriendCrowdRange = 3 * cellSize // 48px
 )
 
 // Team distinguishes friendly vs opposing force.
 type Team int
 
+// Team values.
 const (
 	TeamRed  Team = iota // friendly
 	TeamBlue             // OpFor
 )
 
-// SoldierState represents the high-level behaviour state.
+// SoldierState represents the high-level behavior state.
 type SoldierState int
 
+// SoldierState values.
 const (
 	SoldierStateIdle                 SoldierState = iota // holding, scanning
 	SoldierStateMoving                                   // advancing along path
@@ -700,7 +709,7 @@ func (ss SoldierState) IsIncapacitated() bool {
 }
 
 // Soldier is an autonomous agent on the battlefield.
-type Soldier struct {
+type Soldier struct { //nolint:gocritic,govet
 	id    int
 	label string // e.g. "R1", "B3"
 	x, y  float64
@@ -854,8 +863,10 @@ type Soldier struct {
 	recoveryExploreThisTick bool
 }
 
+// RecoveryAction defines how a soldier should recover from suppression or contact.
 type RecoveryAction int
 
+// RecoveryAction values.
 const (
 	RecoveryActionDirect RecoveryAction = iota
 	RecoveryActionLateral
@@ -1027,18 +1038,61 @@ func DefaultProfile() SoldierProfile {
 			FitnessBase: 0.6,
 			Fatigue:     0.0,
 			SprintPool:  10.0,
+			// Phase 2 defaults
+			Strength:  0.5,
+			Agility:   0.5,
+			Endurance: 0.5,
 		},
 		Skills: SkillStats{
 			Marksmanship: 0.5,
 			Fieldcraft:   0.4,
 			Discipline:   0.6,
 			FirstAid:     0.3,
+			// Phase 2 defaults
+			FireControl:       0.5,
+			TacticalAwareness: 0.5,
 		},
 		Psych: PsychState{
 			Experience: 0.2,
 			Morale:     0.7,
 			Fear:       0.0,
 			Composure:  0.5,
+		},
+		Personality: PersonalityTraits{
+			Aggression:     0.5,
+			Caution:        0.5,
+			PanicThreshold: 0.5,
+			// Phase 2 defaults
+			Initiative:   0.5,
+			Teamwork:     0.5,
+			Adaptability: 0.5,
+		},
+		Preferences: TacticalPreferences{
+			ReloadEarly:    0.5,
+			PreferCover:    0.5,
+			PreferFlanking: 0.5,
+		},
+		Survival: SurvivalTraits{
+			SelfPreservation:     0.6, // Moderate survival instinct
+			SituationalAwareness: 0.4, // Basic awareness
+			MedicalKnowledge:     0.3, // Minimal training
+			MovementDiscipline:   0.5, // Average discipline
+			RiskAssessment:       0.5, // Baseline caution
+			CoverSeeking:         0.6, // Natural cover preference
+			ThreatPrioritization: 0.4, // Basic target selection
+			BreakContact:         0.4, // Limited tactical withdrawal skill
+			Stealth:              0.3, // Minimal stealth capability
+			Survivalism:          0.5, // Basic survival instincts
+		},
+		Cooperation: SquadCooperation{
+			CoordinatedFire:      0.4, // Basic fire coordination
+			BuddyAidPriority:     0.5, // Moderate willingness to help
+			MedicDedication:      0.2, // Minimal medic specialization
+			CasualtyEvacuation:   0.3, // Limited rescue willingness
+			CoverSharing:         0.5, // Basic spatial awareness
+			SuppressiveSupport:   0.4, // Some covering fire capability
+			CommunicationClarity: 0.5, // Average radio discipline
+			LeadershipFollowing:  0.6, // Moderate obedience
 		},
 		Stance: StanceStanding,
 	}
@@ -1047,6 +1101,27 @@ func DefaultProfile() SoldierProfile {
 func (s *Soldier) recomputePath() {
 	s.path = s.navGrid.FindPath(s.x, s.y, s.endTarget[0], s.endTarget[1])
 	s.pathIndex = 0
+}
+
+// IsAlive returns true if the soldier is not dead.
+func (s *Soldier) IsAlive() bool {
+	return s.state != SoldierStateDead
+}
+
+// VisibleThreatCount returns the count of currently visible threats.
+func (s *Soldier) VisibleThreatCount() int {
+	return s.blackboard.VisibleThreatCount()
+}
+
+// IsInjured reports whether the soldier has any wounds.
+func (s *Soldier) IsInjured() bool {
+	return s.body.IsInjured()
+}
+
+// SetProfile replaces the soldier's profile with a new one.
+// Used for trait testing to apply different personality configurations.
+func (s *Soldier) SetProfile(profile SoldierProfile) { //nolint:gocritic
+	s.profile = profile
 }
 
 // think logs a thought if the message represents a goal/state change.
@@ -1064,7 +1139,7 @@ func (s *Soldier) decisionInterval() int {
 
 // reinforceCurrentGoal checks if positive feedback supports staying in the current goal.
 // Returns true if the goal should be extended (decision deferred).
-func (s *Soldier) reinforceCurrentGoal() bool {
+func (s *Soldier) reinforceCurrentGoal() bool { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	goal := bb.CurrentGoal
 
@@ -1084,11 +1159,12 @@ func (s *Soldier) reinforceCurrentGoal() bool {
 		}
 		// Check proximity to the destination we're heading toward.
 		var destX, destY float64
-		if bb.SquadHasContact {
+		switch {
+		case bb.SquadHasContact:
 			destX, destY = bb.SquadContactX, bb.SquadContactY
-		} else if bb.HeardGunfire {
+		case bb.HeardGunfire:
 			destX, destY = bb.HeardGunfireX, bb.HeardGunfireY
-		} else {
+		default:
 			destX, destY = bb.CombatMemoryX, bb.CombatMemoryY
 		}
 		dx := destX - s.x
@@ -1132,7 +1208,8 @@ func (s *Soldier) reinforceCurrentGoal() bool {
 	return false
 }
 
-func (s *Soldier) Update() {
+// Update advances the soldier state by one simulation tick.
+func (s *Soldier) Update() { //nolint:gocognit,gocyclo
 	if s.state == SoldierStateDead {
 		return
 	}
@@ -1259,9 +1336,9 @@ func (s *Soldier) Update() {
 		s.think(fmt.Sprintf("suppressed (%.2f) — pressure building", bb.SuppressLevel))
 	}
 
-	// --- Step 2: BELIEVE — update blackboard from vision ---
+	// --- Step 2: BELIEVE — blackboard threats updated by PerformVisionScan ---
 	tick := s.tickVal()
-	bb.UpdateThreats(s.vision.KnownContacts, tick)
+	// Note: UpdateThreats no longer needed - PerformVisionScan manages threats directly
 	bb.RefreshInternalGoals(&s.profile, s.x, s.y)
 	bb.Internal.IsMedic = s.isMedic // populate medic role for goal selection
 	s.updatePsychCrisis(tick)
@@ -1459,18 +1536,19 @@ func (s *Soldier) Update() {
 	}
 
 	shouldEval := false
-	if bb.PanicLocked {
+	switch {
+	case bb.PanicLocked:
 		// Panic-locked: no decisions.
 		shouldEval = false
-	} else if bb.ShatterReady() {
+	case bb.ShatterReady():
 		// Accumulated pressure broke through — force re-evaluation.
 		shouldEval = true
-	} else if bb.CommitPhase(tick) == 2 && tick >= bb.NextDecisionTick {
+	case bb.CommitPhase(tick) == 2 && tick >= bb.NextDecisionTick:
 		// Review phase reached and lock expired — scheduled re-evaluation.
 		shouldEval = true
-	} else if ef > 0.62 && bb.CommitPhase(tick) >= 1 && tick%stressReevalPeriod == 0 {
+	case ef > 0.62 && bb.CommitPhase(tick) >= 1 && tick%stressReevalPeriod == 0:
 		// Stress jitter: under elevated fear, occasionally force an early review.
-		// Deterministic pseudo-random roll based on id+tick keeps behaviour varied
+		// Deterministic pseudo-random roll based on id+tick keeps behavior varied
 		// without introducing non-replayable global randomness.
 		roll := math.Abs(math.Sin(float64((tick + 1) * (s.id + 3))))
 		if roll < (ef-0.62)*0.65 {
@@ -1616,6 +1694,12 @@ func (s *Soldier) goalSwitchPauseDuration(stress float64, underFire bool) int {
 	} else {
 		pause = int(float64(pause) * 0.45)
 	}
+
+	// Apply adaptability: high adaptability = shorter pause (faster switching)
+	// low adaptability = longer pause (more committed to current goal)
+	adaptabilityFactor := 0.5 + (1.0-s.profile.Personality.Adaptability)*0.8
+	pause = int(float64(pause) * adaptabilityFactor)
+
 	if pause < 0 {
 		pause = 0
 	}
@@ -1643,7 +1727,7 @@ func (s *Soldier) canSuppressedFallbackRun() bool {
 	return s.profile.Psych.Morale >= 0.65 && ef < 0.55
 }
 
-func (s *Soldier) shouldSeekClaimedBuilding(goal GoalKind) bool {
+func (s *Soldier) shouldSeekClaimedBuilding(goal GoalKind) bool { //nolint:gocyclo
 	bb := &s.blackboard
 	if bb.ClaimedBuildingIdx < 0 || bb.AtInterior {
 		return false
@@ -1681,7 +1765,7 @@ func (s *Soldier) shouldSeekClaimedBuilding(goal GoalKind) bool {
 	return bb.VisibleThreatCount() > 0 && etaTicks <= 180
 }
 
-func (s *Soldier) moveToClaimedBuilding(dt float64) bool {
+func (s *Soldier) moveToClaimedBuilding(dt float64) bool { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	if bb.ClaimedBuildingIdx < 0 || bb.ClaimedBuildingIdx >= len(s.buildingFootprints) {
 		return false
@@ -1757,8 +1841,8 @@ func (s *Soldier) pinnedFreezeThisTick() bool {
 	return roll < freezeChance
 }
 
-// executeGoal runs the behaviour for the soldier's current goal.
-func (s *Soldier) executeGoal(dt float64) {
+// executeGoal runs the behavior for the soldier's current goal.
+func (s *Soldier) executeGoal(dt float64) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	if bb.Surrendered {
 		s.executeSurrender(dt)
@@ -1933,12 +2017,13 @@ func (s *Soldier) executeGoal(dt float64) {
 		// but isn't effective — they need to close distance rather than idle in cover.
 		poorRange := bl.Internal.LastRange > float64(burstRange) &&
 			bl.Internal.LastEstimatedHitChance < 0.55
-		if outOfRange || poorRange {
+		switch {
+		case outOfRange || poorRange:
 			s.state = SoldierStateMoving
 			s.moveToContact(dt)
-		} else if !s.isInCover() {
+		case !s.isInCover():
 			s.seekCoverFromThreat(dt)
-		} else {
+		default:
 			s.state = SoldierStateIdle
 			s.profile.Physical.AccumulateFatigue(0, dt)
 			s.faceNearestThreat()
@@ -2013,14 +2098,15 @@ func (s *Soldier) executeGoal(dt float64) {
 			s.executePanicRetreat(dt)
 			break
 		}
-		if forcedCrawl {
+		switch {
+		case forcedCrawl:
 			s.requestStance(StanceProne, true)
-		} else if s.canSuppressedFallbackRun() {
+		case s.canSuppressedFallbackRun():
 			s.requestStance(StanceStanding, true)
 			// Running under heavy suppression is possible for resilient soldiers,
 			// but it spikes stress and can tip them into pinned crawl state.
 			s.profile.Psych.ApplyStress(0.006 + bb.SuppressLevel*0.004)
-		} else {
+		default:
 			s.requestStance(StanceCrouching, false)
 		}
 		s.state = SoldierStateMoving
@@ -2105,7 +2191,7 @@ func (s *Soldier) executeGoal(dt float64) {
 	}
 }
 
-func (s *Soldier) executeSearch(dt float64) {
+func (s *Soldier) executeSearch(dt float64) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 
 	// Abort immediately if contact returns.
@@ -2272,7 +2358,7 @@ func (s *Soldier) faceNearestThreat() {
 }
 
 const (
-	// contactLeashMul is how many times the normal formation leash distance
+	// ContactLeashMul is how many times the normal formation leash distance
 	// a MoveToContact soldier can stray from the leader before pulling back.
 	contactLeashMul   = 2.0
 	contactLeashBase  = 240.0 // px, fallback when no squad slot info
@@ -2302,7 +2388,7 @@ func (s *Soldier) recoveryUrgency() float64 {
 	}
 }
 
-func (s *Soldier) chooseRecoveryAction() RecoveryAction {
+func (s *Soldier) chooseRecoveryAction() RecoveryAction { //nolint:gocognit,gocyclo
 	if s.recoveryCommitTicks > 0 {
 		return s.recoveryAction
 	}
@@ -2400,7 +2486,7 @@ func (s *Soldier) chooseRecoveryAction() RecoveryAction {
 	return best
 }
 
-func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
+func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	action := s.chooseRecoveryAction()
 	exploring := s.recoveryExploreThisTick
@@ -2475,9 +2561,8 @@ func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
 				s.think("EXTREME PATHFINDING FAILURE - direct movement")
 			}
 			return
-		} else {
-			s.recoveryNoPathStreak = 0
 		}
+		s.recoveryNoPathStreak = 0
 	}
 
 	switch action {
@@ -2535,7 +2620,7 @@ func (s *Soldier) applyRecoveryAction(dt, targetX, targetY float64) {
 // moveToContact paths the soldier toward their assigned spread position (or the
 // squad contact if no individual order has been issued), within the leash limit.
 // Falls back to heard gunfire direction if no squad contact is available.
-func (s *Soldier) moveToContact(dt float64) {
+func (s *Soldier) moveToContact(dt float64) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	visible := bb.VisibleThreatCount() > 0
 	if !visible && !bb.SquadHasContact && !bb.HeardGunfire && !bb.IsActivated() {
@@ -2545,7 +2630,8 @@ func (s *Soldier) moveToContact(dt float64) {
 
 	// Prefer: visible threat > assigned spread order > squad contact > fresh audio > memory.
 	var targetX, targetY float64
-	if visible {
+	switch {
+	case visible:
 		// Find nearest visible threat.
 		best := math.MaxFloat64
 		var nearestTX, nearestTY float64
@@ -2594,28 +2680,29 @@ func (s *Soldier) moveToContact(dt float64) {
 			s.seekCoverFromThreat(dt)
 			return
 		}
-	} else if bb.HasMoveOrder {
+	case bb.HasMoveOrder:
 		orderDist := math.Hypot(bb.OrderMoveX-s.x, bb.OrderMoveY-s.y)
-		if orderDist > preferredOrderArriveDist {
+		switch {
+		case orderDist > preferredOrderArriveDist:
 			targetX = bb.OrderMoveX
 			targetY = bb.OrderMoveY
-		} else if bb.SquadHasContact {
+		case bb.SquadHasContact:
 			targetX = bb.SquadContactX
 			targetY = bb.SquadContactY
-		} else if bb.HeardGunfire {
+		case bb.HeardGunfire:
 			targetX = bb.HeardGunfireX
 			targetY = bb.HeardGunfireY
-		} else {
+		default:
 			targetX = bb.CombatMemoryX
 			targetY = bb.CombatMemoryY
 		}
-	} else if bb.SquadHasContact {
+	case bb.SquadHasContact:
 		targetX = bb.SquadContactX
 		targetY = bb.SquadContactY
-	} else if bb.HeardGunfire {
+	case bb.HeardGunfire:
 		targetX = bb.HeardGunfireX
 		targetY = bb.HeardGunfireY
-	} else {
+	default:
 		// Use persistent combat memory — last known gunfire position.
 		targetX = bb.CombatMemoryX
 		targetY = bb.CombatMemoryY
@@ -2680,14 +2767,15 @@ func (s *Soldier) moveToContact(dt float64) {
 // moveFallback paths the soldier directly away from the squad contact position.
 // It picks a point behind the soldier relative to the contact, at a fixed retreat
 // distance, then A*-paths there.
-func (s *Soldier) moveFallback(dt float64) {
+func (s *Soldier) moveFallback(dt float64) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 
 	// Resolve the contact position to retreat from.
 	// Priority: visible threat > squad contact > heard gunfire.
 	var cX, cY float64
 	hasC := false
-	if bb.VisibleThreatCount() > 0 {
+	switch {
+	case bb.VisibleThreatCount() > 0:
 		best := math.MaxFloat64
 		for _, t := range bb.Threats {
 			if !t.IsVisible {
@@ -2702,10 +2790,10 @@ func (s *Soldier) moveFallback(dt float64) {
 				hasC = true
 			}
 		}
-	} else if bb.SquadHasContact {
+	case bb.SquadHasContact:
 		cX, cY = bb.SquadContactX, bb.SquadContactY
 		hasC = true
-	} else if bb.HeardGunfire {
+	case bb.HeardGunfire:
 		cX, cY = bb.HeardGunfireX, bb.HeardGunfireY
 		hasC = true
 	}
@@ -2766,13 +2854,14 @@ func (s *Soldier) moveFallback(dt float64) {
 // moveFlank moves the soldier perpendicular to the enemy bearing for flankDistance.
 // Once the perpendicular leg is complete, it sets FlankComplete=true and triggers
 // a shatter event so the soldier immediately re-evaluates (overwatch or advance).
-func (s *Soldier) moveFlank(dt float64) {
+func (s *Soldier) moveFlank(dt float64) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 
 	// Need a contact direction to flank relative to.
 	// Priority: visible threat > squad contact > fresh audio > persistent memory.
 	var contactX, contactY float64
-	if bb.VisibleThreatCount() > 0 {
+	switch {
+	case bb.VisibleThreatCount() > 0:
 		best := math.MaxFloat64
 		for _, t := range bb.Threats {
 			if !t.IsVisible {
@@ -2786,13 +2875,13 @@ func (s *Soldier) moveFlank(dt float64) {
 				contactX, contactY = t.X, t.Y
 			}
 		}
-	} else if bb.SquadHasContact {
+	case bb.SquadHasContact:
 		contactX, contactY = bb.SquadContactX, bb.SquadContactY
-	} else if bb.HeardGunfire {
+	case bb.HeardGunfire:
 		contactX, contactY = bb.HeardGunfireX, bb.HeardGunfireY
-	} else if bb.IsActivated() {
+	case bb.IsActivated():
 		contactX, contactY = bb.CombatMemoryX, bb.CombatMemoryY
-	} else {
+	default:
 		s.state = SoldierStateIdle
 		return
 	}
@@ -2869,7 +2958,7 @@ const pathLookaheadMax = 12
 // looks ahead for the farthest waypoint with clear LOS and moves directly
 // toward it. The look-ahead distance is stress-dependent — calm soldiers plan
 // longer movement legs; stressed or suppressed soldiers take shorter, cautious steps.
-func (s *Soldier) moveAlongPath(dt float64) {
+func (s *Soldier) moveAlongPath(dt float64) { //nolint:gocognit,gocyclo
 	if s.path == nil || s.pathIndex >= len(s.path) {
 		// One-way advance: idle at objective.
 		s.state = SoldierStateIdle
@@ -3087,10 +3176,11 @@ func (s *Soldier) UpdateVisionSpatial(enemyHash *SpatialHash, buildings []rect) 
 
 	// Query only enemies within vision range using spatial hash.
 	// This is much faster than checking all enemies on the map.
-	effectiveRange := s.vision.DegradeRange(s.profile.Physical.Fatigue)
+	// Phase 2: TacticalAwareness and SituationalAwareness extend vision range
+	effectiveRange := s.vision.DegradeRange(s.profile.Physical.Fatigue, s.profile.Skills.TacticalAwareness, s.profile.Survival.SituationalAwareness)
 	nearbyEnemies := enemyHash.QueryRadius(s.x, s.y, effectiveRange)
 
-	s.vision.PerformVisionScan(s.x, s.y, nearbyEnemies, buildings, s.covers)
+	s.vision.PerformVisionScan(s.x, s.y, s, nearbyEnemies, buildings, s.covers, &s.blackboard.Threats, s.tickVal())
 
 	// Corner/doorway peek: if wall-adjacent and at a corner, perform a
 	// supplementary narrow-FOV scan in peek directions.
@@ -3136,12 +3226,12 @@ func (s *Soldier) UpdateVisionSpatial(enemyHash *SpatialHash, buildings []rect) 
 
 // UpdateVision performs vision scan against enemies.
 // When at a corner or doorway, soldiers also get a limited peek scan.
-// DEPRECATED: Use UpdateVisionSpatial for better performance.
+// Deprecated: Use UpdateVisionSpatial for better performance.
 func (s *Soldier) UpdateVision(enemies []*Soldier, buildings []rect) {
 	if s.state == SoldierStateDead {
 		return
 	}
-	s.vision.PerformVisionScan(s.x, s.y, enemies, buildings, s.covers)
+	s.vision.PerformVisionScan(s.x, s.y, s, enemies, buildings, s.covers, &s.blackboard.Threats, s.tickVal())
 
 	// Corner/doorway peek: if wall-adjacent and at a corner, perform a
 	// supplementary narrow-FOV scan in peek directions. This simulates
@@ -3228,8 +3318,8 @@ func (s *Soldier) peekScan(direction, fov, maxRange float64, enemies []*Soldier,
 }
 
 // Draw renders the soldier with layered circles, a directional chevron,
-// stance rings, goal-state colour coding, and a health bar.
-func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
+// stance rings, goal-state color coding, and a health bar.
+func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) { //nolint:gocognit,gocyclo
 	ox, oy := float32(offX), float32(offY)
 	sx, sy := ox+float32(s.x), oy+float32(s.y)
 
@@ -3262,8 +3352,8 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 	isCrawling := s.profile.Stance == StanceProne && s.state == SoldierStateMoving
 	tick := s.tickVal()
 
-	// --- Goal-based fill colour ---
-	// Body colour encodes current goal state for quick readability.
+	// --- Goal-based fill color ---
+	// Body color encodes current goal state for quick readability.
 	var fill color.RGBA
 	switch s.team {
 	case TeamRed:
@@ -3276,8 +3366,8 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 		// Panic / cowering — bright yellow warning.
 		fill = color.RGBA{R: 240, G: 220, B: 20, A: 255}
 	case GoalEngage:
-		// Engaging — brighten the team colour.
-		fill = color.RGBA{R: uint8(min8(255, int(fill.R)+50)), G: uint8(min8(255, int(fill.G)+20)), B: uint8(min8(255, int(fill.B)+20)), A: 255}
+		// Engaging — brighten the team color.
+		fill = color.RGBA{R: min8(255, int(fill.R)+50), G: min8(255, int(fill.G)+20), B: min8(255, int(fill.B)+20), A: 255}
 	case GoalFallback:
 		// Falling back — orange tint.
 		if s.team == TeamRed {
@@ -3306,7 +3396,7 @@ func (s *Soldier) Draw(screen *ebiten.Image, offX, offY int) {
 		vector.FillCircle(screen, sx, sy, radius+2.0, color.RGBA{R: 0, G: 0, B: 0, A: 200}, false)
 	}
 
-	// --- Team rim ring (bright team colour at edge) ---
+	// --- Team rim ring (bright team color at edge) ---
 	var rimCol color.RGBA
 	if s.team == TeamRed {
 		rimCol = color.RGBA{R: 255, G: 80, B: 80, A: 220}
@@ -3514,13 +3604,13 @@ func (s *Soldier) isInCover() bool {
 			continue
 		}
 		if s.tileMap != nil {
-			inCover, defence := TileMapCoverBetween(s.tileMap, s.x, s.y, t.X, t.Y)
-			if inCover && defence >= 0.30 {
+			inCover, defense := TileMapCoverBetween(s.tileMap, s.x, s.y, t.X, t.Y)
+			if inCover && defense >= 0.30 {
 				return true
 			}
 		}
-		inCover, defence := IsBehindCover(s.x, s.y, t.X, t.Y, s.covers)
-		if inCover && defence >= 0.30 {
+		inCover, defense := IsBehindCover(s.x, s.y, t.X, t.Y, s.covers)
+		if inCover && defense >= 0.30 {
 			return true
 		}
 	}
@@ -3559,7 +3649,7 @@ func (s *Soldier) threatDirection() (float64, bool) {
 // seekCoverFromThreat finds the best nearby cover object relative to the threat
 // direction and paths the soldier toward the protected side of it.
 // If no cover is found, or the soldier is already in good cover, holds in place.
-func (s *Soldier) seekCoverFromThreat(dt float64) {
+func (s *Soldier) seekCoverFromThreat(dt float64) { //nolint:gocognit,gocyclo
 	threatAngle, hasThreat := s.threatDirection()
 	if !hasThreat {
 		// No threat info — just freeze in place.
@@ -3580,17 +3670,42 @@ func (s *Soldier) seekCoverFromThreat(dt float64) {
 	// Find a new cover target if we don't have one or have reached the old one.
 	if s.coverTarget == nil || s.isNearCoverTarget() {
 		if s.tileMap != nil {
-			if px, py, _, ok := FindTileMapCoverForThreat(s.tileMap, s.x, s.y, threatAngle, coverSearchDist); ok {
-				newPath := s.navGrid.FindPath(s.x, s.y, px, py)
-				if newPath != nil {
-					s.path = newPath
-					s.pathIndex = 0
-					s.slotTargetX = px
-					s.slotTargetY = py
-					s.coverTarget = nil // TileMap mode doesn't require a legacy CoverObject target.
-					s.think("seeking cover")
-				} else {
-					s.think("cover position unreachable")
+			// CoverSeeking trait extends search distance for better cover
+			searchDist := coverSearchDist * (1.0 + s.profile.Survival.CoverSeeking*0.5)
+			if px, py, _, ok := FindTileMapCoverForThreat(s.tileMap, s.x, s.y, threatAngle, searchDist); ok {
+				// CoverSharing: check if squadmates are already near this position
+				positionOccupied := false
+				if s.profile.Cooperation.CoverSharing > 0.4 && s.squad != nil {
+					clusterRadius := 25.0 // pixels - avoid clustering within this distance
+					for _, squadmate := range s.squad.Members {
+						if squadmate == nil || squadmate == s || squadmate.state == SoldierStateDead {
+							continue
+						}
+						dx := squadmate.x - px
+						dy := squadmate.y - py
+						distSq := dx*dx + dy*dy
+						if distSq < clusterRadius*clusterRadius {
+							positionOccupied = true
+							break
+						}
+					}
+				}
+
+				if !positionOccupied {
+					newPath := s.navGrid.FindPath(s.x, s.y, px, py)
+					if newPath != nil {
+						s.path = newPath
+						s.pathIndex = 0
+						s.slotTargetX = px
+						s.slotTargetY = py
+						s.coverTarget = nil // TileMap mode doesn't require a legacy CoverObject target.
+						s.think("seeking cover")
+					} else {
+						s.think("cover position unreachable")
+					}
+				} else if s.profile.Cooperation.CoverSharing > 0.6 {
+					// High CoverSharing: actively search for alternative position
+					s.think("cover occupied - seeking alternative")
 				}
 			}
 		}
@@ -3715,13 +3830,14 @@ func (s *Soldier) faceNearestThreatOrContact() {
 	}
 	bb := &s.blackboard
 	var tx, ty float64
-	if bb.SquadHasContact {
+	switch {
+	case bb.SquadHasContact:
 		tx, ty = bb.SquadContactX, bb.SquadContactY
-	} else if bb.HeardGunfire {
+	case bb.HeardGunfire:
 		tx, ty = bb.HeardGunfireX, bb.HeardGunfireY
-	} else if bb.IsActivated() {
+	case bb.IsActivated():
 		tx, ty = bb.CombatMemoryX, bb.CombatMemoryY
-	} else {
+	default:
 		return
 	}
 	heading := math.Atan2(ty-s.y, tx-s.x)
@@ -3781,12 +3897,12 @@ func (s *Soldier) reloadDurationTicks() int {
 // Bound distance scales with proximity to contact: far away = long bounds (8-12 cells),
 // close = short cautious bounds (3-5 cells). If no TacticalMap is available, falls
 // back to a direct dash toward the ultimate destination.
-func (s *Soldier) moveCombatDash(dt float64) {
+func (s *Soldier) moveCombatDash(dt float64) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	var destX, destY float64
-	setDestFromVisible := func() bool {
+	setDestFromVisible := func() (float64, float64, bool) {
 		if bb.VisibleThreatCount() == 0 {
-			return false
+			return 0, 0, false
 		}
 		best := math.MaxFloat64
 		var nearestX, nearestY float64
@@ -3801,64 +3917,68 @@ func (s *Soldier) moveCombatDash(dt float64) {
 			}
 		}
 		if best == math.MaxFloat64 {
-			return false
+			return 0, 0, false
 		}
 		stopDist := float64(burstRange) * 0.75
 		bearing := math.Atan2(nearestY-s.y, nearestX-s.x)
-		destX = nearestX - math.Cos(bearing)*stopDist
-		destY = nearestY - math.Sin(bearing)*stopDist
-		return true
+		x := nearestX - math.Cos(bearing)*stopDist
+		y := nearestY - math.Sin(bearing)*stopDist
+		return x, y, true
 	}
 
 	// --- Step 1: Resolve ultimate destination ---
 	// Leaders with regroup intent should prioritize formation slot if far from it.
 	distToSlot := math.Hypot(s.slotTargetX-s.x, s.slotTargetY-s.y)
 	leaderRegrouping := s.isLeader && (bb.SquadIntent == IntentRegroup || bb.SquadIntent == IntentWithdraw)
-	if leaderRegrouping && distToSlot > float64(cellSize)*2 {
-		destX = s.slotTargetX
-		destY = s.slotTargetY
-	} else if bb.HasMoveOrder {
+	switch {
+	case leaderRegrouping && distToSlot > float64(cellSize)*2:
+		destX, destY = s.slotTargetX, s.slotTargetY
+	case bb.HasMoveOrder:
 		orderDist := math.Hypot(bb.OrderMoveX-s.x, bb.OrderMoveY-s.y)
-		if orderDist > preferredOrderArriveDist {
-			destX = bb.OrderMoveX
-			destY = bb.OrderMoveY
-		} else if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
-			destX = bb.BestNearbyX
-			destY = bb.BestNearbyY
-		} else if setDestFromVisible() {
-		} else if bb.SquadHasContact {
+		switch {
+		case orderDist > preferredOrderArriveDist:
+			destX, destY = bb.OrderMoveX, bb.OrderMoveY
+		case bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10:
+			destX, destY = bb.BestNearbyX, bb.BestNearbyY
+		default:
+			x, y, ok := setDestFromVisible()
+			switch {
+			case ok:
+				destX, destY = x, y
+			case bb.SquadHasContact:
+				cBearing := math.Atan2(bb.SquadContactY-s.y, bb.SquadContactX-s.x)
+				stopDist := float64(burstRange) * 0.75
+				destX = bb.SquadContactX - math.Cos(cBearing)*stopDist
+				destY = bb.SquadContactY - math.Sin(cBearing)*stopDist
+			case bb.HeardGunfire:
+				destX, destY = bb.HeardGunfireX, bb.HeardGunfireY
+			case bb.IsActivated():
+				destX, destY = bb.CombatMemoryX, bb.CombatMemoryY
+			default:
+				s.state = SoldierStateIdle
+				return
+			}
+		}
+	default:
+		x, y, ok := setDestFromVisible()
+		switch {
+		case ok:
+			destX, destY = x, y
+		case bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10:
+			destX, destY = bb.BestNearbyX, bb.BestNearbyY
+		case bb.SquadHasContact:
 			cBearing := math.Atan2(bb.SquadContactY-s.y, bb.SquadContactX-s.x)
 			stopDist := float64(burstRange) * 0.75
 			destX = bb.SquadContactX - math.Cos(cBearing)*stopDist
 			destY = bb.SquadContactY - math.Sin(cBearing)*stopDist
-		} else if bb.HeardGunfire {
-			destX = bb.HeardGunfireX
-			destY = bb.HeardGunfireY
-		} else if bb.IsActivated() {
-			destX = bb.CombatMemoryX
-			destY = bb.CombatMemoryY
-		} else {
+		case bb.HeardGunfire:
+			destX, destY = bb.HeardGunfireX, bb.HeardGunfireY
+		case bb.IsActivated():
+			destX, destY = bb.CombatMemoryX, bb.CombatMemoryY
+		default:
 			s.state = SoldierStateIdle
 			return
 		}
-	} else if setDestFromVisible() {
-	} else if bb.HasBestNearby && bb.BestNearbyScore > bb.PositionDesirability+0.10 {
-		destX = bb.BestNearbyX
-		destY = bb.BestNearbyY
-	} else if bb.SquadHasContact {
-		cBearing := math.Atan2(bb.SquadContactY-s.y, bb.SquadContactX-s.x)
-		stopDist := float64(burstRange) * 0.75
-		destX = bb.SquadContactX - math.Cos(cBearing)*stopDist
-		destY = bb.SquadContactY - math.Sin(cBearing)*stopDist
-	} else if bb.HeardGunfire {
-		destX = bb.HeardGunfireX
-		destY = bb.HeardGunfireY
-	} else if bb.IsActivated() {
-		destX = bb.CombatMemoryX
-		destY = bb.CombatMemoryY
-	} else {
-		s.state = SoldierStateIdle
-		return
 	}
 
 	// Leash: don't stray too far from leader.
@@ -4015,7 +4135,7 @@ func (s *Soldier) moveCombatDash(dt float64) {
 	}
 }
 
-// executePeek carries out the GoalPeek behaviour:
+// executePeek carries out the GoalPeek behavior:
 //  1. Move crouching to the peek point (corner or window edge).
 //  2. Stand still, face the interesting direction, wait peekDuration ticks.
 //  3. On expiry: if enemy seen → stay (ShatterEvent → overwatch); else decay.

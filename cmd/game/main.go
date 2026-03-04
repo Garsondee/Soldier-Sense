@@ -1,3 +1,4 @@
+// Package main runs the interactive Soldier-Sense game client.
 package main
 
 import (

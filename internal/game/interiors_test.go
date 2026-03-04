@@ -52,7 +52,7 @@ func TestFurnishBuilding_PlacesFurniture(t *testing.T) {
 	}
 }
 
-func TestFurnishRoom_SmallRoomSafe(t *testing.T) {
+func TestFurnishRoom_SmallRoomSafe(_ *testing.T) {
 	tm := NewTileMap(10, 10)
 	rng := rand.New(rand.NewSource(99))
 
@@ -69,7 +69,7 @@ func TestPlaceDoorInDoorway(t *testing.T) {
 	// Place an exterior door.
 	placeDoorInDoorway(tm, rng, 64, 64, 64, true)
 
-	// Check that a door object was placed at the centre of the gap.
+	// Check that a door object was placed at the center of the gap.
 	dc := (64 + 32) / cellSize // 6
 	dr := (64 + 32) / cellSize // 6
 	obj := tm.ObjectAt(dc, dr)
@@ -91,7 +91,7 @@ func TestFurnishBuilding_FloorTypeVariation(t *testing.T) {
 			}
 		}
 		furnishBuilding(tm, rng, fp, nil)
-		// Sample the floor type at the centre of the footprint.
+		// Sample the floor type at the center of the footprint.
 		cc := (fp.x + fp.w/2) / cellSize
 		cr := (fp.y + fp.h/2) / cellSize
 		floorTypes[tm.Ground(cc, cr)] = true

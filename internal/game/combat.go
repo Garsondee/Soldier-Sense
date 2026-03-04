@@ -32,7 +32,7 @@ const (
 	fireIntervalAuto   = 10 // ~0.17s — sustained fire
 	burstInterShotGap  = 2  // ticks between rounds in a burst/auto string
 
-	// Long-range aiming behaviour.
+	// Long-range aiming behavior.
 	aimingSuppressionBlock = 0.12 // suppression above this blocks deliberate aiming
 	aimingBaseTicks        = 4    // minimum ticks to line up a long-range shot
 	aimingExtraTicks       = 12   // additional ticks at max range
@@ -230,6 +230,143 @@ func (t *Tracer) DrawTracer(screen *ebiten.Image, offX, offY int) {
 	}
 }
 
+type shooterTargetSelection struct {
+	target      *Soldier
+	targetX     float64
+	targetY     float64
+	firingAtLKP bool
+	queuedBurst bool
+}
+
+func shouldSkipShooterCombatTick(s *Soldier) bool {
+	if s.state == SoldierStateDead || s.state.IsIncapacitated() {
+		return true
+	}
+	if s.magCapacity <= 0 {
+		s.magCapacity = defaultMagazineCapacity
+	}
+	if s.magRounds < 0 {
+		s.magRounds = 0
+	}
+	if handleShooterModeSwitchOrReload(s) {
+		return true
+	}
+	if s.fireCooldown > 0 {
+		s.fireCooldown--
+		return true
+	}
+	if shooterCannotFireByState(s) {
+		resetBurstState(s)
+		resetAimingState(s)
+		return true
+	}
+	return false
+}
+
+func handleShooterModeSwitchOrReload(s *Soldier) bool {
+	if s.modeSwitchTimer > 0 {
+		s.modeSwitchTimer--
+		if s.modeSwitchTimer == 0 {
+			s.currentFireMode = s.desiredFireMode
+			s.think(fmt.Sprintf("fire mode → %s", s.currentFireMode))
+		}
+		resetBurstState(s)
+		resetAimingState(s)
+		return true
+	}
+	if s.reloadTimer > 0 {
+		s.reloadTimer--
+		if s.reloadTimer == 0 {
+			s.magRounds = s.magCapacity
+			s.think("reload complete")
+		}
+		resetBurstState(s)
+		resetAimingState(s)
+		return true
+	}
+
+	earlyReloadThreshold := int(float64(s.magCapacity) * (0.30 + s.profile.Preferences.ReloadEarly*0.40))
+	needsReload := s.magRounds <= 0 || (s.magRounds <= earlyReloadThreshold && !s.blackboard.IsSuppressed())
+	if !needsReload {
+		return false
+	}
+
+	s.reloadTimer = s.reloadDurationTicks()
+	s.fireCooldown = 0
+	if s.magRounds <= 0 {
+		s.think(fmt.Sprintf("reloading empty mag (%dt)", s.reloadTimer))
+	} else {
+		s.think(fmt.Sprintf("early reload %d/%d (%dt)", s.magRounds, s.magCapacity, s.reloadTimer))
+	}
+	resetBurstState(s)
+	resetAimingState(s)
+	return true
+}
+
+func shooterCannotFireByState(s *Soldier) bool {
+	return s.blackboard.CurrentGoal == GoalSurvive || s.blackboard.Surrendered || s.blackboard.PanicRetreatActive
+}
+
+func resolveShooterTarget(cm *CombatManager, s *Soldier, allSoldiers []*Soldier) (shooterTargetSelection, bool) {
+	confirmedContacts := visibleConfirmedContacts(s.vision.KnownContacts)
+	lkpTargets := lkpThreats(s.blackboard.Threats)
+
+	firingAtLKP := false
+	var lkpTarget *ThreatFact
+	switch {
+	case len(confirmedContacts) > 0:
+	case len(lkpTargets) > 0 && s.profile.Skills.Discipline > 0.3:
+		firingAtLKP = true
+		lkpTarget = closestLKPThreat(s, lkpTargets)
+	default:
+		resetBurstState(s)
+		resetAimingState(s)
+		return shooterTargetSelection{}, false
+	}
+
+	selection := shooterTargetSelection{queuedBurst: s.burstShotsRemaining > 0, firingAtLKP: firingAtLKP}
+	if selection.firingAtLKP {
+		if lkpTarget == nil {
+			resetBurstState(s)
+			resetAimingState(s)
+			return shooterTargetSelection{}, false
+		}
+		selection.target = lkpTarget.Source
+		selection.targetX = lkpTarget.X
+		selection.targetY = lkpTarget.Y
+		return selection, true
+	}
+
+	if selection.queuedBurst {
+		selection.target = findSoldierByID(allSoldiers, s.burstTargetID)
+	} else {
+		selection.target = cm.closestContact(s)
+	}
+	if selection.target == nil || selection.target.state == SoldierStateDead || selection.target.state.IsIncapacitated() {
+		resetBurstState(s)
+		resetAimingState(s)
+		return shooterTargetSelection{}, false
+	}
+	selection.targetX = selection.target.x
+	selection.targetY = selection.target.y
+	return selection, true
+}
+
+func closestLKPThreat(s *Soldier, lkpTargets []ThreatFact) *ThreatFact {
+	bestDist := math.MaxFloat64
+	var best *ThreatFact
+	for i := range lkpTargets {
+		dx := lkpTargets[i].X - s.x
+		dy := lkpTargets[i].Y - s.y
+		dist := math.Sqrt(dx*dx + dy*dy)
+		if dist < bestDist {
+			bestDist = dist
+			best = &lkpTargets[i]
+		}
+	}
+	return best
+}
+
 // --- Gunfire Events ---
 
 // GunfireEvent records a shot being fired, for sound propagation.
@@ -243,11 +380,11 @@ type GunfireEvent struct {
 
 // CombatManager handles firing resolution and tracer lifecycle.
 type CombatManager struct {
+	rng      *rand.Rand
 	tracers  []*Tracer
 	flashes  []*MuzzleFlash
-	Gunfires []GunfireEvent // shots fired this tick, consumed by sound system
-	rng      *rand.Rand
-	tick     int // current game tick, set each frame before ResolveCombat
+	Gunfires []GunfireEvent
+	tick     int
 }
 
 // NewCombatManager creates a combat manager with its own RNG.
@@ -287,13 +424,23 @@ func (cm *CombatManager) BroadcastGunfire(red, blue []*Soldier, tick int) {
 			if heardStrength < gunfireMinHeardStrength {
 				continue
 			}
+
+			// Phase 4: Add position jitter based on inverse fieldcraft
+			fieldcraft := s.profile.Skills.Fieldcraft
+			maxJitter := 80.0 // pixels
+			jitterAmount := maxJitter * (1.0 - fieldcraft)
+			angle := cm.rng.Float64() * 2 * math.Pi
+			radius := cm.rng.Float64() * jitterAmount
+			heardX := ev.X + math.Cos(angle)*radius
+			heardY := ev.Y + math.Sin(angle)*radius
+
 			// Single-tick flag — used by immediate decision logic.
-			s.blackboard.HeardGunfireX = ev.X
-			s.blackboard.HeardGunfireY = ev.Y
+			s.blackboard.HeardGunfireX = heardX
+			s.blackboard.HeardGunfireY = heardY
 			s.blackboard.HeardGunfire = true
 			s.blackboard.HeardGunfireTick = tick
 			// Persistent memory — keeps soldier activated for ~60s after last shot.
-			s.blackboard.RecordGunfireWithStrength(ev.X, ev.Y, heardStrength)
+			s.blackboard.RecordGunfireWithStrength(heardX, heardY, heardStrength)
 		}
 		// Shooters also remember they fired (self-activation).
 		var shooters []*Soldier
@@ -333,13 +480,23 @@ func (cm *CombatManager) BroadcastGunfireSpatial(redHash, blueHash *SpatialHash,
 			if heardStrength < gunfireMinHeardStrength {
 				continue
 			}
+
+			// Phase 4: Add position jitter based on inverse fieldcraft
+			fieldcraft := s.profile.Skills.Fieldcraft
+			maxJitter := 80.0 // pixels
+			jitterAmount := maxJitter * (1.0 - fieldcraft)
+			angle := cm.rng.Float64() * 2 * math.Pi
+			radius := cm.rng.Float64() * jitterAmount
+			heardX := ev.X + math.Cos(angle)*radius
+			heardY := ev.Y + math.Sin(angle)*radius
+
 			// Single-tick flag — used by immediate decision logic.
-			s.blackboard.HeardGunfireX = ev.X
-			s.blackboard.HeardGunfireY = ev.Y
+			s.blackboard.HeardGunfireX = heardX
+			s.blackboard.HeardGunfireY = heardY
 			s.blackboard.HeardGunfire = true
 			s.blackboard.HeardGunfireTick = tick
 			// Persistent memory — keeps soldier activated for ~60s after last shot.
-			s.blackboard.RecordGunfireWithStrength(ev.X, ev.Y, heardStrength)
+			s.blackboard.RecordGunfireWithStrength(heardX, heardY, heardStrength)
 		}
 
 		// Shooters also remember they fired (self-activation).
@@ -405,93 +562,27 @@ func gunfireHeardStrength(srcX, srcY float64, listener *Soldier, red, blue []*So
 }
 
 // ResolveCombat runs fire decisions for one set of shooters against a set of targets.
-// allFriendlies is the same-team list (for witness stress propagation).
-// allSoldiers is every soldier on the map (for ricochet near-miss stress).
+// AllFriendlies is the same-team list (for witness stress propagation).
+// AllSoldiers is every soldier on the map (for ricochet near-miss stress).
 func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldier, buildings []rect, allSoldiers []*Soldier) {
 	for _, s := range shooters {
-		if s.state == SoldierStateDead || s.state.IsIncapacitated() {
-			continue
-		}
-		if s.magCapacity <= 0 {
-			s.magCapacity = defaultMagazineCapacity
-		}
-		if s.magRounds < 0 {
-			s.magRounds = 0
-		}
-
-		// Tick down mode-switch timer first — soldier is busy changing modes.
-		if s.modeSwitchTimer > 0 {
-			s.modeSwitchTimer--
-			if s.modeSwitchTimer == 0 {
-				// Mode switch complete.
-				s.currentFireMode = s.desiredFireMode
-				s.think(fmt.Sprintf("fire mode → %s", s.currentFireMode))
-			}
-			resetBurstState(s)
-			resetAimingState(s)
+		if shouldSkipShooterCombatTick(s) {
 			continue
 		}
 
-		if s.reloadTimer > 0 {
-			s.reloadTimer--
-			if s.reloadTimer == 0 {
-				s.magRounds = s.magCapacity
-				s.think("reload complete")
-			}
-			resetBurstState(s)
-			resetAimingState(s)
+		selection, ok := resolveShooterTarget(cm, s, allSoldiers)
+		if !ok {
 			continue
 		}
-		if s.magRounds <= 0 {
-			s.reloadTimer = s.reloadDurationTicks()
-			s.fireCooldown = 0
-			s.think(fmt.Sprintf("reloading (%dt)", s.reloadTimer))
-			resetBurstState(s)
-			resetAimingState(s)
-			continue
-		}
-
-		// Tick down fire cooldown.
-		if s.fireCooldown > 0 {
-			s.fireCooldown--
-			continue
-		}
-
-		// Don't shoot while panicked.
-		if s.blackboard.CurrentGoal == GoalSurvive {
-			resetBurstState(s)
-			resetAimingState(s)
-			continue
-		}
-		if s.blackboard.Surrendered || s.blackboard.PanicRetreatActive {
-			resetBurstState(s)
-			resetAimingState(s)
-			continue
-		}
-
-		// Need a visible target.
-		if len(s.vision.KnownContacts) == 0 {
-			resetBurstState(s)
-			resetAimingState(s)
-			continue
-		}
-
-		queuedBurst := s.burstShotsRemaining > 0
-		var target *Soldier
-		if queuedBurst {
-			target = findSoldierByID(allSoldiers, s.burstTargetID)
-		} else {
-			target = cm.closestContact(s)
-		}
-		if target == nil || target.state == SoldierStateDead || target.state.IsIncapacitated() {
-			resetBurstState(s)
-			resetAimingState(s)
-			continue
-		}
+		target := selection.target
+		targetX := selection.targetX
+		targetY := selection.targetY
+		firingAtLKP := selection.firingAtLKP
+		queuedBurst := selection.queuedBurst
 
 		// Range check.
-		dx := target.x - s.x
-		dy := target.y - s.y
+		dx := targetX - s.x
+		dy := targetY - s.y
 		dist := math.Sqrt(dx*dx + dy*dy)
 		if dist > potShotMaxFireRange {
 			resetBurstState(s)
@@ -500,7 +591,8 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		}
 
 		// LOS check (buildings and tall walls block firing lines).
-		if !HasLineOfSightWithCover(s.x, s.y, target.x, target.y, buildings, s.covers) {
+		// For LKP fire, we skip LOS check since we're firing at a remembered position
+		if !firingAtLKP && !HasLineOfSightWithCover(s.x, s.y, targetX, targetY, buildings, s.covers) {
 			resetBurstState(s)
 			resetAimingState(s)
 			continue
@@ -550,21 +642,56 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		baseShooterSpread := (s.aimSpread + suppressSpread + fearSpread) * stanceMul / woundAccMul
 		// Distance-dependent spread: pot-shot band becomes substantially inaccurate.
 		baseShooterSpread += shotRangePenalty(dist) * 0.22
+
+		// Aggression close combat bonus: aggressive soldiers get accuracy bonus at short range
+		if dist < cqbRange {
+			aggressionAccuracyBonus := s.profile.Personality.Aggression * 0.15 * (1.0 - dist/cqbRange)
+			baseShooterSpread *= (1.0 - aggressionAccuracyBonus)
+		}
+
+		// Stealth ambush bonus: stealthy soldiers get accuracy bonus vs unaware targets
+		if !firingAtLKP && target != nil {
+			// Check if target has this soldier in their KnownContacts
+			targetAware := false
+			for _, contact := range target.vision.KnownContacts {
+				if contact == s {
+					targetAware = true
+					break
+				}
+			}
+			if !targetAware {
+				// Target is unaware of this soldier - ambush bonus
+				stealthAmbushBonus := s.profile.Survival.Stealth * 0.20
+				baseShooterSpread *= (1.0 - stealthAmbushBonus)
+			}
+		}
 		if queuedBurst && s.burstBaseSpread > 0 {
 			baseShooterSpread = s.burstBaseSpread
 		}
 
-		// Effective target body radius reduced by cover and prone stance.
-		baseBodyRadius := float64(soldierRadius) * target.profile.Stance.Profile().ProfileMul
-		coverReduction := 0.0
-		if target.tileMap != nil {
-			if inCover, defence := TileMapCoverBetween(target.tileMap, target.x, target.y, s.x, s.y); inCover {
-				coverReduction = defence
-			}
+		// Phase 2: LKP suppression fire has reduced accuracy (-40% effective accuracy)
+		if firingAtLKP {
+			baseShooterSpread *= 1.67 // Inverse of 0.6 to reduce effective accuracy by 40%
 		}
-		if coverReduction <= 0 {
-			if inCover, defence := IsBehindCover(target.x, target.y, s.x, s.y, target.covers); inCover {
-				coverReduction = defence
+
+		// Effective target body radius reduced by cover and prone stance.
+		// For LKP fire, use default radius since we don't know current stance
+		baseBodyRadius := float64(soldierRadius)
+		if target != nil {
+			baseBodyRadius = float64(soldierRadius) * target.profile.Stance.Profile().ProfileMul
+		}
+
+		coverReduction := 0.0
+		if !firingAtLKP && target != nil {
+			if target.tileMap != nil {
+				if inCover, defense := TileMapCoverBetween(target.tileMap, targetX, targetY, s.x, s.y); inCover {
+					coverReduction = defense
+				}
+			}
+			if coverReduction <= 0 {
+				if inCover, defense := IsBehindCover(targetX, targetY, s.x, s.y, target.covers); inCover {
+					coverReduction = defense
+				}
 			}
 		}
 		if coverReduction > 0.90 {
@@ -581,8 +708,9 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 		// Expected hit probability for blackboard tracking (used by goal selection).
 		hitChance := clamp01(angularHalfSize / math.Max(0.01, baseShooterSpread+params.spreadRad))
 
-		if !queuedBurst {
+		if !queuedBurst && !firingAtLKP {
 			// Long-range fire requires willingness to pull the trigger.
+			// LKP fire skips deliberate aiming - it's suppression only
 			if dist > accurateFireRange {
 				pressure := clamp01(
 					s.profile.Psych.EffectiveFear() +
@@ -604,7 +732,8 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 				}
 
 				if shouldDeliberatelyAimLongRange(s, dist, pressure) &&
-					s.blackboard.IncomingFireCount == 0 && s.blackboard.SuppressLevel < aimingSuppressionBlock {
+					s.blackboard.IncomingFireCount == 0 && s.blackboard.SuppressLevel < aimingSuppressionBlock &&
+					target != nil {
 					requiredAimTicks := aimingTicksForDistance(dist)
 					requiredAimTicks += int(math.Round(float64(aimingBaseTicks) * pot * (1.0 - pressure) * 0.8))
 					if s.aimingTargetID != target.id {
@@ -627,6 +756,9 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 			} else {
 				resetAimingState(s)
 			}
+		} else if firingAtLKP {
+			// LKP fire doesn't use deliberate aiming
+			resetAimingState(s)
 		}
 
 		if baseShooterSpread < 0.005 {
@@ -653,7 +785,7 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 
 		if !queuedBurst {
 			resetAimingState(s)
-			if params.shots > 1 {
+			if params.shots > 1 && target != nil {
 				followUpRounds := params.shots - 1
 				if followUpRounds > s.magRounds {
 					followUpRounds = s.magRounds
@@ -671,16 +803,30 @@ func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldi
 				}
 			}
 
-			s.fireCooldown = params.interval
+			// Aggression fire rate bonus: aggressive soldiers fire faster in sustained combat
+			aggressionFireRateBonus := s.profile.Personality.Aggression * 0.25 // Up to 25% faster fire
+			s.fireCooldown = int(float64(params.interval) * (1.0 - aggressionFireRateBonus))
+			if s.fireCooldown < 1 {
+				s.fireCooldown = 1 // Minimum 1 tick between shots
+			}
+
 			if forceReeval := s.blackboard.RecordShotOutcome(hit, hitChance, dist); forceReeval {
 				s.blackboard.ShatterEvent = true
 				s.think(fmt.Sprintf("3 consecutive misses (spread %.2f°) — changing approach",
 					baseShooterSpread*180/math.Pi))
 			}
-			if hit {
-				s.think(fmt.Sprintf("fired (%s) — HIT (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+			if firingAtLKP {
+				if hit {
+					s.think(fmt.Sprintf("suppression fire (%s) at LKP — HIT (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+				} else {
+					s.think(fmt.Sprintf("suppression fire (%s) at LKP — miss (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+				}
 			} else {
-				s.think(fmt.Sprintf("fired (%s) — miss (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+				if hit {
+					s.think(fmt.Sprintf("fired (%s) — HIT (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+				} else {
+					s.think(fmt.Sprintf("fired (%s) — miss (spread %.1f°)", s.currentFireMode, baseShooterSpread*180/math.Pi))
+				}
 			}
 			continue
 		}
@@ -732,6 +878,32 @@ func resetBurstState(s *Soldier) {
 	s.burstBaseSpread = 0
 }
 
+// visibleConfirmedContacts returns contacts that are currently visible (confirmed).
+func visibleConfirmedContacts(contacts []*Soldier) []*Soldier {
+	confirmed := make([]*Soldier, 0, len(contacts))
+	for _, c := range contacts {
+		if c.state != SoldierStateDead && !c.state.IsIncapacitated() {
+			confirmed = append(confirmed, c)
+		}
+	}
+	return confirmed
+}
+
+// lkpThreats returns threats that have LKP (not currently visible but confidence > threshold).
+// These are targets for suppression fire.
+func lkpThreats(threats []ThreatFact) []ThreatFact {
+	const lkpConfidenceThreshold = 0.3
+	lkp := make([]ThreatFact, 0)
+	for _, t := range threats {
+		if !t.IsVisible && t.Confidence > lkpConfidenceThreshold {
+			if t.Source == nil || (t.Source.state != SoldierStateDead && !t.Source.state.IsIncapacitated()) {
+				lkp = append(lkp, t)
+			}
+		}
+	}
+	return lkp
+}
+
 func resetAimingState(s *Soldier) {
 	s.aimingTargetID = -1
 	s.aimingTicks = 0
@@ -777,7 +949,7 @@ func (cm *CombatManager) resolveBullet(
 
 	// Physical deflection: random angle within [-totalSpread, +totalSpread].
 	// Using a triangular distribution (two uniform samples averaged)
-	// for a more natural bell-shaped spread centre.
+	// for a more natural bell-shaped spread center.
 	u1 := cm.rng.Float64()*2 - 1
 	u2 := cm.rng.Float64()*2 - 1
 	deflection := (u1 + u2) / 2.0 * totalSpread
@@ -789,17 +961,19 @@ func (cm *CombatManager) resolveBullet(
 	// Tracer endpoint follows actual bullet direction.
 	toX := shooter.x + math.Cos(actualAngle)*(dist+30)
 	toY := shooter.y + math.Sin(actualAngle)*(dist+30)
-	if hit {
+	if hit && target != nil {
 		toX, toY = target.x, target.y
 	}
 	cm.tracers = append(cm.tracers, &Tracer{
 		fromX: shooter.x, fromY: shooter.y,
 		toX: toX, toY: toY,
-		hit:  hit,
+		hit:  hit && target != nil, // Only show hit if we have a real target
 		team: shooter.team,
 	})
 
-	if hit {
+	// LKP fire: if target is nil, we're firing at a position, not a soldier
+	// Hits only count if the target is actually there
+	if hit && target != nil {
 		damage := baseDamage * dmgMul
 
 		// Roll hit region and create wound via body map.
@@ -815,24 +989,28 @@ func (cm *CombatManager) resolveBullet(
 			target.casualty = NewCasualtyState(cm.tick)
 		}
 
-		if instantDeath {
+		switch {
+		case instantDeath:
 			target.state = SoldierStateDead
 			target.think(fmt.Sprintf("hit %s (%s) — killed instantly", wound.Region, wound.Severity))
-		} else if target.body.HealthFraction() <= 0 {
+		case target.body.HealthFraction() <= 0:
 			target.state = SoldierStateDead
 			target.think(fmt.Sprintf("hit %s (%s) — incapacitated", wound.Region, wound.Severity))
-		} else {
+		default:
 			target.think(fmt.Sprintf("hit %s (%s) — taking fire", wound.Region, wound.Severity))
 		}
 		cm.applyWitnessStress(target, allFriendlies)
 		return true
 	}
 
-	target.profile.Psych.ApplyStress(nearMissStress)
-	target.blackboard.IncomingFireCount++
-	target.blackboard.AccumulateSuppression(false, shooter.x, shooter.y, target.x, target.y)
-	if shotIdx == 0 {
-		target.think("near miss — incoming fire")
+	// Near miss - only apply to actual target if present
+	if target != nil {
+		target.profile.Psych.ApplyStress(nearMissStress)
+		target.blackboard.IncomingFireCount++
+		target.blackboard.AccumulateSuppression(false, shooter.x, shooter.y, target.x, target.y)
+		if shotIdx == 0 {
+			target.think("near miss — incoming fire")
+		}
 	}
 	cm.spawnRicochets(shooter.x, shooter.y, toX, toY, shooter.team, buildings, allSoldiers)
 	return false
@@ -858,79 +1036,93 @@ func (cm *CombatManager) selectFireMode(s *Soldier, dist float64) FireMode {
 	shootDesire := s.blackboard.Internal.ShootDesire
 	stress := clamp01(fear + s.blackboard.SuppressLevel*0.7)
 
+	if mode, ok := cm.tryStickCurrentFireMode(s, dist, sightline, fear, shootDesire); ok {
+		return mode
+	}
+
+	if mode, ok := cm.selectCloseRangeMode(dist, sightline, fear, shootDesire, stress); ok {
+		return mode
+	}
+
+	if mode, ok := cm.selectMidRangeMode(s, dist, fear, shootDesire, stress); ok {
+		return mode
+	}
+
+	// --- Rule 4: long range — single shot.
+	return FireModeSingle
+}
+
+func (cm *CombatManager) tryStickCurrentFireMode(
+	s *Soldier,
+	dist, sightline, fear, shootDesire float64,
+) (FireMode, bool) {
 	// Stickiness/hysteresis around mode boundaries to prevent chatter.
 	// Current mode gets a deadband where it tends to persist.
 	switch s.currentFireMode {
 	case FireModeAuto:
-		if dist <= float64(autoRange)*1.12 && (sightline < autoSightlineThresh+0.12 || fear > 0.45) {
-			if cm.rng.Float64() < 0.85 {
-				return FireModeAuto
-			}
+		if dist <= float64(autoRange)*1.12 && (sightline < autoSightlineThresh+0.12 || fear > 0.45) && cm.rng.Float64() < 0.85 {
+			return FireModeAuto, true
 		}
 	case FireModeBurst:
 		if dist >= float64(autoRange)*0.92 && dist <= float64(burstRange)*1.08 {
 			burstStick := clamp01(0.35 + fear*0.25 + shootDesire*0.20)
 			if cm.rng.Float64() < burstStick {
-				return FireModeBurst
+				return FireModeBurst, true
 			}
 		}
 	case FireModeSingle:
 		if dist >= float64(burstRange)*0.88 {
 			singleStick := clamp01(0.50 + s.profile.Skills.Marksmanship*0.20 - fear*0.15)
 			if cm.rng.Float64() < singleStick {
-				return FireModeSingle
+				return FireModeSingle, true
 			}
 		}
 	}
+	return FireModeSingle, false
+}
 
-	// --- Rule 1: extreme CQB — always auto regardless of terrain.
+func (cm *CombatManager) selectCloseRangeMode(
+	dist, sightline, fear, shootDesire, stress float64,
+) (FireMode, bool) {
 	pointBlankRange := float64(autoRange) / 2.0 // 5 tiles / 80px
 	if dist <= pointBlankRange {
-		return FireModeAuto
+		return FireModeAuto, true
+	}
+	if dist > float64(autoRange) {
+		return FireModeSingle, false
 	}
 
-	// --- Rule 2: CQB range + enclosed terrain (fuzzy).
-	if dist <= float64(autoRange) {
-		// How enclosed is the terrain? Low sightline = enclosed.
-		// How close are they? Closer = more auto pressure.
-		// How scared are they? Fear drives spray.
-		enclosedFactor := clamp01((autoSightlineThresh - sightline) / autoSightlineThresh)
-		distFactor := clamp01(1.0 - dist/float64(autoRange))
-		fearBoost := fear * 0.3
-		autoMembership := enclosedFactor*0.5 + distFactor*0.35 + fearBoost + shootDesire*0.1
-		if autoMembership > 0.45 {
-			if stress > 0.58 && cm.rng.Float64() < (stress-0.58)*0.45 {
-				return FireModeAuto
-			}
-			if cm.rng.Float64() < 0.80 {
-				return FireModeAuto
-			}
+	enclosedFactor := clamp01((autoSightlineThresh - sightline) / autoSightlineThresh)
+	distFactor := clamp01(1.0 - dist/float64(autoRange))
+	fearBoost := fear * 0.3
+	autoMembership := enclosedFactor*0.5 + distFactor*0.35 + fearBoost + shootDesire*0.1
+	if autoMembership > 0.45 {
+		if stress > 0.58 && cm.rng.Float64() < (stress-0.58)*0.45 {
+			return FireModeAuto, true
 		}
-		// Falls through to burst if not quite enclosed enough.
-		return FireModeBurst
-	}
-
-	// --- Rule 3: mid-range burst zone (fuzzy boundary with single).
-	if dist <= float64(burstRange) {
-		// Prefer burst, but experienced calm soldiers may stay on single
-		// for better accuracy. Fear pushes toward burst (spray under stress).
-		burstPressure := clamp01(
-			0.4 +
-				fear*0.3 +
-				shootDesire*0.2 -
-				s.profile.Skills.Marksmanship*0.2,
-		)
-		if burstPressure > 0.45 {
-			if stress > 0.60 && dist <= float64(autoRange)*1.05 && cm.rng.Float64() < (stress-0.60)*0.35 {
-				return FireModeAuto
-			}
-			return FireModeBurst
+		if cm.rng.Float64() < 0.80 {
+			return FireModeAuto, true
 		}
-		return FireModeSingle
+	}
+	return FireModeBurst, true
+}
+
+func (cm *CombatManager) selectMidRangeMode(
+	s *Soldier,
+	dist, fear, shootDesire, stress float64,
+) (FireMode, bool) {
+	if dist > float64(burstRange) {
+		return FireModeSingle, false
 	}
 
-	// --- Rule 4: long range — single shot.
-	return FireModeSingle
+	burstPressure := clamp01(0.4 + fear*0.3 + shootDesire*0.2 - s.profile.Skills.Marksmanship*0.2)
+	if burstPressure <= 0.45 {
+		return FireModeSingle, true
+	}
+	if stress > 0.60 && dist <= float64(autoRange)*1.05 && cm.rng.Float64() < (stress-0.60)*0.35 {
+		return FireModeAuto, true
+	}
+	return FireModeBurst, true
 }
 
 // spawnRicochets checks if a missed shot's path intersects any wall, and if so,
@@ -1033,23 +1225,85 @@ func (cm *CombatManager) spawnRicochets(fromX, fromY, toX, toY float64, shooterT
 
 // pointToSegmentDist is defined in roads.go (shared helper).
 
-// closestContact returns the nearest visible contact for a shooter.
+// closestContact returns the best target for a shooter based on distance and threat prioritization.
+// High threat prioritization makes soldiers focus on the most dangerous targets first.
 func (cm *CombatManager) closestContact(s *Soldier) *Soldier {
 	var best *Soldier
-	bestDist := math.MaxFloat64
+	bestScore := -math.MaxFloat64
+	threatPrio := s.profile.Survival.ThreatPrioritization
+	coordFire := s.profile.Cooperation.CoordinatedFire
+	squadmateTargets := buildSquadmateTargets(s, coordFire)
+
 	for _, c := range s.vision.KnownContacts {
 		if c.state == SoldierStateDead {
 			continue
 		}
-		dx := c.x - s.x
-		dy := c.y - s.y
-		d := dx*dx + dy*dy
-		if d < bestDist {
-			bestDist = d
+
+		score := scoreContactTarget(s, c, coordFire, threatPrio, squadmateTargets)
+
+		if score > bestScore {
+			bestScore = score
 			best = c
 		}
 	}
 	return best
+}
+
+func buildSquadmateTargets(s *Soldier, coordFire float64) map[int]int {
+	squadmateTargets := make(map[int]int)
+	if coordFire <= 0.2 || s.squad == nil {
+		return squadmateTargets
+	}
+	for _, squadmate := range s.squad.Members {
+		if squadmate == nil || squadmate == s || squadmate.state == SoldierStateDead {
+			continue
+		}
+		if squadmate.burstTargetID > 0 {
+			squadmateTargets[squadmate.burstTargetID]++
+		}
+	}
+	return squadmateTargets
+}
+
+func scoreContactTarget(
+	shooter *Soldier,
+	contact *Soldier,
+	coordFire, threatPrio float64,
+	squadmateTargets map[int]int,
+) float64 {
+	dx := contact.x - shooter.x
+	dy := contact.y - shooter.y
+	dist := math.Sqrt(dx*dx + dy*dy)
+
+	score := 1000.0 / math.Max(dist, 1.0)
+
+	if coordFire > 0.2 {
+		if count, isEngaged := squadmateTargets[contact.id]; isEngaged {
+			score += coordFire * float64(count) * 250.0
+			score += shooter.profile.Personality.Teamwork * float64(count) * 150.0
+		}
+	}
+
+	if threatPrio <= 0.3 {
+		return score
+	}
+
+	if contact.fireCooldown > 0 || contact.burstShotsRemaining > 0 {
+		score += threatPrio * 200.0
+	}
+
+	switch contact.profile.Stance {
+	case StanceStanding:
+		score += threatPrio * 100.0
+	case StanceCrouching:
+		score += threatPrio * 50.0
+	}
+
+	if dist < 150.0 {
+		score += threatPrio * (150.0 - dist) * 2.0
+	}
+
+	return score
 }
 
 // applyWitnessStress adds stress to same-team soldiers near a hit target.

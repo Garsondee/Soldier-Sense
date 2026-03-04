@@ -90,25 +90,15 @@ func (g *Game) drawOfficerOrders(screen *ebiten.Image) {
 // endpoint or best nearby position. For the selected soldier, the line is
 // brighter and includes a small destination marker.
 func (g *Game) drawMovementIntentLines(screen *ebiten.Image) {
-	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
+	all = append(all, g.soldiers...)
+	all = append(all, g.opfor...)
 	for _, s := range all {
 		if s.state == SoldierStateDead {
 			continue
 		}
-		// Determine destination: path endpoint, or best nearby position.
-		var destX, destY float64
-		hasDest := false
 
-		if len(s.path) > 0 {
-			last := s.path[len(s.path)-1]
-			destX, destY = last[0], last[1]
-			hasDest = true
-		} else if s.blackboard.HasBestNearby {
-			destX = s.blackboard.BestNearbyX
-			destY = s.blackboard.BestNearbyY
-			hasDest = true
-		}
-
+		destX, destY, hasDest := movementIntentDestination(s)
 		if !hasDest {
 			continue
 		}
@@ -121,67 +111,85 @@ func (g *Game) drawMovementIntentLines(screen *ebiten.Image) {
 		}
 		dist := math.Sqrt(dx*dx + dy*dy)
 
-		// Line colour: faint team colour.
 		isSelected := g.inspector.selected == s
-		var lineCol color.RGBA
-		if s.team == TeamRed {
-			if isSelected {
-				lineCol = color.RGBA{R: 220, G: 80, B: 60, A: 80}
-			} else {
-				lineCol = color.RGBA{R: 160, G: 50, B: 40, A: 30}
-			}
-		} else {
-			if isSelected {
-				lineCol = color.RGBA{R: 60, G: 100, B: 220, A: 80}
-			} else {
-				lineCol = color.RGBA{R: 40, G: 60, B: 160, A: 30}
-			}
-		}
+		lineCol := movementIntentLineColor(s.team, isSelected)
 
 		sx := float32(s.x)
 		sy := float32(s.y)
 		ex := float32(destX)
 		ey := float32(destY)
 
-		// Draw dashed line.
-		dashLen := float32(8)
-		gapLen := float32(6)
-		totalLen := float32(dist)
-		ndx := float32(dx) / totalLen
-		ndy := float32(dy) / totalLen
-		drawn := float32(0)
-		for drawn < totalLen {
-			segEnd := drawn + dashLen
-			if segEnd > totalLen {
-				segEnd = totalLen
-			}
-			x1 := sx + ndx*drawn
-			y1 := sy + ndy*drawn
-			x2 := sx + ndx*segEnd
-			y2 := sy + ndy*segEnd
-			thickness := float32(0.5)
-			if isSelected {
-				thickness = 1.0
-			}
-			vector.StrokeLine(screen, x1, y1, x2, y2, thickness, lineCol, false)
-			drawn = segEnd + gapLen
-		}
+		drawDashedMovementIntentLine(screen, sx, sy, dx, dy, dist, isSelected, lineCol)
 
 		// Destination marker for selected soldier.
 		if isSelected {
-			markerCol := color.RGBA{R: 255, G: 240, B: 60, A: 120}
-			r := float32(4)
-			for a := 0; a < 8; a++ {
-				ang0 := float64(a) / 8.0 * 2 * math.Pi
-				ang1 := float64(a+1) / 8.0 * 2 * math.Pi
-				vector.StrokeLine(screen,
-					ex+r*float32(math.Cos(ang0)),
-					ey+r*float32(math.Sin(ang0)),
-					ex+r*float32(math.Cos(ang1)),
-					ey+r*float32(math.Sin(ang1)),
-					1.0, markerCol, false)
-			}
+			drawSelectedIntentDestinationMarker(screen, ex, ey)
 		}
+	}
+}
+
+func movementIntentDestination(s *Soldier) (destX, destY float64, ok bool) {
+	if len(s.path) > 0 {
+		last := s.path[len(s.path)-1]
+		return last[0], last[1], true
+	}
+	if s.blackboard.HasBestNearby {
+		return s.blackboard.BestNearbyX, s.blackboard.BestNearbyY, true
+	}
+	return 0, 0, false
+}
+
+func movementIntentLineColor(team Team, isSelected bool) color.RGBA {
+	if team == TeamRed {
+		if isSelected {
+			return color.RGBA{R: 220, G: 80, B: 60, A: 80}
+		}
+		return color.RGBA{R: 160, G: 50, B: 40, A: 30}
+	}
+	if isSelected {
+		return color.RGBA{R: 60, G: 100, B: 220, A: 80}
+	}
+	return color.RGBA{R: 40, G: 60, B: 160, A: 30}
+}
+
+func drawDashedMovementIntentLine(screen *ebiten.Image, sx, sy float32, dx, dy, dist float64, isSelected bool, lineCol color.RGBA) {
+	dashLen := float32(8)
+	gapLen := float32(6)
+	totalLen := float32(dist)
+	ndx := float32(dx) / totalLen
+	ndy := float32(dy) / totalLen
+	thickness := float32(0.5)
+	if isSelected {
+		thickness = 1.0
+	}
+
+	drawn := float32(0)
+	for drawn < totalLen {
+		segEnd := drawn + dashLen
+		if segEnd > totalLen {
+			segEnd = totalLen
+		}
+		x1 := sx + ndx*drawn
+		y1 := sy + ndy*drawn
+		x2 := sx + ndx*segEnd
+		y2 := sy + ndy*segEnd
+		vector.StrokeLine(screen, x1, y1, x2, y2, thickness, lineCol, false)
+		drawn = segEnd + gapLen
+	}
+}
+
+func drawSelectedIntentDestinationMarker(screen *ebiten.Image, ex, ey float32) {
+	markerCol := color.RGBA{R: 255, G: 240, B: 60, A: 120}
+	r := float32(4)
+	for a := 0; a < 8; a++ {
+		ang0 := float64(a) / 8.0 * 2 * math.Pi
+		ang1 := float64(a+1) / 8.0 * 2 * math.Pi
+		vector.StrokeLine(screen,
+			ex+r*float32(math.Cos(ang0)),
+			ey+r*float32(math.Sin(ang0)),
+			ex+r*float32(math.Cos(ang1)),
+			ey+r*float32(math.Sin(ang1)),
+			1.0, markerCol, false)
 	}
 }
 

@@ -22,7 +22,7 @@ func TestResolveComms_StatusReportClearsPending(t *testing.T) {
 	sq.radioStatusReplyQueued[member.id] = true
 
 	msg := member.buildStatusReportMessage(leader, *tick, RadioPriUrgent, "STATUS REPLY")
-	sq.queueRadio(msg)
+	sq.queueRadio(&msg)
 	sq.ResolveComms(*tick, nil)
 	if sq.radioInFlight == nil {
 		t.Fatalf("expected status report to enter in-flight state")
@@ -47,7 +47,7 @@ func TestResolveComms_GarbledContactReportLogged(t *testing.T) {
 	*tick = tickVal
 	tl := NewThoughtLog()
 
-	sq.queueRadio(RadioMessage{
+	msg := RadioMessage{
 		TickCreated:   tickVal,
 		SenderID:      member.id,
 		SenderLabel:   member.label,
@@ -59,7 +59,8 @@ func TestResolveComms_GarbledContactReportLogged(t *testing.T) {
 		ContactX:      900,
 		ContactY:      250,
 		ContactCount:  3,
-	})
+	}
+	sq.queueRadio(&msg)
 
 	sq.ResolveComms(tickVal, tl)
 	if sq.radioInFlight == nil {
@@ -91,7 +92,8 @@ func TestResolveComms_DroppedReplyTimesOutMember(t *testing.T) {
 	sq.radioPendingStatus[member.id] = 300
 	sq.radioStatusReplyQueued[member.id] = true
 
-	sq.queueRadio(member.buildStatusReportMessage(leader, *tick, RadioPriUrgent, "STATUS REPLY"))
+	msg := member.buildStatusReportMessage(leader, *tick, RadioPriUrgent, "STATUS REPLY")
+	sq.queueRadio(&msg)
 	sq.ResolveComms(*tick, nil)
 	if sq.radioInFlight == nil {
 		t.Fatalf("expected status reply to enter in-flight state")

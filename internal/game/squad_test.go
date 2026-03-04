@@ -322,6 +322,7 @@ func TestSquadThink_ImmediateOrderObedienceDropsAtLowCohesion(t *testing.T) {
 
 	leader := NewSoldier(0, 120, 360, TeamRed, [2]float64{120, 360}, [2]float64{1100, 360}, ng, nil, nil, tl, &tick)
 	member := NewSoldier(1, 120, 390, TeamRed, [2]float64{120, 390}, [2]float64{1100, 390}, ng, nil, nil, tl, &tick)
+	member.profile.Cooperation.LeadershipFollowing = 0
 	sq := NewSquad(0, TeamRed, []*Soldier{leader, member})
 
 	sq.Cohesion = 0.0

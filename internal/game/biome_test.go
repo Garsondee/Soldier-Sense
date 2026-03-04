@@ -30,7 +30,7 @@ func TestValueNoise2D_Deterministic(t *testing.T) {
 func TestGenerateBiome_PlacesVegetation(t *testing.T) {
 	tm := NewTileMap(100, 60)
 	rng := rand.New(rand.NewSource(42))
-	generateBiome(tm, rng, defaultBiomeConfig)
+	generateBiome(tm, rng, &defaultBiomeConfig)
 
 	counts := make(map[ObjectType]int)
 	groundCounts := make(map[GroundType]int)
@@ -74,7 +74,7 @@ func TestGenerateBiome_SkipsRoadsAndBuildings(t *testing.T) {
 		}
 	}
 
-	generateBiome(tm, rng, defaultBiomeConfig)
+	generateBiome(tm, rng, &defaultBiomeConfig)
 
 	// Road tiles should still be tarmac.
 	for c := 0; c < 50; c++ {
@@ -98,7 +98,7 @@ func TestGenerateBiome_SkipsRoadsAndBuildings(t *testing.T) {
 
 func TestCanPlaceTree_RespectsBuildings(t *testing.T) {
 	tm := NewTileMap(10, 10)
-	// Mark centre as indoor.
+	// Mark center as indoor.
 	tm.AddFlag(5, 5, TileFlagIndoor)
 	if canPlaceTree(tm, 5, 5) {
 		t.Fatal("should not place tree on indoor tile")

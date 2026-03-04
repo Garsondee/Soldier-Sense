@@ -5,6 +5,7 @@ import "math"
 // CellTrait flags describe tactical properties of a grid cell.
 type CellTrait uint8
 
+// CellTrait enumerates tactical properties of a grid cell.
 const (
 	CellTraitNone      CellTrait = 0
 	CellTraitWallAdj   CellTrait = 1 << iota // adjacent to a wall segment
@@ -19,17 +20,17 @@ const (
 // TacticalMap pre-computes per-cell tactical properties for the entire battlefield.
 // Built once at init from building geometry; soldiers query it at runtime.
 type TacticalMap struct {
-	cols, rows int
-	traits     []CellTrait
+	traits []CellTrait
 	// desirability is a pre-computed -1..+1 score per cell.
 	// Positive = good place to stop (corner cover, door-adjacent).
 	// Negative = bad place to stop (in a doorway, open ground near buildings).
 	// Zero = neutral open ground.
 	desirability []float64
+	cols, rows   int
 }
 
-// NewTacticalMap analyses building walls, windows, and footprints to produce a TacticalMap.
-func NewTacticalMap(mapW, mapH int, buildings []rect, windows []rect, footprints []rect) *TacticalMap {
+// NewTacticalMap analyzes building walls, windows, and footprints to produce a TacticalMap.
+func NewTacticalMap(mapW, mapH int, buildings, windows, footprints []rect) *TacticalMap { //nolint:gocognit,gocyclo
 	cols := mapW / cellSize
 	rows := mapH / cellSize
 	tm := &TacticalMap{
@@ -39,7 +40,7 @@ func NewTacticalMap(mapW, mapH int, buildings []rect, windows []rect, footprints
 		desirability: make([]float64, cols*rows),
 	}
 
-	// Step 1: Build a wall occupancy set for fast neighbour queries.
+	// Step 1: Build a wall occupancy set for fast neighbor queries.
 	wallSet := make(map[[2]int]bool, len(buildings))
 	for _, b := range buildings {
 		cx := b.x / cellSize
@@ -92,7 +93,7 @@ func NewTacticalMap(mapW, mapH int, buildings []rect, windows []rect, footprints
 				tm.traits[idx] |= CellTraitInterior
 			}
 
-			// Check 4-directional neighbours for walls (including windows as wall-like).
+			// Check 4-directional neighbors for walls (including windows as wall-like).
 			adjWalls := 0
 			hasN := isBlocked(cx, cy-1)
 			hasS := isBlocked(cx, cy+1)
@@ -133,7 +134,7 @@ func NewTacticalMap(mapW, mapH int, buildings []rect, windows []rect, footprints
 	// Step 4: Detect doorways.
 	// A doorway is a walkable cell in a wall run gap: it has walls on two
 	// opposite sides (N+S or W+E) but the cell itself and perpendicular
-	// neighbours are open. The cell is effectively a chokepoint.
+	// neighbors are open. The cell is effectively a chokepoint.
 	for cy := 0; cy < rows; cy++ {
 		for cx := 0; cx < cols; cx++ {
 			if wallSet[[2]int{cx, cy}] {
@@ -226,7 +227,7 @@ func NewTacticalMap(mapW, mapH int, buildings []rect, windows []rect, footprints
 //	claimedIdx:   index of claimed building footprint, or -1.
 //	footprints:   building footprints slice.
 //	occupiedPositions: list of world positions already occupied by squad members (for deconfliction).
-func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing float64, hasEnemy bool, claimedIdx int, footprints []rect, occupiedPositions [][2]float64) (float64, float64, float64) {
+func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing float64, hasEnemy bool, claimedIdx int, footprints []rect, occupiedPositions [][2]float64) (float64, float64, float64) { //nolint:gocognit,gocyclo
 	cx, cy := WorldToCell(wx, wy)
 	bestScore := -999.0
 	bestX, bestY := wx, wy
@@ -327,7 +328,7 @@ func (tm *TacticalMap) ScanBestNearby(wx, wy float64, radius int, enemyBearing f
 // cells ahead along the bearing. Returns (x, y, score, found).
 // Used by cover-to-cover bounding: soldiers sprint to the nearest good cover
 // along their advance direction rather than one long dash to the final target.
-func (tm *TacticalMap) FindBoundCover(wx, wy, bearing float64, minDist, maxDist int) (float64, float64, float64, bool) {
+func (tm *TacticalMap) FindBoundCover(wx, wy, bearing float64, minDist, maxDist int) (float64, float64, float64, bool) { //nolint:gocognit
 	cx, cy := WorldToCell(wx, wy)
 	cosB := math.Cos(bearing)
 	sinB := math.Sin(bearing)
@@ -376,7 +377,7 @@ func (tm *TacticalMap) FindBoundCover(wx, wy, bearing float64, minDist, maxDist 
 
 			// Slight preference for cells closer (shorter bound = safer).
 			score -= float64(ahead) * 0.01
-			// Penalise lateral drift — prefer staying on the bearing line.
+			// Penalize lateral drift — prefer staying on the bearing line.
 			score -= math.Abs(float64(lateral)) * 0.03
 
 			if score > bestScore {
@@ -430,7 +431,7 @@ func (tm *TacticalMap) IsDoorAdjacent(wx, wy float64) bool {
 // CornerPeekDirections returns the angles a soldier at (wx,wy) could peek around
 // a corner. Each direction is an angle in radians where a gap exists adjacent to
 // the corner walls. Returns nil if not at a corner.
-func (tm *TacticalMap) CornerPeekDirections(wx, wy float64) []float64 {
+func (tm *TacticalMap) CornerPeekDirections(wx, wy float64) []float64 { //nolint:gocyclo
 	cx, cy := WorldToCell(wx, wy)
 	if cx < 0 || cy < 0 || cx >= tm.cols || cy >= tm.rows {
 		return nil
@@ -444,7 +445,7 @@ func (tm *TacticalMap) CornerPeekDirections(wx, wy float64) []float64 {
 	var dirs []float64
 	var wallN, wallS, wallW, wallE bool
 
-	// Actually we need to check if the neighbouring cell IS a wall (blocked),
+	// Actually we need to check if the neighboring cell IS a wall (blocked),
 	// not if its trait is zero. Use the navgrid-style check against the building set.
 	// Since we don't store the wall set, recompute from traits: a wall cell has
 	// desirability -1.
@@ -462,20 +463,16 @@ func (tm *TacticalMap) CornerPeekDirections(wx, wy float64) []float64 {
 
 	// For a NW corner (walls N+W): peek east along north wall, peek south along west wall.
 	if wallN && wallW {
-		dirs = append(dirs, 0)         // east
-		dirs = append(dirs, math.Pi/2) // south
+		dirs = append(dirs, 0, math.Pi/2) // east, south
 	}
 	if wallN && wallE {
-		dirs = append(dirs, math.Pi)   // west
-		dirs = append(dirs, math.Pi/2) // south
+		dirs = append(dirs, math.Pi, math.Pi/2) // west, south
 	}
 	if wallS && wallW {
-		dirs = append(dirs, 0)          // east
-		dirs = append(dirs, -math.Pi/2) // north
+		dirs = append(dirs, 0, -math.Pi/2) // east, north
 	}
 	if wallS && wallE {
-		dirs = append(dirs, math.Pi)    // west
-		dirs = append(dirs, -math.Pi/2) // north
+		dirs = append(dirs, math.Pi, -math.Pi/2) // west, north
 	}
 
 	return dirs

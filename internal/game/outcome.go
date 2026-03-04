@@ -1,11 +1,16 @@
 package game
 
+// BattleOutcome captures the high-level result of a battle.
 type BattleOutcome int
 
 const (
+	// OutcomeInconclusive means the simulation ended without a decisive result.
 	OutcomeInconclusive BattleOutcome = iota
+	// OutcomeRedVictory means red achieved victory conditions.
 	OutcomeRedVictory
+	// OutcomeBlueVictory means blue achieved victory conditions.
 	OutcomeBlueVictory
+	// OutcomeDraw means both sides reached a draw condition.
 	OutcomeDraw
 )
 
@@ -24,6 +29,7 @@ func (o BattleOutcome) String() string {
 	}
 }
 
+// BattleOutcomeReason provides summary metrics and reason text for a battle outcome.
 type BattleOutcomeReason struct {
 	Outcome          BattleOutcome
 	RedSurvivors     int

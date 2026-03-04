@@ -98,7 +98,7 @@ func dumpFreezeNarrative(t *testing.T, ts *TestSim, freezeTicks []int, freezeRea
 	t.Log(formatTopCounts("soldiers with most freeze events", freezeBySoldier, 6))
 
 	if wr := ts.Reporter.WindowSummary(); wr != nil {
-		t.Log("=== Window Behaviour Story ===")
+		t.Log("=== Window Behavior Story ===")
 		t.Log(wr.Format())
 	}
 

@@ -6,15 +6,24 @@ import "math"
 type Sector int
 
 const (
+	// SectorNone indicates no directional sector.
 	SectorNone Sector = iota
-	SectorN           // North (0°)
-	SectorNE          // Northeast (45°)
-	SectorE           // East (90°)
-	SectorSE          // Southeast (135°)
-	SectorS           // South (180°)
-	SectorSW          // Southwest (225°)
-	SectorW           // West (270°)
-	SectorNW          // Northwest (315°)
+	// SectorN is north (0°).
+	SectorN // North (0°)
+	// SectorNE is north-east (45°).
+	SectorNE // Northeast (45°)
+	// SectorE is east (90°).
+	SectorE // East (90°)
+	// SectorSE is south-east (135°).
+	SectorSE // Southeast (135°)
+	// SectorS is south (180°).
+	SectorS // South (180°)
+	// SectorSW is south-west (225°).
+	SectorSW // Southwest (225°)
+	// SectorW is west (270°).
+	SectorW // West (270°)
+	// SectorNW is north-west (315°).
+	SectorNW // Northwest (315°)
 )
 
 func (s Sector) String() string {
@@ -40,7 +49,7 @@ func (s Sector) String() string {
 	}
 }
 
-// SectorBearing returns the center bearing (radians) for this sector.
+// Bearing returns the center bearing (radians) for this sector.
 func (s Sector) Bearing() float64 {
 	switch s {
 	case SectorN:
@@ -66,9 +75,9 @@ func (s Sector) Bearing() float64 {
 
 // BuildingState tracks the squad's use of a claimed building.
 type BuildingState struct {
+	AssignedSectors map[int]Sector // soldierID -> assigned sector
 	FootprintIdx    int            // index into buildingFootprints
 	ClaimTick       int            // when building was claimed
-	AssignedSectors map[int]Sector // soldierID -> assigned sector
 	LastRotateTick  int            // last sector rotation to avoid predictability
 	OccupantCount   int            // current soldiers inside
 	LastContactTick int            // last time contact occurred while in building
@@ -77,7 +86,7 @@ type BuildingState struct {
 // AssignSectors distributes soldiers across building sectors based on threat direction.
 // Priority sectors (facing enemy) get the best soldiers (highest discipline/marksmanship).
 func AssignSectors(
-	buildingCenterX, buildingCenterY float64,
+	_, _ float64,
 	members []*Soldier,
 	enemyBearing float64,
 	hasEnemy bool,
@@ -153,22 +162,23 @@ func bearingToSector(bearing float64) Sector {
 	// Convert to degrees for easier comparison
 	degrees := bearing * 180 / math.Pi
 
-	// Map to 8 sectors (45° each)
-	if degrees < 22.5 || degrees >= 337.5 {
+	// Map to 8 sectors (45° each).
+	switch {
+	case degrees < 22.5 || degrees >= 337.5:
 		return SectorE
-	} else if degrees < 67.5 {
+	case degrees < 67.5:
 		return SectorSE
-	} else if degrees < 112.5 {
+	case degrees < 112.5:
 		return SectorS
-	} else if degrees < 157.5 {
+	case degrees < 157.5:
 		return SectorSW
-	} else if degrees < 202.5 {
+	case degrees < 202.5:
 		return SectorW
-	} else if degrees < 247.5 {
+	case degrees < 247.5:
 		return SectorNW
-	} else if degrees < 292.5 {
+	case degrees < 292.5:
 		return SectorN
-	} else {
+	default:
 		return SectorNE
 	}
 }

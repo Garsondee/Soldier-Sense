@@ -269,7 +269,7 @@ func SuppressionResponseTest() *LaboratoryTest {
 			}
 		},
 
-		Measure: func(ts *TestSim, tick int, obs *LaboratoryObservation) {
+		Measure: func(ts *TestSim, _ int, obs *LaboratoryObservation) {
 			for _, s := range ts.AllByTeam(TeamRed) {
 				// Measure distance to cover
 				coverDist := 1000.0
@@ -357,7 +357,7 @@ func FearThresholdTest() *LaboratoryTest {
 			}
 		},
 
-		Measure: func(ts *TestSim, tick int, obs *LaboratoryObservation) {
+		Measure: func(ts *TestSim, _ int, obs *LaboratoryObservation) {
 			for _, s := range ts.AllByTeam(TeamRed) {
 				obs.Metrics["current_fear"] = s.profile.Psych.Fear
 				obs.Flags["panic_triggered"] = s.blackboard.PanicRetreatActive
@@ -415,11 +415,11 @@ func FormationMaintenanceTest() *LaboratoryTest {
 			return ts
 		},
 
-		Stimulus: func(ts *TestSim, tick int) {
+		Stimulus: func(_ *TestSim, _ int) {
 			// No external stimulus, just observe natural movement
 		},
 
-		Measure: func(ts *TestSim, tick int, obs *LaboratoryObservation) {
+		Measure: func(ts *TestSim, _ int, obs *LaboratoryObservation) {
 			for _, sq := range ts.Squads {
 				spread := sq.squadSpread()
 				obs.Metrics["current_spread"] = spread
@@ -469,7 +469,7 @@ func FirstContactResponseTest() *LaboratoryTest {
 			return ts
 		},
 
-		Stimulus: func(ts *TestSim, tick int) {
+		Stimulus: func(_ *TestSim, _ int) {
 			// Enemy is stationary, no additional stimulus needed
 		},
 
@@ -491,13 +491,14 @@ func FirstContactResponseTest() *LaboratoryTest {
 					if tick%10 == 0 {
 						avgMovement := 0.0
 						for i, m := range sq.Members {
-							if m.state != SoldierStateDead {
-								prevX := obs.Metrics[fmt.Sprintf("prev_x_%d", i)]
-								prevY := obs.Metrics[fmt.Sprintf("prev_y_%d", i)]
-								avgMovement += math.Hypot(m.x-prevX, m.y-prevY)
-								obs.Metrics[fmt.Sprintf("prev_x_%d", i)] = m.x
-								obs.Metrics[fmt.Sprintf("prev_y_%d", i)] = m.y
+							if m.state == SoldierStateDead {
+								continue
 							}
+							prevX := obs.Metrics[fmt.Sprintf("prev_x_%d", i)]
+							prevY := obs.Metrics[fmt.Sprintf("prev_y_%d", i)]
+							avgMovement += math.Hypot(m.x-prevX, m.y-prevY)
+							obs.Metrics[fmt.Sprintf("prev_x_%d", i)] = m.x
+							obs.Metrics[fmt.Sprintf("prev_y_%d", i)] = m.y
 						}
 						avgMovement /= float64(len(sq.Members))
 						obs.Metrics["avg_movement"] = avgMovement
@@ -564,23 +565,24 @@ func CohesionCollapseTest() *LaboratoryTest {
 			}
 		},
 
-		Measure: func(ts *TestSim, tick int, obs *LaboratoryObservation) {
+		Measure: func(ts *TestSim, _ int, obs *LaboratoryObservation) {
 			for _, sq := range ts.Squads {
-				if sq.Team == TeamRed {
-					obs.Metrics["cohesion"] = sq.Cohesion
-					obs.Metrics["stress"] = sq.Stress
-					obs.Metrics["casualty_rate"] = sq.CasualtyRate
-					obs.Flags["cohesion_broken"] = sq.Broken
-
-					// Count alive members
-					alive := 0
-					for _, m := range sq.Members {
-						if m.state != SoldierStateDead {
-							alive++
-						}
-					}
-					obs.Metrics["alive_count"] = float64(alive)
+				if sq.Team != TeamRed {
+					continue
 				}
+				obs.Metrics["cohesion"] = sq.Cohesion
+				obs.Metrics["stress"] = sq.Stress
+				obs.Metrics["casualty_rate"] = sq.CasualtyRate
+				obs.Flags["cohesion_broken"] = sq.Broken
+
+				// Count alive members
+				alive := 0
+				for _, m := range sq.Members {
+					if m.state != SoldierStateDead {
+						alive++
+					}
+				}
+				obs.Metrics["alive_count"] = float64(alive)
 			}
 		},
 

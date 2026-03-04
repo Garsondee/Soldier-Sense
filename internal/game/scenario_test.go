@@ -198,7 +198,7 @@ func TestScenario_MutualAdvance_NoPsychCollapseBeforeFiringRange(t *testing.T) {
 	)
 
 	// Initial squad separation is ~1150px (> maxFireRange=900), so this window should
-	// stay pre-fire while squads are only manoeuvring toward each other.
+	// stay pre-fire while squads are only maneuvering toward each other.
 	ts.RunTicks(120)
 
 	if ts.SimLog.HasEntry("psych", "disobedience", "disobeying") {
@@ -783,7 +783,7 @@ func TestScenario_CloseEngagement(t *testing.T) {
 	ts := NewTestSim(
 		WithMapSize(1280, 720),
 		WithSeed(77),
-		// Red leader + 3 members, facing east — already near centre.
+		// Red leader + 3 members, facing east — already near center.
 		WithRedSoldier(0, 400, 340, 1200, 340),
 		WithRedSoldier(1, 370, 320, 1200, 320),
 		WithRedSoldier(2, 370, 360, 1200, 360),

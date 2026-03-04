@@ -59,7 +59,7 @@ func speechPressureScore(s *Soldier) float64 {
 
 // contextualPhrase generates a speech line that reflects the soldier's actual
 // state: their goal, threat situation, suppression, and tactical awareness.
-func contextualPhrase(rng *rand.Rand, s *Soldier) (string, string) {
+func contextualPhrase(rng *rand.Rand, s *Soldier) (string, string) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	ef := s.profile.Psych.EffectiveFear()
 	morale := s.profile.Psych.Morale
@@ -73,7 +73,8 @@ func contextualPhrase(rng *rand.Rand, s *Soldier) (string, string) {
 
 	contactX, contactY := s.endTarget[0], s.endTarget[1]
 	contactSource := "objective"
-	if bb.VisibleThreatCount() > 0 {
+	switch {
+	case bb.VisibleThreatCount() > 0:
 		best := math.MaxFloat64
 		for _, t := range bb.Threats {
 			if !t.IsVisible {
@@ -86,16 +87,16 @@ func contextualPhrase(rng *rand.Rand, s *Soldier) (string, string) {
 				contactSource = "visual"
 			}
 		}
-	} else if bb.RadioHasContact {
+	case bb.RadioHasContact:
 		contactX, contactY = bb.RadioContactX, bb.RadioContactY
 		contactSource = "radio"
-	} else if bb.SquadHasContact {
+	case bb.SquadHasContact:
 		contactX, contactY = bb.SquadContactX, bb.SquadContactY
 		contactSource = "squad"
-	} else if bb.HeardGunfire {
+	case bb.HeardGunfire:
 		contactX, contactY = bb.HeardGunfireX, bb.HeardGunfireY
 		contactSource = "audio"
-	} else if bb.IsActivated() {
+	case bb.IsActivated():
 		contactX, contactY = bb.CombatMemoryX, bb.CombatMemoryY
 		contactSource = "memory"
 	}
@@ -219,11 +220,12 @@ func contextualPhrase(rng *rand.Rand, s *Soldier) (string, string) {
 
 	case GoalOverwatch:
 		pos := "open"
-		if bb.AtWindowAdj {
+		switch {
+		case bb.AtWindowAdj:
 			pos = "window"
-		} else if bb.AtCorner {
+		case bb.AtCorner:
 			pos = "corner"
-		} else if bb.AtWall {
+		case bb.AtWall:
 			pos = "wall"
 		}
 		if bb.UnresponsiveMembers > 0 {
@@ -283,7 +285,7 @@ func contextualPhrase(rng *rand.Rand, s *Soldier) (string, string) {
 
 // UpdateSpeech ticks all speech bubbles and occasionally generates new ones
 // for soldiers whose mood warrants commentary.
-func (g *Game) UpdateSpeech(rng *rand.Rand) {
+func (g *Game) UpdateSpeech(rng *rand.Rand) { //nolint:gocognit,gocyclo
 	// Age existing bubbles, prune expired.
 	kept := g.speechBubbles[:0]
 	for _, b := range g.speechBubbles {
@@ -295,7 +297,9 @@ func (g *Game) UpdateSpeech(rng *rand.Rand) {
 	g.speechBubbles = kept
 
 	// Try to emit a new bubble from a random eligible soldier each tick.
-	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
+	all = append(all, g.soldiers...)
+	all = append(all, g.opfor...)
 	if len(all) == 0 {
 		return
 	}
@@ -381,7 +385,7 @@ func (g *Game) UpdateSpeech(rng *rand.Rand) {
 }
 
 // drawSpeechBubbles renders active speech bubbles above each soldier.
-func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
+func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) { //nolint:gocognit,gocyclo
 	ox, oy := float32(offX), float32(offY)
 
 	// Overlap prevention: track occupied Y bands per soldier to push bubbles up.
@@ -445,7 +449,9 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 		// Smart horizontal positioning to avoid overlapping other soldiers.
 		bgX := sx - bgW/2
 		// Check if bubble would overlap any nearby soldiers and shift horizontally if needed.
-		all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+		all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
+		all = append(all, g.soldiers...)
+		all = append(all, g.opfor...)
 		for _, other := range all {
 			if other == s || other.state == SoldierStateDead {
 				continue
@@ -471,7 +477,7 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) {
 		baseBG := color.RGBA{R: 16, G: 18, B: 16, A: uint8(220 * alpha)}
 		vector.FillRect(screen, bgX, bgY, bgW, bgH, baseBG, false)
 
-		// Accent stripe on the left edge — team coloured.
+		// Accent stripe on the left edge — team colored.
 		stripeW := 4 * invZoom
 		var accent color.RGBA
 		if s.team == TeamRed {

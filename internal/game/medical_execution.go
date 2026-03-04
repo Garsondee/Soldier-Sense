@@ -45,33 +45,58 @@ func (s *Soldier) executeHelpCasualty(dt float64) {
 
 	// If the casualty is incapacitated and the helper is under threat, drag first.
 	bb := &s.blackboard
-	if s.isMedic && !casualty.casualty.BeingDragged && casualty.state.IsIncapacitated() && (bb.IncomingFireCount > 0 || bb.VisibleThreatCount() > 0) {
-		// Pick a drag destination away from the closest visible threat.
-		best := math.MaxFloat64
-		var tx, ty float64
-		for _, t := range bb.Threats {
-			if !t.IsVisible {
-				continue
-			}
-			dx := s.x - t.X
-			dy := s.y - t.Y
-			d := dx*dx + dy*dy
-			if d < best {
-				best = d
-				// Drag ~200px directly away from threat.
-				len := math.Hypot(dx, dy)
-				if len < 1 {
-					len = 1
+	underThreat := bb.IncomingFireCount > 0 || bb.VisibleThreatCount() > 0
+
+	// CasualtyEvacuation trait: willingness to drag wounded under fire
+	// Medics always consider dragging, others need high CasualtyEvacuation trait
+	shouldConsiderDragging := s.isMedic || s.profile.Cooperation.CasualtyEvacuation > 0.4
+
+	// High CasualtyEvacuation reduces fear of dragging under fire
+	evacuationWillingness := s.profile.Cooperation.CasualtyEvacuation
+	if s.isMedic {
+		evacuationWillingness = math.Max(evacuationWillingness, 0.6) // Medics have baseline willingness
+	}
+
+	// Fear and suppression reduce willingness to drag
+	fearPenalty := s.profile.Psych.EffectiveFear() * (1.0 - evacuationWillingness*0.5)
+	suppressPenalty := 0.0
+	if bb.IsSuppressed() {
+		suppressPenalty = 0.4 * (1.0 - evacuationWillingness*0.6)
+	}
+
+	dragThreshold := 0.3 - evacuationWillingness*0.25 + fearPenalty + suppressPenalty
+
+	if shouldConsiderDragging && !casualty.casualty.BeingDragged && casualty.state.IsIncapacitated() && underThreat {
+		// Roll for dragging attempt based on willingness
+		if s.psychRoll(77) > dragThreshold {
+			// Pick a drag destination away from the closest visible threat.
+			best := math.MaxFloat64
+			var tx, ty float64
+			for _, t := range bb.Threats {
+				if !t.IsVisible {
+					continue
 				}
-				nx := dx / len
-				ny := dy / len
-				tx = s.x + nx*200
-				ty = s.y + ny*200
+				dx := s.x - t.X
+				dy := s.y - t.Y
+				d := dx*dx + dy*dy
+				if d < best {
+					best = d
+					// Drag distance scales with evacuation trait (100-250px)
+					dragDist := 100.0 + evacuationWillingness*150.0
+					len := math.Hypot(dx, dy)
+					if len < 1 {
+						len = 1
+					}
+					nx := dx / len
+					ny := dy / len
+					tx = s.x + nx*dragDist
+					ty = s.y + ny*dragDist
+				}
 			}
-		}
-		if best < math.MaxFloat64 {
-			s.startDraggingCasualty(casualty, tx, ty)
-			s.think("dragging casualty")
+			if best < math.MaxFloat64 {
+				s.startDraggingCasualty(casualty, tx, ty)
+				s.think("dragging casualty")
+			}
 		}
 	}
 

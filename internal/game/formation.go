@@ -6,10 +6,14 @@ import "math"
 type FormationType int
 
 const (
-	FormationLine    FormationType = iota // side-by-side perpendicular to heading
-	FormationWedge                        // V-shape, leader at point
-	FormationColumn                       // single file behind leader
-	FormationEchelon                      // diagonal line offset to one flank
+	// FormationLine places members side-by-side perpendicular to heading.
+	FormationLine FormationType = iota // side-by-side perpendicular to heading
+	// FormationWedge places members in a V-shape with leader at point.
+	FormationWedge // V-shape, leader at point
+	// FormationColumn places members in single file behind leader.
+	FormationColumn // single file behind leader
+	// FormationEchelon places members in a diagonal flank offset.
+	FormationEchelon // diagonal line offset to one flank
 )
 
 // slotSpacing is the pixel gap between adjacent formation slots.
