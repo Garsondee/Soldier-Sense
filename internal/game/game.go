@@ -85,6 +85,23 @@ func (g *Game) renderTerrainLayer(screen *ebiten.Image) { //nolint:gocognit,gocy
 		vector.FillRect(screen, ox, oy, gw, gh, color.RGBA{R: 30, G: 45, B: 30, A: 255}, false)
 	}
 
+	// Subtle deterministic tone patches to break up large flat areas.
+	for _, p := range g.terrainPatches {
+		shade := int(p.shade) - 6
+		if shade >= 0 {
+			vector.FillRect(screen, p.x, p.y, p.w, p.h,
+				color.RGBA{R: clampToByte(28 + shade), G: clampToByte(44 + shade*2), B: clampToByte(28 + shade), A: 20}, false)
+			continue
+		}
+		d := -shade
+		vector.FillRect(screen, p.x, p.y, p.w, p.h,
+			color.RGBA{R: clampToByte(20 - d/2), G: clampToByte(30 - d), B: clampToByte(22 - d/2), A: 18}, false)
+	}
+
+	// Simple global ambient light gradient keeps the scene from feeling flat.
+	vector.FillRect(screen, ox, oy, gw, gh*0.38, color.RGBA{R: 205, G: 195, B: 150, A: 8}, false)
+	vector.FillRect(screen, ox, oy+gh*0.62, gw, gh*0.38, color.RGBA{R: 10, G: 16, B: 18, A: 10}, false)
+
 	gridFine := 16
 	gridMid := gridFine * 4
 	gridCoarse := gridMid * 4
@@ -3881,7 +3898,7 @@ func (g *Game) drawVignette(screen *ebiten.Image, offX, offY int) {
 
 	// Outer hard strip — strong darkening at the absolute edge.
 	outer := float32(60)
-	outerDark := color.RGBA{R: 0, G: 0, B: 0, A: 100}
+	outerDark := color.RGBA{R: 2, G: 4, B: 5, A: 90}
 	vector.FillRect(screen, ox, oy, gw, outer, outerDark, false)
 	vector.FillRect(screen, ox, oy+gh-outer, gw, outer, outerDark, false)
 	vector.FillRect(screen, ox, oy, outer, gh, outerDark, false)
@@ -3889,7 +3906,7 @@ func (g *Game) drawVignette(screen *ebiten.Image, offX, offY int) {
 
 	// Mid band — moderate darkening.
 	mid := float32(160)
-	midDark := color.RGBA{R: 0, G: 0, B: 0, A: 45}
+	midDark := color.RGBA{R: 3, G: 8, B: 10, A: 38}
 	vector.FillRect(screen, ox, oy, gw, mid, midDark, false)
 	vector.FillRect(screen, ox, oy+gh-mid, gw, mid, midDark, false)
 	vector.FillRect(screen, ox, oy, mid, gh, midDark, false)
@@ -3897,7 +3914,7 @@ func (g *Game) drawVignette(screen *ebiten.Image, offX, offY int) {
 
 	// Inner soft band — subtle atmosphere gradient.
 	inner := float32(280)
-	innerDark := color.RGBA{R: 0, G: 0, B: 0, A: 18}
+	innerDark := color.RGBA{R: 4, G: 10, B: 12, A: 15}
 	vector.FillRect(screen, ox, oy, gw, inner, innerDark, false)
 	vector.FillRect(screen, ox, oy+gh-inner, gw, inner, innerDark, false)
 	vector.FillRect(screen, ox, oy, inner, gh, innerDark, false)
