@@ -103,6 +103,12 @@ run: build
 headless-report *OVERRIDES:
     sh scripts/headless-report.sh {{OVERRIDES}}
 
+# Run the full rendered client for a fixed perf-capture window and auto-exit.
+# Example:
+#   just render-perf-capture SECONDS=30
+render-perf-capture *OVERRIDES:
+    go run ./cmd/render-perf-capture {{OVERRIDES}}
+
 install:
     go install ./cmd/soldier-sense
 

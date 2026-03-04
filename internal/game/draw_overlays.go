@@ -10,6 +10,20 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
+func (g *Game) cameraCullBounds(pad float64) (minX, minY, maxX, maxY float64) {
+	halfVW := float64(g.gameWidth) / 2 / g.camZoom
+	halfVH := float64(g.gameHeight) / 2 / g.camZoom
+	minX = g.camX - halfVW - pad
+	maxX = g.camX + halfVW + pad
+	minY = g.camY - halfVH - pad
+	maxY = g.camY + halfVH + pad
+	return minX, minY, maxX, maxY
+}
+
+func pointInBounds(x, y, minX, minY, maxX, maxY float64) bool {
+	return x >= minX && x <= maxX && y >= minY && y <= maxY
+}
+
 // commitPhaseStr returns a human-readable commit phase label for a soldier.
 func commitPhaseStr(bb *Blackboard, s *Soldier) string {
 	tick := 0
@@ -28,11 +42,16 @@ func commitPhaseStr(bb *Blackboard, s *Soldier) string {
 
 // drawOfficerOrders renders active squad leader orders on the world map.
 func (g *Game) drawOfficerOrders(screen *ebiten.Image) {
+	minX, minY, maxX, maxY := g.cameraCullBounds(96)
 	for _, sq := range g.squads {
 		if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
 			continue
 		}
 		if !sq.ActiveOrder.IsActiveAt(g.tick) {
+			continue
+		}
+		if !pointInBounds(sq.Leader.x, sq.Leader.y, minX, minY, maxX, maxY) &&
+			!pointInBounds(sq.ActiveOrder.TargetX, sq.ActiveOrder.TargetY, minX, minY, maxX, maxY) {
 			continue
 		}
 
@@ -90,11 +109,13 @@ func (g *Game) drawOfficerOrders(screen *ebiten.Image) {
 // endpoint or best nearby position. For the selected soldier, the line is
 // brighter and includes a small destination marker.
 func (g *Game) drawMovementIntentLines(screen *ebiten.Image) {
-	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
-	all = append(all, g.soldiers...)
-	all = append(all, g.opfor...)
+	minX, minY, maxX, maxY := g.cameraCullBounds(128)
+	all := g.allUnits()
 	for _, s := range all {
 		if s.state == SoldierStateDead {
+			continue
+		}
+		if !pointInBounds(s.x, s.y, minX, minY, maxX, maxY) {
 			continue
 		}
 
@@ -196,6 +217,7 @@ func drawSelectedIntentDestinationMarker(screen *ebiten.Image, ex, ey float32) {
 // drawSquadIntentLabels draws a small label near each squad leader showing
 // the squad's current intent and claimed building status.
 func (g *Game) drawSquadIntentLabels(screen *ebiten.Image) {
+	minX, minY, maxX, maxY := g.cameraCullBounds(128)
 	// Scale labels inversely with zoom so they stay readable.
 	invZoom := float32(1.0 / g.camZoom)
 	if invZoom < 1.0 {
@@ -207,6 +229,9 @@ func (g *Game) drawSquadIntentLabels(screen *ebiten.Image) {
 
 	for _, sq := range g.squads {
 		if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
+			continue
+		}
+		if !pointInBounds(sq.Leader.x, sq.Leader.y, minX, minY, maxX, maxY) {
 			continue
 		}
 		lx := float32(sq.Leader.x)

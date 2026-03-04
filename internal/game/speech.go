@@ -297,9 +297,7 @@ func (g *Game) UpdateSpeech(rng *rand.Rand) { //nolint:gocognit,gocyclo
 	g.speechBubbles = kept
 
 	// Try to emit a new bubble from a random eligible soldier each tick.
-	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
-	all = append(all, g.soldiers...)
-	all = append(all, g.opfor...)
+	all := g.allUnits()
 	if len(all) == 0 {
 		return
 	}
@@ -387,6 +385,7 @@ func (g *Game) UpdateSpeech(rng *rand.Rand) { //nolint:gocognit,gocyclo
 // drawSpeechBubbles renders active speech bubbles above each soldier.
 func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) { //nolint:gocognit,gocyclo
 	ox, oy := float32(offX), float32(offY)
+	all := g.allUnits()
 
 	// Overlap prevention: track occupied Y bands per soldier to push bubbles up.
 	occupied := make(map[int]float32) // soldier ID → lowest Y used
@@ -449,9 +448,6 @@ func (g *Game) drawSpeechBubbles(screen *ebiten.Image, offX, offY int) { //nolin
 		// Smart horizontal positioning to avoid overlapping other soldiers.
 		bgX := sx - bgW/2
 		// Check if bubble would overlap any nearby soldiers and shift horizontally if needed.
-		all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
-		all = append(all, g.soldiers...)
-		all = append(all, g.opfor...)
 		for _, other := range all {
 			if other == s || other.state == SoldierStateDead {
 				continue

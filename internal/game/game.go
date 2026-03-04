@@ -52,6 +52,73 @@ var overlayColors = [intelMapCount]color.RGBA{
 	IntelUnexplored:       {R: 20, G: 20, B: 20, A: 160},   // dark grey
 }
 
+func (g *Game) renderTerrainLayer(screen *ebiten.Image) {
+	ox, oy := float32(0), float32(0)
+	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
+
+	// Per-tile ground rendering from TileMap.
+	if g.tileMap != nil {
+		cs := float32(cellSize)
+		for row := 0; row < g.tileMap.Rows; row++ {
+			for col := 0; col < g.tileMap.Cols; col++ {
+				gt := g.tileMap.Ground(col, row)
+				r, gr, b := groundBaseColor(gt)
+				h := terrainHash(col, row)
+				jitter := int(h%13) - 6
+				r = clampToByte(int(r) + jitter/2)
+				gr = clampToByte(int(gr) + jitter)
+				b = clampToByte(int(b) + jitter/3)
+				if gt == GroundTile && (col+row)%2 == 0 {
+					gr = clampToByte(int(gr) + 4)
+				}
+				if gt == GroundWood && col%3 == 0 {
+					gr = clampToByte(int(gr) - 3)
+					b = clampToByte(int(b) - 2)
+				}
+				px := ox + float32(col)*cs
+				py := oy + float32(row)*cs
+				vector.FillRect(screen, px, py, cs, cs, color.RGBA{R: r, G: gr, B: b, A: 255}, false)
+			}
+		}
+	} else {
+		vector.FillRect(screen, ox, oy, gw, gh, color.RGBA{R: 30, G: 45, B: 30, A: 255}, false)
+	}
+
+	gridFine := 16
+	gridMid := gridFine * 4
+	gridCoarse := gridMid * 4
+	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridFine, color.RGBA{R: 32, G: 47, B: 32, A: 255})
+	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridMid, color.RGBA{R: 38, G: 55, B: 38, A: 255})
+	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridCoarse, color.RGBA{R: 48, G: 68, B: 48, A: 255})
+
+	if g.tileMap == nil {
+		return
+	}
+	cs := float32(cellSize)
+	markCol := color.RGBA{R: 70, G: 68, B: 58, A: 100}
+	for row := 0; row < g.tileMap.Rows; row++ {
+		for col := 0; col < g.tileMap.Cols; col++ {
+			if g.tileMap.Ground(col, row) != GroundTarmac {
+				continue
+			}
+			hasL := col > 0 && g.tileMap.Ground(col-1, row) == GroundTarmac
+			hasR := col < g.tileMap.Cols-1 && g.tileMap.Ground(col+1, row) == GroundTarmac
+			hasU := row > 0 && g.tileMap.Ground(col, row-1) == GroundTarmac
+			hasD := row < g.tileMap.Rows-1 && g.tileMap.Ground(col, row+1) == GroundTarmac
+			px := ox + float32(col)*cs
+			py := oy + float32(row)*cs
+			if hasL && hasR && (col/2)%2 == 0 {
+				mid := py + cs/2
+				vector.StrokeLine(screen, px, mid, px+cs, mid, 0.5, markCol, false)
+			}
+			if hasU && hasD && (row/2)%2 == 0 {
+				mid := px + cs/2
+				vector.StrokeLine(screen, mid, py, mid, py+cs, 0.5, markCol, false)
+			}
+		}
+	}
+}
+
 // drawSquadStatusPanels renders all squad status panels into the top of the
 // right-side column using the same buffer→3x-blit technique as the thought log.
 // Returns the total screen-space height consumed so the log can start below.
@@ -205,6 +272,73 @@ func squadStatusLabel(sq *Squad, avgFear float64) string {
 	}
 }
 
+func (g *Game) recordPerfFrame() {
+	g.perfFrameCount++
+	const sampleFrames = 120
+	if g.perfFrameCount < sampleFrames {
+		return
+	}
+
+	frameN := float64(g.perfFrameCount)
+	simN := float64(g.perfSimTickRuns)
+	avgWorldMS := (float64(g.perfWorldDrawNS) / frameN) / 1e6
+	avgUIMS := (float64(g.perfUIDrawNS) / frameN) / 1e6
+	avgSimMS := 0.0
+	if simN > 0 {
+		avgSimMS = (float64(g.perfSimTickNS) / simN) / 1e6
+	}
+	g.perfHUDLine = fmt.Sprintf("perf avg: sim %.2fms/tick world %.2fms ui %.2fms", avgSimMS, avgWorldMS, avgUIMS)
+
+	g.perfFrameCount = 0
+	g.perfSimTickRuns = 0
+	g.perfSimTickNS = 0
+	g.perfWorldDrawNS = 0
+	g.perfUIDrawNS = 0
+}
+
+func (g *Game) updateAutoPerfCapture(now time.Time) {
+	if !g.autoPerfCaptureEnabled {
+		return
+	}
+	if g.autoPerfCaptureStart.IsZero() {
+		g.autoPerfCaptureStart = now
+	}
+	if now.Sub(g.autoPerfCaptureStart) < g.autoPerfCaptureDur {
+		return
+	}
+
+	duration := now.Sub(g.autoPerfCaptureStart).Seconds()
+	frames := float64(g.perfTotalFrameCount)
+	ticks := float64(g.perfTotalSimTickRuns)
+	avgWorld := 0.0
+	avgUI := 0.0
+	avgSim := 0.0
+	fps := 0.0
+	if frames > 0 {
+		avgWorld = float64(g.perfTotalWorldDrawNS) / frames / 1e6
+		avgUI = float64(g.perfTotalUIDrawNS) / frames / 1e6
+		if duration > 0 {
+			fps = frames / duration
+		}
+	}
+	if ticks > 0 {
+		avgSim = float64(g.perfTotalSimTickNS) / ticks / 1e6
+	}
+
+	g.autoPerfCaptureResult = PerfCaptureStats{
+		DurationSeconds:      duration,
+		FrameCount:           g.perfTotalFrameCount,
+		FPS:                  fps,
+		SimTickCount:         g.perfTotalSimTickRuns,
+		AvgSimMSPerTick:      avgSim,
+		AvgWorldMSPerFrame:   avgWorld,
+		AvgUIMSPerFrame:      avgUI,
+		AvgFrameCPUmsBuckets: avgWorld + avgUI,
+	}
+	g.autoPerfCaptureEnabled = false
+	g.pendingExit = ErrQuit
+}
+
 func drawSquadMetricBars(buf *ebiten.Image, sq *Squad, stats squadPanelStats, barX, barW, barH, barY0 int) {
 	type metricBar struct {
 		value float64
@@ -268,9 +402,12 @@ type Game struct { //nolint:govet
 	overlayTeam int  // 0 = red, 1 = blue (which team's maps are shown)
 	showHUD     bool // toggle HUD key labels
 	prevKeys    map[ebiten.Key]bool
+	currentKeys map[ebiten.Key]bool
 
 	// Offscreen buffer for vision cone rendering (avoids additive blowout).
 	visionBuf *ebiten.Image
+	// Cached static terrain layer (ground, grids, road markings) drawn once.
+	terrainBuf *ebiten.Image
 	// Offscreen buffer for the full battlefield — camera transform applied on blit.
 	worldBuf *ebiten.Image
 	// Offscreen buffer for HUD text — rendered at 1x then blitted at hudScale.
@@ -296,6 +433,7 @@ type Game struct { //nolint:govet
 	// Soldier speech bubbles.
 	speechBubbles []*SpeechBubble
 	speechRng     *rand.Rand
+	allSoldiers   []*Soldier
 
 	// Soldier inspector (click-to-select panel).
 	inspector Inspector
@@ -304,6 +442,14 @@ type Game struct { //nolint:govet
 	cachedClaimedTeam map[int]Team
 	cachedSolidSet    map[[2]int]bool
 	cachedChestSet    map[[2]int]bool
+	hudLinesScratch   []string
+	hudIntelLines     []string
+	hudFilterLine     string
+	hudIntelDirty     bool
+	hudFilterDirty    bool
+	hudOverlayTeam    int
+	hudOverlayState   [2][intelMapCount]bool
+	hudFilterState    [logCatCount]bool
 	prevMouseLeft     bool // for edge-triggered click detection
 
 	// Simulation speed control.
@@ -334,6 +480,59 @@ type Game struct { //nolint:govet
 	// Spatial partitioning for performance optimization.
 	spatialHashRed  *SpatialHash
 	spatialHashBlue *SpatialHash
+
+	// Lightweight performance counters (rolling window).
+	perfFrameCount  int
+	perfSimTickRuns int
+	perfSimTickNS   int64
+	perfWorldDrawNS int64
+	perfUIDrawNS    int64
+	perfHUDLine     string
+
+	perfTotalFrameCount  int
+	perfTotalSimTickRuns int
+	perfTotalSimTickNS   int64
+	perfTotalWorldDrawNS int64
+	perfTotalUIDrawNS    int64
+
+	autoPerfCaptureEnabled bool
+	autoPerfCaptureStart   time.Time
+	autoPerfCaptureDur     time.Duration
+	autoPerfCaptureResult  PerfCaptureStats
+}
+
+// PerfCaptureStats summarizes rendered runtime performance over a capture window.
+type PerfCaptureStats struct {
+	DurationSeconds      float64
+	FrameCount           int
+	FPS                  float64
+	SimTickCount         int
+	AvgSimMSPerTick      float64
+	AvgWorldMSPerFrame   float64
+	AvgUIMSPerFrame      float64
+	AvgFrameCPUmsBuckets float64
+}
+
+// EnableAutoPerfCapture enables timed runtime capture and auto-exit.
+func (g *Game) EnableAutoPerfCapture(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	g.autoPerfCaptureEnabled = true
+	g.autoPerfCaptureDur = d
+	g.autoPerfCaptureStart = time.Time{}
+	g.autoPerfCaptureResult = PerfCaptureStats{}
+
+	g.perfTotalFrameCount = 0
+	g.perfTotalSimTickRuns = 0
+	g.perfTotalSimTickNS = 0
+	g.perfTotalWorldDrawNS = 0
+	g.perfTotalUIDrawNS = 0
+}
+
+// AutoPerfCaptureResult returns the last automatic performance capture snapshot.
+func (g *Game) AutoPerfCaptureResult() PerfCaptureStats {
+	return g.autoPerfCaptureResult
 }
 
 type rect struct {
@@ -389,16 +588,17 @@ func New() *Game {
 	fmt.Printf("MAP SEED: %d\n", mapSeed)
 
 	g := &Game{
-		width:      borderWidth + battleW + borderWidth + logPanelWidth,
-		height:     borderWidth + battleH + borderWidth,
-		gameWidth:  battleW,
-		gameHeight: battleH,
-		offX:       borderWidth,
-		offY:       borderWidth,
-		thoughtLog: NewThoughtLog(),
-		showHUD:    true,
-		prevKeys:   make(map[ebiten.Key]bool),
-		mapSeed:    mapSeed,
+		width:       borderWidth + battleW + borderWidth + logPanelWidth,
+		height:      borderWidth + battleH + borderWidth,
+		gameWidth:   battleW,
+		gameHeight:  battleH,
+		offX:        borderWidth,
+		offY:        borderWidth,
+		thoughtLog:  NewThoughtLog(),
+		showHUD:     true,
+		prevKeys:    make(map[ebiten.Key]bool),
+		currentKeys: make(map[ebiten.Key]bool),
+		mapSeed:     mapSeed,
 	}
 	mapRng := rand.New(rand.NewSource(mapSeed)) // #nosec G404 -- game only
 	// Create the TileMap first — organic roads and lot-based buildings write directly into it.
@@ -463,6 +663,7 @@ func New() *Game {
 		s.setIntel(g.intel)
 	}
 	g.visionBuf = ebiten.NewImage(battleW, battleH)
+	g.terrainBuf = ebiten.NewImage(battleW, battleH)
 	g.worldBuf = ebiten.NewImage(battleW, battleH)
 	// HUD buffer: 1/hudScale of screen so it renders crisply when scaled up.
 	g.hudBuf = ebiten.NewImage(g.width/hudScale, g.height/hudScale)
@@ -482,6 +683,9 @@ func New() *Game {
 	g.cachedClaimedTeam = make(map[int]Team)
 	g.cachedSolidSet = make(map[[2]int]bool, len(g.buildings)+len(g.windows))
 	g.cachedChestSet = make(map[[2]int]bool)
+	g.renderTerrainLayer(g.terrainBuf)
+	g.hudIntelDirty = true
+	g.hudFilterDirty = true
 	g.speechRng = rand.New(rand.NewSource(time.Now().UnixNano() + 9999)) // #nosec G404 -- non-crypto RNG for local flavor text
 	g.reporter = NewSimReporter(reportWindowTicks, false)
 	// Initialize spatial hashes with cell size = max vision range for optimal performance.
@@ -1813,6 +2017,27 @@ func (g *Game) initSquads() {
 	}
 }
 
+func (g *Game) allUnits() []*Soldier {
+	g.allSoldiers = g.allSoldiers[:0]
+	g.allSoldiers = append(g.allSoldiers, g.soldiers...)
+	g.allSoldiers = append(g.allSoldiers, g.opfor...)
+	return g.allSoldiers
+}
+
+func (g *Game) frameKeys() map[ebiten.Key]bool {
+	clear(g.currentKeys)
+	return g.currentKeys
+}
+
+func (g *Game) rememberKeys(currentKeys map[ebiten.Key]bool) {
+	clear(g.prevKeys)
+	for key, pressed := range currentKeys {
+		if pressed {
+			g.prevKeys[key] = true
+		}
+	}
+}
+
 // randomiseProfiles gives each soldier slightly different stats so behavior varies.
 func (g *Game) randomiseProfiles() {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + 42)) // #nosec G404 -- game only, crypto/rand not needed
@@ -1860,7 +2085,13 @@ func (g *Game) Update() error {
 	g.tickAccum += g.simSpeed
 	for g.tickAccum >= 1.0 {
 		g.tickAccum -= 1.0
+		simStart := time.Now()
 		g.simTick()
+		simNS := time.Since(simStart).Nanoseconds()
+		g.perfSimTickRuns++
+		g.perfSimTickNS += simNS
+		g.perfTotalSimTickRuns++
+		g.perfTotalSimTickNS += simNS
 	}
 
 	// Update interpolation for smooth sub-tick rendering.
@@ -1869,6 +2100,11 @@ func (g *Game) Update() error {
 
 	// Update tracer fractional ages for smooth rendering every frame.
 	g.combat.UpdateTracerInterpolation(g.interpolation)
+
+	g.updateAutoPerfCapture(now)
+	if g.pendingExit != nil {
+		return g.pendingExit
+	}
 
 	return nil
 }
@@ -1900,9 +2136,7 @@ func (g *Game) simTick() { //nolint:gocyclo
 	}
 
 	// 2. COMBAT: fire decisions and resolution.
-	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
-	all = append(all, g.soldiers...)
-	all = append(all, g.opfor...)
+	all := g.allUnits()
 	g.combat.ResetFireCounts(all)
 	g.combat.tick = g.tick
 	g.combat.ResolveCombat(g.soldiers, g.opfor, g.soldiers, g.buildings, all)
@@ -1992,7 +2226,7 @@ func (g *Game) checkCombatEnd() {
 
 // handleInput processes overlay toggle keypresses (edge-triggered).
 func (g *Game) handleInput() { //nolint:gocognit,gocyclo
-	currentKeys := map[ebiten.Key]bool{}
+	currentKeys := g.frameKeys()
 	if g.aarOpen {
 		currentKeys[ebiten.KeyArrowUp] = ebiten.IsKeyPressed(ebiten.KeyArrowUp)
 		currentKeys[ebiten.KeyArrowDown] = ebiten.IsKeyPressed(ebiten.KeyArrowDown)
@@ -2022,7 +2256,7 @@ func (g *Game) handleInput() { //nolint:gocognit,gocyclo
 			}
 		}
 
-		g.prevKeys = currentKeys
+		g.rememberKeys(currentKeys)
 		g.prevMouseLeft = ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
 		return
 	}
@@ -2067,7 +2301,7 @@ func (g *Game) handleInput() { //nolint:gocognit,gocyclo
 			}
 		}
 
-		g.prevKeys = currentKeys
+		g.rememberKeys(currentKeys)
 		g.prevMouseLeft = ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
 		return
 	}
@@ -2209,7 +2443,7 @@ func (g *Game) handleInput() { //nolint:gocognit,gocyclo
 		g.inspector.rawView = !g.inspector.rawView
 	}
 
-	g.prevKeys = currentKeys
+	g.rememberKeys(currentKeys)
 }
 
 // Draw renders one frame of world and UI.
@@ -2221,8 +2455,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 
 	// Render world content to worldBuf at (0,0) origin, then blit with camera transform.
+	worldStart := time.Now()
 	g.worldBuf.Clear()
 	g.drawWorld(g.worldBuf)
+	worldNS := time.Since(worldStart).Nanoseconds()
+	g.perfWorldDrawNS += worldNS
+	g.perfTotalWorldDrawNS += worldNS
 
 	// Camera transform: translate so camX/camY is at viewport center, then scale.
 	vpW := float64(g.gameWidth)
@@ -2252,6 +2490,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	vector.StrokeRect(screen, ox, oy, gw, gh, 1.0, color.RGBA{R: 90, G: 140, B: 90, A: 60}, false)
 
 	// Right-side column: squad status panels on top, thought log below.
+	uiStart := time.Now()
 	logX := g.offX + g.gameWidth + g.offX
 	squadAreaH := drawSquadStatusPanels(g, screen, logX)
 
@@ -2272,6 +2511,11 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.showHUD {
 		g.drawHUD(screen)
 	}
+	uiNS := time.Since(uiStart).Nanoseconds()
+	g.perfUIDrawNS += uiNS
+	g.perfTotalUIDrawNS += uiNS
+	g.recordPerfFrame()
+	g.perfTotalFrameCount++
 
 	// Soldier inspector panel (screen-space, drawn over everything).
 	g.drawInspector(screen)
@@ -2420,91 +2664,39 @@ func (g *Game) drawPauseMenu(screen *ebiten.Image) {
 func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	// For drawWorld, all coordinates are in world-space (no offX/offY needed).
 	ox, oy := float32(0), float32(0)
-	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
 
 	// Vision cones: drawn early so buildings and units sit on top.
 	// Rendered into an offscreen buffer to avoid additive blowout.
 	g.drawVisionConesBuffered(screen, g.soldiers, color.RGBA{R: 200, G: 60, B: 40, A: 35}, 0.12)
 	g.drawVisionConesBuffered(screen, g.opfor, color.RGBA{R: 40, G: 80, B: 200, A: 35}, 0.12)
 
-	// Per-tile ground rendering from TileMap.
-	if g.tileMap != nil {
-		cs := float32(cellSize)
-		for row := 0; row < g.tileMap.Rows; row++ {
-			for col := 0; col < g.tileMap.Cols; col++ {
-				gt := g.tileMap.Ground(col, row)
-				r, gr, b := groundBaseColor(gt)
-				// Per-tile hash jitter for natural variation.
-				h := terrainHash(col, row)
-				jitter := int(h%13) - 6 // -6..+6
-				r = clampToByte(int(r) + jitter/2)
-				gr = clampToByte(int(gr) + jitter)
-				b = clampToByte(int(b) + jitter/3)
-				// Chequerboard for tile/wood floors.
-				if gt == GroundTile && (col+row)%2 == 0 {
-					gr = clampToByte(int(gr) + 4)
-				}
-				if gt == GroundWood && col%3 == 0 {
-					gr = clampToByte(int(gr) - 3)
-					b = clampToByte(int(b) - 2)
-				}
-				px := ox + float32(col)*cs
-				py := oy + float32(row)*cs
-				vector.FillRect(screen, px, py, cs, cs,
-					color.RGBA{R: r, G: gr, B: b, A: 255}, false)
-			}
-		}
+	if g.terrainBuf != nil {
+		screen.DrawImage(g.terrainBuf, nil)
 	} else {
-		// Fallback: flat green fill.
-		vector.FillRect(screen, ox, oy, gw, gh, color.RGBA{R: 30, G: 45, B: 30, A: 255}, false)
+		g.renderTerrainLayer(screen)
 	}
 
-	gridFine := 16
-	gridMid := gridFine * 4
-	gridCoarse := gridMid * 4
+	// Camera-visible world bounds for draw culling.
+	halfVW := float64(g.gameWidth) / 2 / g.camZoom
+	halfVH := float64(g.gameHeight) / 2 / g.camZoom
+	minX := g.camX - halfVW
+	maxX := g.camX + halfVW
+	minY := g.camY - halfVH
+	maxY := g.camY + halfVH
 
-	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridFine, color.RGBA{R: 32, G: 47, B: 32, A: 255})
-	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridMid, color.RGBA{R: 38, G: 55, B: 38, A: 255})
-	drawGridOffset(screen, 0, 0, g.gameWidth, g.gameHeight, gridCoarse, color.RGBA{R: 48, G: 68, B: 48, A: 255})
-
-	// Roads are now rendered as tarmac/pavement tiles in the ground layer above.
-	// Road center-line dashes drawn on tarmac tiles for visual detail.
-	if g.tileMap != nil {
-		cs := float32(cellSize)
-		markCol := color.RGBA{R: 70, G: 68, B: 58, A: 100}
-		for row := 0; row < g.tileMap.Rows; row++ {
-			for col := 0; col < g.tileMap.Cols; col++ {
-				if g.tileMap.Ground(col, row) != GroundTarmac {
-					continue
-				}
-				// Draw dashed center-line on tarmac tiles that have tarmac neighbors
-				// on both cross-axis sides (i.e. are interior road tiles).
-				hasL := col > 0 && g.tileMap.Ground(col-1, row) == GroundTarmac
-				hasR := col < g.tileMap.Cols-1 && g.tileMap.Ground(col+1, row) == GroundTarmac
-				hasU := row > 0 && g.tileMap.Ground(col, row-1) == GroundTarmac
-				hasD := row < g.tileMap.Rows-1 && g.tileMap.Ground(col, row+1) == GroundTarmac
-				px := ox + float32(col)*cs
-				py := oy + float32(row)*cs
-				// Horizontal road interior: dash every other pair of tiles.
-				if hasL && hasR && (col/2)%2 == 0 {
-					mid := py + cs/2
-					vector.StrokeLine(screen, px, mid, px+cs, mid, 0.5, markCol, false)
-				}
-				// Vertical road interior: dash every other pair of tiles.
-				if hasU && hasD && (row/2)%2 == 0 {
-					mid := px + cs/2
-					vector.StrokeLine(screen, mid, py, mid, py+cs, 0.5, markCol, false)
-				}
-			}
-		}
-	}
+	// Small pad to avoid edge pop-in for thick strokes/glows.
+	const cullPad = 64.0
+	minX -= cullPad
+	minY -= cullPad
+	maxX += cullPad
+	maxY += cullPad
 
 	// Intel heatmap overlays (drawn under buildings and soldiers).
 	team := Team(g.overlayTeam)
 	if im := g.intel.For(team); im != nil {
 		for k := IntelMapKind(0); k < intelMapCount; k++ {
 			if g.showOverlay[g.overlayTeam][k] {
-				g.drawHeatLayer(screen, im.Layer(k), overlayColors[k])
+				g.drawHeatLayer(screen, im.Layer(k), overlayColors[k], minX, minY, maxX, maxY)
 			}
 		}
 	}
@@ -2524,6 +2716,9 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	// Building interiors: floor first, then walls on top.
 	// Floor areas (from footprints) — dark interior.
 	for i, b := range g.buildingFootprints {
+		if float64(b.x+b.w) < minX || float64(b.x) > maxX || float64(b.y+b.h) < minY || float64(b.y) > maxY {
+			continue
+		}
 		x0 := ox + float32(b.x)
 		y0 := oy + float32(b.y)
 		bw := float32(b.w)
@@ -2581,6 +2776,9 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	wallLight := color.RGBA{R: 124, G: 115, B: 96, A: 210}
 	wallDark := color.RGBA{R: 44, G: 40, B: 33, A: 220}
 	for _, b := range g.buildings {
+		if float64(b.x+b.w) < minX || float64(b.x) > maxX || float64(b.y+b.h) < minY || float64(b.y) > maxY {
+			continue
+		}
 		x0 := ox + float32(b.x)
 		y0 := oy + float32(b.y)
 		bw := float32(b.w)
@@ -2616,6 +2814,9 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 
 	// Window segments — framed and orientation-aware glass panes.
 	for _, w := range g.windows {
+		if float64(w.x+w.w) < minX || float64(w.x) > maxX || float64(w.y+w.h) < minY || float64(w.y) > maxY {
+			continue
+		}
 		x0 := ox + float32(w.x)
 		y0 := oy + float32(w.y)
 		bw := float32(w.w)
@@ -2657,15 +2858,21 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	}
 
 	// TileMap interior objects (doors, furniture, pillars, crates).
-	g.drawTileMapObjects(screen, ox, oy)
+	g.drawTileMapObjects(screen, ox, oy, minX, minY, maxX, maxY)
 
 	// Cover objects.
-	g.drawCoverObjects(screen, 0, 0)
+	g.drawCoverObjects(screen, 0, 0, minX, minY, maxX, maxY)
 
 	for _, s := range g.soldiers {
+		if s.state == SoldierStateDead || s.x < minX || s.x > maxX || s.y < minY || s.y > maxY {
+			continue
+		}
 		s.Draw(screen, 0, 0)
 	}
 	for _, s := range g.opfor {
+		if s.state == SoldierStateDead || s.x < minX || s.x > maxX || s.y < minY || s.y > maxY {
+			continue
+		}
 		s.Draw(screen, 0, 0)
 	}
 
@@ -2724,13 +2931,27 @@ func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 
 // drawTileMapObjects renders interior objects from the TileMap (doors, furniture,
 // pillars, crates) that aren't already drawn by the wall/window/cover renderers.
-func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) { //nolint:gocyclo
+func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32, minX, minY, maxX, maxY float64) { //nolint:gocyclo
 	if g.tileMap == nil {
 		return
 	}
 	cs := float32(cellSize)
-	for row := 0; row < g.tileMap.Rows; row++ {
-		for col := 0; col < g.tileMap.Cols; col++ {
+	minCol, minRow := WorldToCell(minX, minY)
+	maxCol, maxRow := WorldToCell(maxX, maxY)
+	if minCol < 0 {
+		minCol = 0
+	}
+	if minRow < 0 {
+		minRow = 0
+	}
+	if maxCol >= g.tileMap.Cols {
+		maxCol = g.tileMap.Cols - 1
+	}
+	if maxRow >= g.tileMap.Rows {
+		maxRow = g.tileMap.Rows - 1
+	}
+	for row := minRow; row <= maxRow; row++ {
+		for col := minCol; col <= maxCol; col++ {
 			obj := g.tileMap.ObjectAt(col, row)
 			px := ox + float32(col)*cs
 			py := oy + float32(row)*cs
@@ -2876,17 +3097,19 @@ func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) { //noli
 
 // drawCoverObjects renders cover objects with orientation-aware visuals.
 // Chest-walls detect their H/V neighbors to draw correct cross-sections and corners.
-func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) { //nolint:gocognit,gocyclo
+func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int, minX, minY, maxX, maxY float64) { //nolint:gocognit,gocyclo
 	ox, oy := float32(offX), float32(offY)
 	cs := float32(coverCellSize) // 16px
 	iCS := coverCellSize
 
 	// Build a fast set of chest-wall cell positions for neighbor lookup.
-	type cellKey struct{ cx, cy int }
-	chestSet := map[cellKey]bool{}
+	for k := range g.cachedChestSet {
+		delete(g.cachedChestSet, k)
+	}
+	chestSet := g.cachedChestSet
 	for _, c := range g.covers {
 		if c.kind == CoverChestWall {
-			chestSet[cellKey{c.x / iCS, c.y / iCS}] = true
+			chestSet[[2]int{c.x / iCS, c.y / iCS}] = true
 		}
 	}
 
@@ -2898,6 +3121,9 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) { //nolint
 	slabW := float32(5) // thickness of the wall strip in pixels
 
 	for _, c := range g.covers {
+		if float64(c.x+iCS) < minX || float64(c.x) > maxX || float64(c.y+iCS) < minY || float64(c.y) > maxY {
+			continue
+		}
 		x0 := ox + float32(c.x)
 		y0 := oy + float32(c.y)
 
@@ -2913,10 +3139,10 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) { //nolint
 			// Determine which neighbors exist.
 			cx := c.x / iCS
 			cy := c.y / iCS
-			hasLeft := chestSet[cellKey{cx - 1, cy}]
-			hasRight := chestSet[cellKey{cx + 1, cy}]
-			hasUp := chestSet[cellKey{cx, cy - 1}]
-			hasDown := chestSet[cellKey{cx, cy + 1}]
+			hasLeft := chestSet[[2]int{cx - 1, cy}]
+			hasRight := chestSet[[2]int{cx + 1, cy}]
+			hasUp := chestSet[[2]int{cx, cy - 1}]
+			hasDown := chestSet[[2]int{cx, cy + 1}]
 			hasH := hasLeft || hasRight
 			hasV := hasUp || hasDown
 
@@ -2981,13 +3207,27 @@ func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) { //nolint
 }
 
 // drawHeatLayer renders one HeatLayer as an alpha-blended color wash.
-func (g *Game) drawHeatLayer(screen *ebiten.Image, layer *HeatLayer, baseCol color.RGBA) {
+func (g *Game) drawHeatLayer(screen *ebiten.Image, layer *HeatLayer, baseCol color.RGBA, minX, minY, maxX, maxY float64) {
 	ox, oy := float32(0), float32(0)
 	cs := float32(cellSize)
-	for row := 0; row < layer.rows; row++ {
-		for col := 0; col < layer.cols; col++ {
+	minCol, minRow := WorldToCell(minX, minY)
+	maxCol, maxRow := WorldToCell(maxX, maxY)
+	if minCol < 0 {
+		minCol = 0
+	}
+	if minRow < 0 {
+		minRow = 0
+	}
+	if maxCol >= layer.cols {
+		maxCol = layer.cols - 1
+	}
+	if maxRow >= layer.rows {
+		maxRow = layer.rows - 1
+	}
+	for row := minRow; row <= maxRow; row++ {
+		for col := minCol; col <= maxCol; col++ {
 			v := layer.At(row, col)
-			if v < 0.01 {
+			if v <= 0 {
 				continue
 			}
 			alpha := uint8(float32(baseCol.A) * v)
@@ -3029,34 +3269,23 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 		}
 	}
 
-	lines := []string{
+	g.refreshHUDCaches()
+
+	lines := g.hudLinesScratch[:0]
+	lines = append(lines,
 		fmt.Sprintf("SIM: %s  tick:%d  P=pause  ,/. speed", speedStr, g.tick),
 		fmt.Sprintf("Intel: [%s]  Tab=switch", teamLabel),
-	}
-	for k := IntelMapKind(0); k < intelMapCount; k++ {
-		on := " "
-		if g.showOverlay[g.overlayTeam][k] {
-			on = "*"
-		}
-		lines = append(lines, fmt.Sprintf("  [%d]%s %s", k+1, on, IntelMapKindName(k)))
-	}
+	)
+	lines = append(lines, g.hudIntelLines...)
 	lines = append(
 		lines,
 		"[H] toggle HUD",
 		"WASD/arrows=pan  scroll=zoom",
 		fmt.Sprintf("zoom: %.1fx  click=inspect", g.camZoom),
+		g.hudFilterLine,
+		g.perfHUDLine,
 	)
-	// Log filter toggles.
-	filterLine := "Log:"
-	filterFKeys := [logCatCount]string{"F5", "F6", "F7", "F8"}
-	for i := LogCategory(0); i < logCatCount; i++ {
-		on := "-"
-		if g.thoughtLog.FilterEnabled(i) {
-			on = "*"
-		}
-		filterLine += fmt.Sprintf(" [%s]%s%s", filterFKeys[i], on, i.ShortName())
-	}
-	lines = append(lines, filterLine)
+	g.hudLinesScratch = lines
 
 	// Render into hudBuf at 1x, then scale up.
 	const lineH = 12 // debug font line height at 1x
@@ -3102,6 +3331,53 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 	screen.DrawImage(g.hudBuf, opts)
 }
 
+func (g *Game) refreshHUDCaches() {
+	if g.hudOverlayTeam != g.overlayTeam {
+		g.hudOverlayTeam = g.overlayTeam
+		g.hudIntelDirty = true
+	}
+	for k := IntelMapKind(0); k < intelMapCount; k++ {
+		state := g.showOverlay[g.overlayTeam][k]
+		if g.hudOverlayState[g.overlayTeam][k] != state {
+			g.hudOverlayState[g.overlayTeam][k] = state
+			g.hudIntelDirty = true
+		}
+	}
+	for i := LogCategory(0); i < logCatCount; i++ {
+		state := g.thoughtLog.FilterEnabled(i)
+		if g.hudFilterState[i] != state {
+			g.hudFilterState[i] = state
+			g.hudFilterDirty = true
+		}
+	}
+
+	if g.hudIntelDirty {
+		g.hudIntelLines = g.hudIntelLines[:0]
+		for k := IntelMapKind(0); k < intelMapCount; k++ {
+			on := " "
+			if g.showOverlay[g.overlayTeam][k] {
+				on = "*"
+			}
+			g.hudIntelLines = append(g.hudIntelLines, fmt.Sprintf("  [%d]%s %s", k+1, on, IntelMapKindName(k)))
+		}
+		g.hudIntelDirty = false
+	}
+
+	if g.hudFilterDirty {
+		line := "Log:"
+		filterFKeys := [logCatCount]string{"F5", "F6", "F7", "F8"}
+		for i := LogCategory(0); i < logCatCount; i++ {
+			on := "-"
+			if g.thoughtLog.FilterEnabled(i) {
+				on = "*"
+			}
+			line += fmt.Sprintf(" [%s]%s%s", filterFKeys[i], on, i.ShortName())
+		}
+		g.hudFilterLine = line
+		g.hudFilterDirty = false
+	}
+}
+
 // drawFormationSlots renders a small ghost circle at each member's current slot target.
 func (g *Game) drawFormationSlots(screen *ebiten.Image) {
 	ox, oy := float32(g.offX), float32(g.offY)
@@ -3138,9 +3414,7 @@ func (g *Game) drawFormationSlots(screen *ebiten.Image) {
 // drawSpottedIndicators renders a subtle "!" above soldiers who currently see enemies.
 func (g *Game) drawSpottedIndicators(screen *ebiten.Image, offX, offY int) {
 	ox, oy := float32(offX), float32(offY)
-	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
-	all = append(all, g.soldiers...)
-	all = append(all, g.opfor...)
+	all := g.allUnits()
 	for _, s := range all {
 		if s.state == SoldierStateDead || len(s.vision.KnownContacts) == 0 {
 			continue
@@ -3246,8 +3520,31 @@ func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) { //nolint:gocognit
 // then composites that buffer onto the main screen with a single controlled opacity.
 // This eliminates additive blowout from overlapping cones.
 func (g *Game) drawVisionConesBuffered(screen *ebiten.Image, soldiers []*Soldier, tint color.RGBA, opacity float64) {
+	// Quality gate: at wide zoom-out, cone detail is low value but high cost.
+	if g.camZoom <= 0.65 {
+		return
+	}
+
 	buf := g.visionBuf
 	buf.Clear()
+
+	// Culling bounds in world-space for the current camera viewport.
+	halfVW := float64(g.gameWidth) / 2 / g.camZoom
+	halfVH := float64(g.gameHeight) / 2 / g.camZoom
+	minX := g.camX - halfVW
+	maxX := g.camX + halfVW
+	minY := g.camY - halfVH
+	maxY := g.camY + halfVH
+
+	steps := 36
+	switch {
+	case g.camZoom <= 0.6:
+		steps = 14
+	case g.camZoom <= 0.8:
+		steps = 20
+	case g.camZoom <= 1.2:
+		steps = 28
+	}
 
 	// Draw solid white fans into the buffer; we'll tint + fade on composite.
 	for _, s := range soldiers {
@@ -3260,7 +3557,9 @@ func (g *Game) drawVisionConesBuffered(screen *ebiten.Image, soldiers []*Soldier
 		if coneLen < 60 {
 			coneLen = 60
 		}
-		const steps = 36
+		if s.x+coneLen < minX || s.x-coneLen > maxX || s.y+coneLen < minY || s.y-coneLen > maxY {
+			continue
+		}
 		sx, sy := float32(s.x), float32(s.y)
 
 		var path vector.Path

@@ -12,6 +12,7 @@ const (
 type VisionState struct {
 	// KnownContacts are soldiers this agent can currently see.
 	KnownContacts []*Soldier
+	inConeScratch map[*Soldier]bool
 
 	Heading  float64 // radians, 0 = right, pi/2 = down
 	FOV      float64 // radians, total arc width
@@ -22,10 +23,19 @@ type VisionState struct {
 // InitialHeading in radians.
 func NewVisionState(initialHeading float64) VisionState {
 	return VisionState{
-		Heading:  initialHeading,
-		FOV:      defaultFOVDeg * math.Pi / 180.0,
-		MaxRange: defaultViewDist,
+		Heading:       initialHeading,
+		FOV:           defaultFOVDeg * math.Pi / 180.0,
+		MaxRange:      defaultViewDist,
+		inConeScratch: make(map[*Soldier]bool),
 	}
+}
+
+func (v *VisionState) scratchInConeMap() map[*Soldier]bool {
+	if v.inConeScratch == nil {
+		v.inConeScratch = make(map[*Soldier]bool)
+	}
+	clear(v.inConeScratch)
+	return v.inConeScratch
 }
 
 // InCone returns true if the point (px,py) is within the vision cone
@@ -80,8 +90,8 @@ func (v *VisionState) PerformVisionScan(ox, oy float64, observer *Soldier, candi
 	// Clear known contacts - will be rebuilt from confirmed threats
 	v.KnownContacts = v.KnownContacts[:0]
 
-	// Mark all existing threats as not in cone this tick
-	inConeThisTick := make(map[*Soldier]bool)
+	// Mark all existing threats as not in cone this tick.
+	inConeThisTick := v.scratchInConeMap()
 
 	for _, c := range candidates {
 		if c.state == SoldierStateDead {

@@ -99,9 +99,7 @@ func (g *Game) handleInspectorClick(mx, my int) bool { //nolint:gocognit
 	clickRadius2 := sqr(clickRadius)
 	best2 := math.MaxFloat64
 	var hit *Soldier
-	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
-	all = append(all, g.soldiers...)
-	all = append(all, g.opfor...)
+	all := g.allUnits()
 	for _, s := range all {
 		if s.state == SoldierStateDead {
 			continue
