@@ -5,7 +5,7 @@ import (
 )
 
 // HeadlessBattlefield bundles generated map state for headless simulation flows.
-type HeadlessBattlefield struct {
+type HeadlessBattlefield struct { //nolint:govet
 	Width  int
 	Height int
 

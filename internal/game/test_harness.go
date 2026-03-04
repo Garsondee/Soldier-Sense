@@ -24,7 +24,7 @@ type effectivenessProbe struct {
 // TestSim is a headless simulation harness used exclusively by tests.
 // It mirrors Game.Update but has no Ebiten dependency and supports
 // deterministic seeding and structured logging.
-type TestSim struct {
+type TestSim struct { //nolint:govet
 	TacticalMap  *TacticalMap
 	NavGrid      *NavGrid
 	Soldiers     []*Soldier // all soldiers across both teams
@@ -311,7 +311,7 @@ func (ts *TestSim) RunUntil(predicate func(*TestSim) bool, maxTicks int) int {
 }
 
 // runOneTick mirrors Game.Update for the headless harness.
-func (ts *TestSim) runOneTick(reds, blues []*Soldier) { //nolint:gocognit
+func (ts *TestSim) runOneTick(reds, blues []*Soldier) { //nolint:gocognit,gocyclo
 	tick := ts.tick
 
 	// Snapshot previous goals/intents for change detection.

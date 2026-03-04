@@ -13,8 +13,7 @@ import (
 // It works by sampling positions from verbose-mode logs.
 //
 //lint:ignore U1000 reserved for future invariant tests
-//nolint:unused // reserved for future invariant tests
-func checkNoStuck(t *testing.T, ts *TestSim, windowTicks int, minDist float64) {
+func checkNoStuck(t *testing.T, ts *TestSim, windowTicks int, minDist float64) { //nolint:gocognit
 	t.Helper()
 	posEntries := ts.SimLog.Filter("move", "position")
 	if len(posEntries) == 0 {

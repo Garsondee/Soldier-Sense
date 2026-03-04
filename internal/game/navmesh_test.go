@@ -107,7 +107,7 @@ func TestNavGrid_FindPath_NoPath(t *testing.T) {
 	}
 }
 
-func TestNavGrid_FindPath_StartEqualsGoal(t *testing.T) {
+func TestNavGrid_FindPath_StartEqualsGoal(_ *testing.T) {
 	ng := NewNavGrid(640, 480, nil, 0, nil, nil)
 	// Same start and goal: A* should return a trivial path or nil (both valid).
 	_ = ng.FindPath(100, 100, 100, 100)

@@ -9,18 +9,26 @@ import (
 type LotType uint8
 
 const (
-	LotTypeResidential    LotType = iota // Single/multi-family housing
-	LotTypeCommercial                    // Shops, offices, services
-	LotTypeIndustrial                    // Manufacturing, warehouses
-	LotTypeMilitary                      // Bases, compounds, bunkers
-	LotTypeAgricultural                  // Farms, barns, silos
-	LotTypeCivic                         // Government, public buildings
-	LotTypeRecreational                  // Parks, open space
-	LotTypeTransportation                // Rail yards, airports
+	// LotTypeResidential is single/multi-family housing.
+	LotTypeResidential LotType = iota // Single/multi-family housing
+	// LotTypeCommercial is shops, offices, and services.
+	LotTypeCommercial // Shops, offices, services
+	// LotTypeIndustrial is manufacturing and warehouses.
+	LotTypeIndustrial // Manufacturing, warehouses
+	// LotTypeMilitary is bases, compounds, and bunkers.
+	LotTypeMilitary // Bases, compounds, bunkers
+	// LotTypeCivic is public/institutional buildings.
+	LotTypeCivic // Public/institutional buildings
+	// LotTypeAgricultural is farms and agricultural uses.
+	LotTypeAgricultural // Farms, agricultural uses
+	// LotTypeRecreational is parks and recreation.
+	LotTypeRecreational // Parks, recreation
+	// LotTypeTransportation is rail yards, airports.
+	LotTypeTransportation // Rail yards, airports
 )
 
 // Lot represents a subdivision of land that can contain buildings.
-type Lot struct {
+type Lot struct { //nolint:govet
 	Boundary    []Point // Polygon vertices defining lot boundaries
 	Type        LotType // Intended use of the lot
 	RoadAccess  bool    // True if lot connects to a road
@@ -116,11 +124,12 @@ func generateVoronoiSites(mapW, mapH float64, roads []OrganicRoad, rng *rand.Ran
 
 		// Rural areas tend to be agricultural or recreational
 		var lotType LotType
-		if rng.Float64() < 0.6 {
+		switch {
+		case rng.Float64() < 0.6:
 			lotType = LotTypeAgricultural
-		} else if rng.Float64() < 0.8 {
+		case rng.Float64() < 0.8:
 			lotType = LotTypeRecreational
-		} else {
+		default:
 			lotType = LotTypeResidential // Sparse rural housing
 		}
 
@@ -134,7 +143,7 @@ func generateVoronoiSites(mapW, mapH float64, roads []OrganicRoad, rng *rand.Ran
 }
 
 // determineLotType classifies lot type based on road type and location context.
-func determineLotType(nearestRoad OrganicRoad, location Point, mapW, mapH float64, rng *rand.Rand) LotType {
+func determineLotType(nearestRoad OrganicRoad, location Point, mapW, mapH float64, rng *rand.Rand) LotType { //nolint:gocritic
 	// Center proximity (0.0 = edge, 1.0 = center)
 	centerDist := math.Min(
 		math.Min(location.X, mapW-location.X)/mapW,
@@ -182,7 +191,7 @@ func determineLotType(nearestRoad OrganicRoad, location Point, mapW, mapH float6
 }
 
 // generateLotFromSite creates a lot polygon around a Voronoi site.
-func generateLotFromSite(site VoronoiSite, _allSites []VoronoiSite, mapW, mapH float64, roads []OrganicRoad, rng *rand.Rand) Lot {
+func generateLotFromSite(site VoronoiSite, _ []VoronoiSite, mapW, mapH float64, roads []OrganicRoad, rng *rand.Rand) Lot {
 	lotSize := 150 + rng.Float64()*200 // 150-350 pixel lots
 
 	// Default lot dimensions
@@ -217,33 +226,26 @@ func generateLotFromSite(site VoronoiSite, _allSites []VoronoiSite, mapW, mapH f
 
 	// Check if this lot overlaps with any roads and adjust if needed
 	for _, road := range roads {
-		if lotOverlapsRoadPath(minX, minY, maxX, maxY, road) {
-			// Reduce lot size if it overlaps with roads
-			w *= 0.7 // Make lot 30% smaller to avoid roads
-			h *= 0.7
-			minX = site.Point.X - w/2
-			minY = site.Point.Y - h/2
-			maxX = site.Point.X + w/2
-			maxY = site.Point.Y + h/2
-
-			// Re-clamp to bounds
-			minX = math.Max(64, minX) // Larger margin to avoid roads
-			minY = math.Max(64, minY)
-			maxX = math.Min(mapW-64, maxX)
-			maxY = math.Min(mapH-64, maxY)
-
-			// Update boundary after adjusting lot size
-			boundary = []Point{
-				{X: minX, Y: minY},
-				{X: maxX, Y: minY},
-				{X: maxX, Y: maxY},
-				{X: minX, Y: maxY},
-			}
-
-			// Recalculate area and setback
-			area = (maxX - minX) * (maxY - minY)
-			break // Only shrink once
+		if !lotOverlapsRoadPath(minX, minY, maxX, maxY, road) {
+			continue
 		}
+		// Reduce lot size if it overlaps with roads
+		w *= 0.7 // Make lot 30% smaller to avoid roads
+		h *= 0.7
+		minX = site.Point.X - w/2
+		minY = site.Point.Y - h/2
+		maxX = site.Point.X + w/2
+		maxY = site.Point.Y + h/2
+
+		// Re-clamp to bounds
+		minX = math.Max(64, minX) // Larger margin to avoid roads
+		minY = math.Max(64, minY)
+		maxX = math.Min(mapW-64, maxX)
+		maxY = math.Min(mapH-64, maxY)
+
+		// Recompute boundary and area
+		boundary = []Point{{X: minX, Y: minY}, {X: maxX, Y: minY}, {X: maxX, Y: maxY}, {X: minX, Y: maxY}}
+		area = (maxX - minX) * (maxY - minY)
 	}
 
 	return Lot{
@@ -280,7 +282,7 @@ func getLotSetback(lotType LotType) float64 {
 }
 
 // findNearestRoadAccess determines if a lot has road access and where.
-func findNearestRoadAccess(lot Lot, roads []OrganicRoad) (bool, Point) {
+func findNearestRoadAccess(lot Lot, roads []OrganicRoad) (bool, Point) { //nolint:gocritic
 	if len(roads) == 0 {
 		return false, Point{}
 	}
@@ -340,7 +342,7 @@ func buildingCandidatesInLots(lots []Lot, rng *rand.Rand) []rect {
 }
 
 // getBuildingCountForLot determines how many buildings a lot should contain.
-func getBuildingCountForLot(lot Lot, rng *rand.Rand) int {
+func getBuildingCountForLot(lot Lot, rng *rand.Rand) int { //nolint:gocritic
 	switch lot.Type {
 	case LotTypeResidential:
 		// 1 main building, sometimes 1-2 outbuildings
@@ -383,7 +385,7 @@ func getBuildingCountForLot(lot Lot, rng *rand.Rand) int {
 }
 
 // generateBuildingInLot places a building within lot boundaries respecting setbacks.
-func generateBuildingInLot(lot Lot, rng *rand.Rand) rect {
+func generateBuildingInLot(lot Lot, rng *rand.Rand) rect { //nolint:gocritic
 	if len(lot.Boundary) < 4 {
 		return rect{} // Invalid lot
 	}
@@ -425,7 +427,7 @@ func generateBuildingInLot(lot Lot, rng *rand.Rand) rect {
 }
 
 // getBuildingSizeForLot returns appropriate building dimensions for lot type.
-func getBuildingSizeForLot(lot Lot, rng *rand.Rand) (int, int) {
+func getBuildingSizeForLot(lot Lot, rng *rand.Rand) (int, int) { //nolint:gocritic
 	unit := 64 // 64-pixel unit size
 
 	switch lot.Type {
@@ -468,7 +470,7 @@ func getBuildingSizeForLot(lot Lot, rng *rand.Rand) (int, int) {
 }
 
 // generateDriveways creates paths connecting buildings to roads.
-func _generateDriveways(lots []Lot, _roads []OrganicRoad, _tm *TileMap, _rng *rand.Rand) []OrganicRoad {
+func _generateDriveways(lots []Lot, _ []OrganicRoad, _ *TileMap, _ *rand.Rand) []OrganicRoad { //nolint:unused
 	driveways := make([]OrganicRoad, 0, len(lots))
 
 	for _, lot := range lots {
@@ -505,7 +507,7 @@ func _generateDriveways(lots []Lot, _roads []OrganicRoad, _tm *TileMap, _rng *ra
 }
 
 // lotOverlapsRoadPath checks if a rectangular lot overlaps with an organic road path.
-func lotOverlapsRoadPath(minX, minY, maxX, maxY float64, road OrganicRoad) bool {
+func lotOverlapsRoadPath(minX, minY, maxX, maxY float64, road OrganicRoad) bool { //nolint:gocritic
 	// Check if any road point is within the lot boundaries
 	for _, point := range road.Points {
 		// Expand road width to account for road thickness

@@ -66,15 +66,18 @@ func (g *Game) inspectorButtons() []inspectorButton {
 
 // handleClick checks if a mouse click hit a soldier and selects it.
 // Returns true if a soldier was hit.
-func (g *Game) handleInspectorClick(mx, my int) bool {
+func (g *Game) handleInspectorClick(mx, my int) bool { //nolint:gocognit
 	// If the inspector panel is open, buttons take click priority.
 	if g.inspector.selected != nil {
 		for _, btn := range g.inspectorButtons() {
 			if btn.r.contains(mx, my) {
 				report := g.soldierDebugReport(g.inspector.selected, btn.lastTicks)
 				if report != "" {
-					_ = setClipboardText(report)
-					if g.thoughtLog != nil {
+					if err := setClipboardText(report); err != nil {
+						if g.thoughtLog != nil {
+							g.thoughtLog.Add(g.tick, "DBG", TeamRed, fmt.Sprintf("clipboard copy failed: %v", err), LogCatThought)
+						}
+					} else if g.thoughtLog != nil {
 						g.thoughtLog.Add(g.tick, "DBG", TeamRed, fmt.Sprintf("copied report (%dt)", btn.lastTicks), LogCatThought)
 					}
 				}
@@ -96,7 +99,9 @@ func (g *Game) handleInspectorClick(mx, my int) bool {
 	clickRadius2 := sqr(clickRadius)
 	best2 := math.MaxFloat64
 	var hit *Soldier
-	all := append(g.soldiers[:len(g.soldiers):len(g.soldiers)], g.opfor...)
+	all := make([]*Soldier, 0, len(g.soldiers)+len(g.opfor))
+	all = append(all, g.soldiers...)
+	all = append(all, g.opfor...)
 	for _, s := range all {
 		if s.state == SoldierStateDead {
 			continue
@@ -205,8 +210,8 @@ func (g *Game) drawInspector(screen *ebiten.Image) {
 	screen.DrawImage(buf, opts)
 }
 
-// drawInspectorCurated draws the organised, human-readable inspector view.
-func (g *Game) drawInspectorCurated(buf *ebiten.Image, s *Soldier, lx, ly int) {
+// drawInspectorCurated draws the organized, human-readable inspector view.
+func (g *Game) drawInspectorCurated(buf *ebiten.Image, s *Soldier, lx, ly int) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	pr := &s.profile
 

@@ -30,7 +30,7 @@ func (o BattleOutcome) String() string {
 }
 
 // BattleOutcomeReason provides summary metrics and reason text for a battle outcome.
-type BattleOutcomeReason struct {
+type BattleOutcomeReason struct { //nolint:govet
 	Outcome          BattleOutcome
 	RedSurvivors     int
 	RedTotal         int
@@ -45,7 +45,8 @@ type BattleOutcomeReason struct {
 	Description      string
 }
 
-func DetermineBattleOutcome(redSoldiers, blueSoldiers []*Soldier, redSquads, blueSquads []*Squad) BattleOutcomeReason {
+// DetermineBattleOutcome evaluates casualties, cohesion collapse, and flight to produce a result summary.
+func DetermineBattleOutcome(redSoldiers, blueSoldiers []*Soldier, redSquads, blueSquads []*Squad) BattleOutcomeReason { //nolint:gocognit,gocyclo
 	redTotal := len(redSoldiers)
 	blueTotal := len(blueSoldiers)
 	redSurvivors := 0

@@ -296,7 +296,7 @@ type Population struct {
 
 // NewPopulation creates a random initial population.
 func NewPopulation(size int, seed int64) Population {
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) // #nosec G404 -- deterministic evolutionary simulation RNG
 	genomes := make([]Genome, size)
 	for i := 0; i < size; i++ {
 		genomes[i] = NewRandomGenome(i, rng)

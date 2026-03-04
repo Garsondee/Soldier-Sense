@@ -30,7 +30,7 @@ type SquadReport struct {
 }
 
 // SoldierReport captures a single soldier's state.
-type SoldierReport struct {
+type SoldierReport struct { //nolint:govet
 	ID                          int
 	Label                       string
 	Team                        Team
@@ -53,7 +53,7 @@ type SoldierReport struct {
 }
 
 // SimReport is a full snapshot of the simulation at one tick.
-type SimReport struct {
+type SimReport struct { //nolint:govet
 	Tick int
 
 	// Per-team goal distributions (GoalKind → count).
@@ -121,7 +121,7 @@ func NewSimReporter(windowTicks int, verbose bool) *SimReporter {
 
 // Collect gathers a snapshot from the current simulation state.
 // Call this periodically (e.g. every 60 ticks / 1s).
-func (r *SimReporter) Collect(tick int, soldiers []*Soldier, opfor []*Soldier, squads []*Squad) {
+func (r *SimReporter) Collect(tick int, soldiers, opfor []*Soldier, squads []*Squad) { //nolint:gocognit
 	report := SimReport{
 		Tick:      tick,
 		RedGoals:  make(map[GoalKind]int),
@@ -210,7 +210,7 @@ func (r *SimReporter) Collect(tick int, soldiers []*Soldier, opfor []*Soldier, s
 	}
 }
 
-func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) {
+func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) { //nolint:gocognit,gocyclo
 	goals := report.RedGoals
 	if team == TeamBlue {
 		goals = report.BlueGoals
@@ -466,7 +466,7 @@ func (r *SimReporter) WindowSummary() *WindowReport {
 }
 
 // WindowReport is an aggregated summary over a time window.
-type WindowReport struct {
+type WindowReport struct { //nolint:govet
 	FromTick, ToTick int
 	SampleCount      int
 

@@ -111,7 +111,7 @@ func main() {
 	// Initialize population
 	fmt.Printf("Initializing population of %d genomes...\n", *popSize)
 	population := game.NewPopulation(*popSize, *seed)
-	rng := rand.New(rand.NewSource(*seed))
+	rng := rand.New(rand.NewSource(*seed)) // #nosec G404 -- deterministic evolutionary RNG from user-provided seed
 
 	// Control genome for comparison
 	control := game.ControlGenome()

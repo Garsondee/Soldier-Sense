@@ -51,7 +51,7 @@ func TestLaboratory_MedicalStats_5Runs(t *testing.T) {
 	t.Logf("%s\n", sep)
 }
 
-func runLaboratoryMedicalStats(_t *testing.T, seed int64) MedicalRunStats {
+func runLaboratoryMedicalStats(_ *testing.T, seed int64) MedicalRunStats { //nolint:gocognit
 	startX := 100.0
 	startY := 300.0
 	targetX := 700.0
@@ -171,7 +171,7 @@ func simulateUntreatedDeath(pre BodyMap, damage float64, stance Stance, coverMas
 	return false
 }
 
-type InjuryObservation struct {
+type InjuryObservation struct { //nolint:govet
 	Tick               int
 	VictimLabel        string
 	InjuryTick         int
@@ -254,7 +254,7 @@ func TestLaboratory_InjuryResponse(t *testing.T) {
 	}
 }
 
-func runLaboratoryInjuryTest(_t *testing.T, tc InjuryTestCase) InjuryObservation {
+func runLaboratoryInjuryTest(_ *testing.T, tc InjuryTestCase) InjuryObservation { //nolint:gocognit
 	startX := 100.0
 	startY := 300.0
 	targetX := 700.0

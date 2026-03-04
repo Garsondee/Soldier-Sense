@@ -12,10 +12,16 @@ import (
 // TreatmentAction represents a specific medical intervention.
 type TreatmentAction int
 
+// TreatmentAction values.
 const (
+	// TreatApplyTourniquet applies a tourniquet to severe limb bleeding.
 	TreatApplyTourniquet TreatmentAction = iota
+	// TreatPressureDressing applies pressure dressing to bleeding wounds.
 	TreatPressureDressing
+	// TreatPackWound packs a wound to reduce bleeding.
 	TreatPackWound
+	// TreatNeedleDecompression treats tension pneumothorax.
+	TreatNeedleDecompression
 )
 
 func (ta TreatmentAction) String() string {
@@ -32,7 +38,7 @@ func (ta TreatmentAction) String() string {
 }
 
 // TreatmentAttempt tracks an ongoing medical action.
-type TreatmentAttempt struct {
+type TreatmentAttempt struct { //nolint:govet
 	Action      TreatmentAction
 	TargetWound *Wound   // which wound is being addressed
 	Provider    *Soldier // who is performing the treatment
@@ -45,9 +51,12 @@ type TreatmentAttempt struct {
 type TCCCPhase int
 
 const (
-	PhaseCUF     TCCCPhase = iota // Care Under Fire
-	PhaseTFC                      // Tactical Field Care
-	PhaseTACEVAC                  // Tactical Evacuation Care
+	// PhaseCUF is care under fire.
+	PhaseCUF TCCCPhase = iota // Care Under Fire
+	// PhaseTFC is tactical field care.
+	PhaseTFC // Tactical Field Care
+	// PhaseTACEVAC is tactical evacuation care.
+	PhaseTACEVAC // Tactical Evacuation Care
 )
 
 func (p TCCCPhase) String() string {
@@ -64,7 +73,7 @@ func (p TCCCPhase) String() string {
 }
 
 // CasualtyState tracks the medical-response status for one wounded soldier.
-type CasualtyState struct {
+type CasualtyState struct { //nolint:govet
 	Phase         TCCCPhase
 	PhaseTick     int  // tick when current phase began
 	SelfAidActive bool // casualty is treating themselves
@@ -165,7 +174,7 @@ func treatmentSuccessChance(provider *Soldier, targetPain float64) float64 {
 
 // attemptSelfAid tries to apply a tourniquet to the worst limb bleed.
 // Returns true if treatment was started.
-func (s *Soldier) attemptSelfAid(tick int) bool {
+func (s *Soldier) attemptSelfAid(_ int) bool {
 	if !s.body.CanSelfAid(s.state != SoldierStateUnconscious) {
 		return false
 	}
@@ -218,8 +227,7 @@ func (s *Soldier) tickSelfAid(tick int) {
 		pain := s.body.TotalPain()
 		successChance := treatmentSuccessChance(s, pain)
 
-		//nolint:gosec // G404: math/rand is acceptable for game simulation (not cryptographic)
-		if rand.Float64() < successChance {
+		if rand.Float64() < successChance { // #nosec G404 -- gameplay probability roll, not cryptographic use
 			// Success: mark wound as treated.
 			treat.TargetWound.Treated = true
 			treat.TargetWound.TreatedTick = tick
@@ -285,7 +293,7 @@ func (s *Soldier) findNearestCasualty() *Soldier {
 }
 
 // startProvidingAid begins rendering aid to a casualty.
-func (s *Soldier) startProvidingAid(casualty *Soldier, tick int) {
+func (s *Soldier) startProvidingAid(casualty *Soldier, _ int) {
 	// Allow retries by an existing provider even if max providers already present.
 	alreadyProvider := false
 	for _, p := range casualty.casualty.Providers {
@@ -355,8 +363,7 @@ func tickProvidedAid(casualty *Soldier, tick int) {
 			successChance = clamp01(successChance + 0.2)
 		}
 
-		//nolint:gosec // G404: math/rand is acceptable for game simulation (not cryptographic)
-		if rand.Float64() < successChance {
+		if rand.Float64() < successChance { // #nosec G404 -- gameplay probability roll, not cryptographic use
 			// Success: apply treatment effect.
 			switch treat.Action {
 			case TreatApplyTourniquet:
@@ -389,7 +396,7 @@ func tickProvidedAid(casualty *Soldier, tick int) {
 }
 
 // stopProvidingAid removes a provider from a casualty's provider list.
-func stopProvidingAid(provider *Soldier, casualty *Soldier) {
+func stopProvidingAid(provider, casualty *Soldier) {
 	for i, p := range casualty.casualty.Providers {
 		if p == provider {
 			casualty.casualty.Providers = append(casualty.casualty.Providers[:i], casualty.casualty.Providers[i+1:]...)

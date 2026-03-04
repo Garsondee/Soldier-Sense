@@ -564,7 +564,7 @@ func gunfireHeardStrength(srcX, srcY float64, listener *Soldier, red, blue []*So
 // ResolveCombat runs fire decisions for one set of shooters against a set of targets.
 // AllFriendlies is the same-team list (for witness stress propagation).
 // AllSoldiers is every soldier on the map (for ricochet near-miss stress).
-func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldier, buildings []rect, allSoldiers []*Soldier) {
+func (cm *CombatManager) ResolveCombat(shooters, _, allFriendlies []*Soldier, buildings []rect, allSoldiers []*Soldier) { //nolint:gocognit,gocyclo
 	for _, s := range shooters {
 		if shouldSkipShooterCombatTick(s) {
 			continue

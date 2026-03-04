@@ -154,7 +154,7 @@ func (sl *SimLog) FormatRange(fromTick, toTick int) string {
 
 // Summary returns a short human-readable summary of the simulation state.
 // Soldiers is the full list of all soldiers in the simulation.
-func (sl *SimLog) Summary(tick int, soldiers []*Soldier, squads []*Squad) string { //nolint:gocognit
+func (sl *SimLog) Summary(tick int, soldiers []*Soldier, squads []*Squad) string { //nolint:gocognit,gocyclo
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "--- Summary at T=%03d ---\n", tick)
 

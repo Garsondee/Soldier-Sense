@@ -7,7 +7,7 @@ import (
 
 // LaboratoryTest defines a controlled experiment with predetermined setup,
 // stimulus application, and expected behavioral outcomes.
-type LaboratoryTest struct {
+type LaboratoryTest struct { //nolint:govet
 	Name        string
 	Description string
 	Expected    string
@@ -29,7 +29,7 @@ type LaboratoryTest struct {
 }
 
 // LaboratoryObservation records measurements during a laboratory test.
-type LaboratoryObservation struct {
+type LaboratoryObservation struct { //nolint:govet
 	TestName string
 	Ticks    int
 
@@ -64,7 +64,7 @@ type LaboratoryObservation struct {
 }
 
 // ObservationEvent records a discrete event during the test.
-type ObservationEvent struct {
+type ObservationEvent struct { //nolint:govet
 	Tick         int
 	SoldierID    int
 	SoldierLabel string
@@ -94,7 +94,7 @@ func NewLaboratoryObservation(testName string) *LaboratoryObservation {
 }
 
 // AddEvent records an observation event.
-func (obs *LaboratoryObservation) AddEvent(tick int, soldierID int, label, eventType, description string, value float64) {
+func (obs *LaboratoryObservation) AddEvent(tick, soldierID int, label, eventType, description string, value float64) {
 	obs.Events = append(obs.Events, ObservationEvent{
 		Tick:         tick,
 		SoldierID:    soldierID,
@@ -106,7 +106,7 @@ func (obs *LaboratoryObservation) AddEvent(tick int, soldierID int, label, event
 }
 
 // RunLaboratoryTest executes a laboratory test and returns observations.
-func RunLaboratoryTest(test *LaboratoryTest) *LaboratoryObservation {
+func RunLaboratoryTest(test *LaboratoryTest) *LaboratoryObservation { //nolint:gocognit,gocyclo
 	ts := test.Setup()
 	obs := NewLaboratoryObservation(test.Name)
 	obs.Ticks = test.DurationTicks
@@ -235,7 +235,7 @@ func RunLaboratoryTest(test *LaboratoryTest) *LaboratoryObservation {
 // ===== LABORATORY TEST CATALOG =====
 
 // SuppressionResponseTest tests how a soldier reacts to incoming suppression fire.
-func SuppressionResponseTest() *LaboratoryTest {
+func SuppressionResponseTest() *LaboratoryTest { //nolint:gocognit,gocyclo
 	return &LaboratoryTest{
 		Name:          "Suppression Response",
 		Description:   "Single soldier in open terrain receives sustained suppression fire",
@@ -448,7 +448,7 @@ func FormationMaintenanceTest() *LaboratoryTest {
 }
 
 // FirstContactResponseTest checks squad reaction to first enemy contact.
-func FirstContactResponseTest() *LaboratoryTest {
+func FirstContactResponseTest() *LaboratoryTest { //nolint:gocognit
 	return &LaboratoryTest{
 		Name:          "First Contact Response",
 		Description:   "Squad advancing encounters single enemy at 300m range",
@@ -530,7 +530,7 @@ func FirstContactResponseTest() *LaboratoryTest {
 }
 
 // CohesionCollapseTest applies casualties to test squad cohesion breakdown.
-func CohesionCollapseTest() *LaboratoryTest {
+func CohesionCollapseTest() *LaboratoryTest { //nolint:gocognit
 	return &LaboratoryTest{
 		Name:          "Cohesion Collapse",
 		Description:   "Squad takes casualties at regular intervals until cohesion breaks",

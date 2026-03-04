@@ -106,7 +106,7 @@ func rayIntersectsAABB(ox, oy, ex, ey, minX, minY, maxX, maxY float64) bool {
 // HasLineOfSightThroughWindow checks if LOS from (ax,ay) to (bx,by) is blocked by buildings,
 // or if it passes through a window. Returns (hasLOS, throughWindow, windowPenalty).
 // Phase 3: Window-based partial detection for building interiors.
-func HasLineOfSightThroughWindow(ax, ay, bx, by float64, buildings []rect, windows []rect) (bool, bool, float64) {
+func HasLineOfSightThroughWindow(ax, ay, bx, by float64, buildings, windows []rect) (bool, bool, float64) {
 	// First check if any building blocks the ray
 	var blockingBuilding *rect
 	for i := range buildings {

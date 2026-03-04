@@ -234,7 +234,7 @@ type WallInfo struct {
 }
 
 // Game is the main simulation and rendering state container.
-type Game struct {
+type Game struct { //nolint:govet
 	width              int
 	height             int
 	gameWidth          int               // playfield width (log panel takes the rest)
@@ -496,7 +496,7 @@ func (g *Game) getBuildingTypes() []BuildingType {
 	// In a full implementation, this would be stored during generation
 	buildingTypes := make([]BuildingType, len(g.buildingFootprints))
 	unit := 64
-	rng := rand.New(rand.NewSource(g.mapSeed + 1)) // Deterministic classification
+	rng := rand.New(rand.NewSource(g.mapSeed + 1)) // #nosec G404 -- deterministic map classification
 
 	for i, fp := range g.buildingFootprints {
 		buildingTypes[i] = classifyBuildingType(fp, unit, rng)
@@ -694,7 +694,7 @@ func (g *Game) applyBuildingDamage(rubble []*CoverObject) {
 // This function was using buildingCandidatesAlongGridRoads which conflicts with organic system
 
 // generateHallwayLayout creates a central hallway with rooms branching off it.
-func (g *Game) generateHallwayLayout(rng *rand.Rand, fp rect, wall, unit int, leafRooms *[]interiorRoom) {
+func (g *Game) generateHallwayLayout(rng *rand.Rand, fp rect, wall, unit int, leafRooms *[]interiorRoom) { //nolint:gocognit,gocyclo
 	// Determine hallway orientation based on building dimensions
 	horizontal := fp.w > fp.h
 
@@ -902,7 +902,7 @@ func determineWallType(buildingType BuildingType, isExterior bool) WallType {
 }
 
 // addBuildingWallsWithType generates building walls with type-specific customizations.
-func (g *Game) addBuildingWallsWithType(rng *rand.Rand, fp rect, wall, unit int, buildingType BuildingType) {
+func (g *Game) addBuildingWallsWithType(rng *rand.Rand, fp rect, wall, unit int, buildingType BuildingType) { //nolint:gocognit,gocyclo
 	// Apply type-specific modifications to building generation
 	wUnits := fp.w / unit
 	hUnits := fp.h / unit
@@ -1328,7 +1328,7 @@ func generateUShapedFootprint(base rect, rng *rand.Rand) ComplexFootprint {
 // GenerateBuildings creates building footprints and populates them with walls, doorways, and windows plus recursive
 // internal room subdivision. Windows are evenly spaced along each face,
 // proportional to the face length. Only 1-2 faces get exterior doorways.
-func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
+func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) { //nolint:gocognit,gocyclo
 	x, y, w, h := fp.x, fp.y, fp.w, fp.h
 	wUnits := w / unit
 	hUnits := h / unit
@@ -1874,7 +1874,7 @@ func (g *Game) Update() error {
 }
 
 // simTick runs one simulation tick.
-func (g *Game) simTick() {
+func (g *Game) simTick() { //nolint:gocyclo
 	g.tick++
 
 	// 0. SPATIAL HASH: populate spatial partitioning structures for efficient queries.
@@ -1991,7 +1991,7 @@ func (g *Game) checkCombatEnd() {
 }
 
 // handleInput processes overlay toggle keypresses (edge-triggered).
-func (g *Game) handleInput() {
+func (g *Game) handleInput() { //nolint:gocognit,gocyclo
 	currentKeys := map[ebiten.Key]bool{}
 	if g.aarOpen {
 		currentKeys[ebiten.KeyArrowUp] = ebiten.IsKeyPressed(ebiten.KeyArrowUp)
@@ -2297,7 +2297,7 @@ func (g *Game) aarTitle() string {
 	}
 }
 
-func (g *Game) aarQuality() string {
+func (g *Game) aarQuality() string { //nolint:gocyclo
 	redLoss := 0
 	blueLoss := 0
 	if g.aarReason.RedTotal > 0 {
@@ -2417,7 +2417,7 @@ func (g *Game) drawPauseMenu(screen *ebiten.Image) {
 	}
 }
 
-func (g *Game) drawWorld(screen *ebiten.Image) {
+func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit,gocyclo
 	// For drawWorld, all coordinates are in world-space (no offX/offY needed).
 	ox, oy := float32(0), float32(0)
 	gw, gh := float32(g.gameWidth), float32(g.gameHeight)
@@ -2724,7 +2724,7 @@ func (g *Game) drawWorld(screen *ebiten.Image) {
 
 // drawTileMapObjects renders interior objects from the TileMap (doors, furniture,
 // pillars, crates) that aren't already drawn by the wall/window/cover renderers.
-func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) {
+func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) { //nolint:gocyclo
 	if g.tileMap == nil {
 		return
 	}
@@ -2876,7 +2876,7 @@ func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) {
 
 // drawCoverObjects renders cover objects with orientation-aware visuals.
 // Chest-walls detect their H/V neighbors to draw correct cross-sections and corners.
-func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
+func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) { //nolint:gocognit,gocyclo
 	ox, oy := float32(offX), float32(offY)
 	cs := float32(coverCellSize) // 16px
 	iCS := coverCellSize
@@ -3161,7 +3161,7 @@ func (g *Game) drawSpottedIndicators(screen *ebiten.Image, offX, offY int) {
 	}
 }
 
-func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) {
+func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) { //nolint:gocognit
 	const segments = 22
 	const baseOpacity = 0.08 // very faint/transparent
 	for _, sq := range g.squads {

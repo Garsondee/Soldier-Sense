@@ -474,7 +474,7 @@ func generateWalkwayGeometry(building rect, attachedFace int, rng *rand.Rand) re
 }
 
 // stampExteriorFeature renders an exterior feature into the tile map.
-func _stampExteriorFeature(tm *TileMap, feature ExteriorFeature, rng *rand.Rand) {
+func _stampExteriorFeature(tm *TileMap, feature ExteriorFeature, rng *rand.Rand) { //nolint:gocognit,gocyclo,unused,gocritic
 	cMin := feature.FeatureRect.x / cellSize
 	rMin := feature.FeatureRect.y / cellSize
 	cMax := (feature.FeatureRect.x + feature.FeatureRect.w - 1) / cellSize

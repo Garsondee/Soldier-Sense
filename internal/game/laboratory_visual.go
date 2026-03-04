@@ -13,7 +13,7 @@ import (
 
 // LaboratoryVisualMode renders a laboratory test as a visual scene with
 // on-screen descriptions of the stimulus and expected behavior.
-type LaboratoryVisualMode struct {
+type LaboratoryVisualMode struct { //nolint:govet
 	test   *LaboratoryTest
 	ts     *TestSim
 	obs    *LaboratoryObservation
@@ -75,7 +75,7 @@ func NewLaboratoryVisualMode(test *LaboratoryTest) *LaboratoryVisualMode {
 }
 
 // Update advances the laboratory test simulation.
-func (lv *LaboratoryVisualMode) Update() error {
+func (lv *LaboratoryVisualMode) Update() error { //nolint:gocognit,gocyclo
 	// Handle input
 	if ebiten.IsKeyPressed(ebiten.KeySpace) {
 		lv.paused = !lv.paused
@@ -186,15 +186,15 @@ func (lv *LaboratoryVisualMode) Draw(screen *ebiten.Image) {
 }
 
 // drawWorld renders the battlefield and soldiers.
-func (lv *LaboratoryVisualMode) drawWorld(screen *ebiten.Image, viewportW, viewportH float64) {
+func (lv *LaboratoryVisualMode) drawWorld(screen *ebiten.Image, viewportW, viewportH float64) { //nolint:gocognit,gocyclo
 	screenW, screenH := float32(screen.Bounds().Dx()), float32(screen.Bounds().Dy())
 
 	// Draw buildings
 	for _, b := range lv.ts.buildings {
 		wx := float32(b.x) - float32(lv.cameraX) + float32(viewportW)/2
 		wy := float32(b.y) - float32(lv.cameraY) + float32(viewportH)/2
-		wx = wx * float32(lv.zoom)
-		wy = wy * float32(lv.zoom)
+		wx *= float32(lv.zoom)
+		wy *= float32(lv.zoom)
 		bw := float32(b.w) * float32(lv.zoom)
 		bh := float32(b.h) * float32(lv.zoom)
 
@@ -208,8 +208,8 @@ func (lv *LaboratoryVisualMode) drawWorld(screen *ebiten.Image, viewportW, viewp
 	for _, s := range lv.ts.Soldiers {
 		wx := float32(s.x) - float32(lv.cameraX) + float32(viewportW)/2
 		wy := float32(s.y) - float32(lv.cameraY) + float32(viewportH)/2
-		wx = wx * float32(lv.zoom)
-		wy = wy * float32(lv.zoom)
+		wx *= float32(lv.zoom)
+		wy *= float32(lv.zoom)
 
 		if wx >= -20 && wx < screenW+20 && wy >= -20 && wy < screenH+20 {
 			// Color based on team and state
@@ -220,11 +220,12 @@ func (lv *LaboratoryVisualMode) drawWorld(screen *ebiten.Image, viewportW, viewp
 				col = color.RGBA{R: 50, G: 100, B: 200, A: 255}
 			}
 
-			if s.state == SoldierStateDead {
+			switch {
+			case s.state == SoldierStateDead:
 				col = color.RGBA{R: 80, G: 80, B: 80, A: 255}
-			} else if s.blackboard.PanicRetreatActive {
+			case s.blackboard.PanicRetreatActive:
 				col = color.RGBA{R: 255, G: 200, B: 0, A: 255}
-			} else if s.blackboard.DisobeyingOrders {
+			case s.blackboard.DisobeyingOrders:
 				col = color.RGBA{R: 255, G: 150, B: 0, A: 255}
 			}
 

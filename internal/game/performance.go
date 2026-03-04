@@ -20,7 +20,7 @@ const (
 // ---------------------------------------------------------------------------
 
 // PerfTracker accumulates per-tick performance metrics for one soldier.
-type PerfTracker struct {
+type PerfTracker struct { //nolint:govet
 	Label string
 	Team  Team
 	ID    int
@@ -99,7 +99,7 @@ func NewPerfTracker(s *Soldier, hasBuildingAccess bool) *PerfTracker {
 }
 
 // Update accumulates one tick of data from the soldier's current state.
-func (pt *PerfTracker) Update(s *Soldier) {
+func (pt *PerfTracker) Update(s *Soldier) { //nolint:gocognit,gocyclo
 	if s.state == SoldierStateDead {
 		return
 	}
@@ -267,7 +267,7 @@ func (pt *PerfTracker) Finalize(s *Soldier) {
 // ---------------------------------------------------------------------------
 
 // SoldierGrade is the computed performance grade for one soldier.
-type SoldierGrade struct {
+type SoldierGrade struct { //nolint:govet
 	Label    string
 	Team     Team
 	ID       int
@@ -313,7 +313,7 @@ func GradePerformance(trackers map[int]*PerfTracker) []SoldierGrade {
 	return grades
 }
 
-func computeGrade(pt *PerfTracker) SoldierGrade {
+func computeGrade(pt *PerfTracker) SoldierGrade { //nolint:gocognit,gocyclo
 	g := SoldierGrade{
 		Label:            pt.Label,
 		Team:             pt.Team,
@@ -456,7 +456,7 @@ func computeGrade(pt *PerfTracker) SoldierGrade {
 // Trait detection
 // ---------------------------------------------------------------------------
 
-func perfDetectTraits(pt *PerfTracker) (good, bad []string) {
+func perfDetectTraits(pt *PerfTracker) (good, bad []string) { //nolint:gocognit,gocyclo
 	combat := math.Max(1, float64(pt.TicksInCombat))
 	uf := math.Max(1, float64(pt.TicksUnderFire))
 
@@ -590,7 +590,7 @@ func perfDetectTraits(pt *PerfTracker) (good, bad []string) {
 // ---------------------------------------------------------------------------
 
 // FormatGrades returns a human-readable performance report.
-func FormatGrades(grades []SoldierGrade) string {
+func FormatGrades(grades []SoldierGrade) string { //nolint:gocognit
 	var sb strings.Builder
 	sb.WriteString("\n=== Soldier Performance Grades ===\n")
 
@@ -651,7 +651,7 @@ func FormatGrades(grades []SoldierGrade) string {
 func FormatGradesSummary(grades []SoldierGrade) string {
 	var sb strings.Builder
 
-	type teamStats struct {
+	type teamStats struct { //nolint:govet
 		count     int
 		scoreSum  float64
 		survived  int

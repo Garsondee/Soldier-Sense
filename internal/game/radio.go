@@ -101,7 +101,7 @@ const (
 )
 
 // RadioMessage is the phase-A structured packet used on a squad net.
-type RadioMessage struct {
+type RadioMessage struct { //nolint:govet
 	SenderLabel   string
 	ReceiverLabel string
 	Summary       string

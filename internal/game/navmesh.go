@@ -8,7 +8,7 @@ import (
 const cellSize = 16
 
 // NavGrid is a 2D walkability grid where true = blocked.
-type NavGrid struct {
+type NavGrid struct { //nolint:govet
 	cols    int
 	rows    int
 	blocked []bool
@@ -90,7 +90,7 @@ func CellToWorld(cx, cy int) (float64, float64) {
 
 // --- A* pathfinding ---
 
-type pathNode struct {
+type pathNode struct { //nolint:govet
 	cx, cy int
 	g, h   float64
 	parent *pathNode
@@ -99,10 +99,17 @@ type pathNode struct {
 
 type openList []*pathNode
 
-func (ol openList) Len() int            { return len(ol) }
-func (ol openList) Less(i, j int) bool  { return (ol[i].g + ol[i].h) < (ol[j].g + ol[j].h) }
-func (ol openList) Swap(i, j int)       { ol[i], ol[j] = ol[j], ol[i]; ol[i].index = i; ol[j].index = j }
-func (ol *openList) Push(x interface{}) { n := x.(*pathNode); n.index = len(*ol); *ol = append(*ol, n) }
+func (ol openList) Len() int           { return len(ol) }
+func (ol openList) Less(i, j int) bool { return (ol[i].g + ol[i].h) < (ol[j].g + ol[j].h) }
+func (ol openList) Swap(i, j int)      { ol[i], ol[j] = ol[j], ol[i]; ol[i].index = i; ol[j].index = j }
+func (ol *openList) Push(x interface{}) {
+	n, ok := x.(*pathNode)
+	if !ok {
+		return
+	}
+	n.index = len(*ol)
+	*ol = append(*ol, n)
+}
 func (ol *openList) Pop() interface{} {
 	old := *ol
 	n := old[len(old)-1]
@@ -118,7 +125,7 @@ var dirs = [8][2]int{
 
 // FindPath returns a slice of world-coordinate waypoints from (sx,sy) to (gx,gy).
 // Returns nil if no path exists.
-func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 {
+func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 { //nolint:gocognit,gocyclo
 	scx, scy := WorldToCell(sx, sy)
 	gcx, gcy := WorldToCell(gx, gy)
 
@@ -142,7 +149,11 @@ func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 {
 	best[key(scx, scy)] = start
 
 	for ol.Len() > 0 {
-		cur := heap.Pop(ol).(*pathNode)
+		curNode, ok := heap.Pop(ol).(*pathNode)
+		if !ok {
+			continue
+		}
+		cur := curNode
 		if cur.cx == gcx && cur.cy == gcy {
 			return buildPath(cur)
 		}

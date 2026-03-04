@@ -44,22 +44,29 @@ func furnishBuilding(tm *TileMap, rng *rand.Rand, fp rect, rooms []interiorRoom)
 type RoomType uint8
 
 const (
-	RoomTypeGeneric   RoomType = iota // Default/unknown room
-	RoomTypeLiving                    // Living room (tables, chairs, sofa)
-	RoomTypeKitchen                   // Kitchen (counters, refrigerator)
-	RoomTypeBedroom                   // Bedroom (bed, dresser)
-	RoomTypeOffice                    // Office (desk, bookshelf, filing)
-	RoomTypeStorage                   // Storage (crates, shelving)
-	RoomTypeWorkshop                  // Workshop (workbench, machinery, tools)
-	RoomTypeBreakroom                 // Break room (tables, chairs, appliances)
+	// RoomTypeGeneric is the default or unknown room type.
+	RoomTypeGeneric RoomType = iota // Default/unknown room
+	// RoomTypeLiving is a living room.
+	RoomTypeLiving // Living room (tables, chairs, sofa)
+	// RoomTypeKitchen is a kitchen.
+	RoomTypeKitchen // Kitchen (counters, refrigerator)
+	// RoomTypeBedroom is a bedroom.
+	RoomTypeBedroom // Bedroom (bed, dresser)
+	// RoomTypeOffice is an office.
+	RoomTypeOffice // Office (desk, bookshelf, filing)
+	// RoomTypeStorage is a storage room.
+	RoomTypeStorage // Storage (crates, shelving)
+	// RoomTypeWorkshop is a workshop.
+	RoomTypeWorkshop // Workshop (workbench, machinery, tools)
+	// RoomTypeBreakroom is a breakroom.
+	RoomTypeBreakroom // Break room (tables, chairs, appliances)
 )
 
 // interiorRoom represents a rectangular room within a building.
 type interiorRoom struct {
-	rx, ry, rw, rh int      // pixel coordinates
-	hasDoorway     bool     // true if this room has an identified doorway gap
-	doorX, doorY   int      // pixel position of the doorway (if hasDoorway)
-	roomType       RoomType // classified room type for furniture placement
+	rx, ry, rw, rh int  // pixel coordinates
+	hasDoorway     bool // true if this room has an identified doorway gap
+	doorX, doorY   int  // pixel position of the doorway (if hasDoorway)
 }
 
 // classifyRoomType determines the room type based on size, building type, and context.
@@ -86,7 +93,7 @@ func classifyRoomTypeForBuilding(rm interiorRoom, roomIndex, totalRooms int, bui
 }
 
 // classifyResidentialRoom classifies rooms in residential buildings.
-func classifyResidentialRoom(area, _, totalRooms int, rng *rand.Rand) RoomType {
+func classifyResidentialRoom(area, _, _ int, rng *rand.Rand) RoomType {
 	// Very small rooms are likely storage/bathrooms
 	if area <= 6 {
 		return RoomTypeStorage
@@ -123,7 +130,7 @@ func classifyResidentialRoom(area, _, totalRooms int, rng *rand.Rand) RoomType {
 }
 
 // classifyCommercialRoom classifies rooms in commercial buildings.
-func classifyCommercialRoom(area int, _, _ int, rng *rand.Rand) RoomType {
+func classifyCommercialRoom(area, _, _ int, rng *rand.Rand) RoomType {
 	// Small rooms - offices or storage
 	if area <= 12 {
 		if rng.Float64() < 0.7 {
@@ -145,7 +152,7 @@ func classifyCommercialRoom(area int, _, _ int, rng *rand.Rand) RoomType {
 }
 
 // classifyIndustrialRoom classifies rooms in industrial buildings.
-func classifyIndustrialRoom(area int, _, _ int, rng *rand.Rand) RoomType {
+func classifyIndustrialRoom(area, _, _ int, rng *rand.Rand) RoomType {
 	// Small rooms - offices or storage
 	if area <= 12 {
 		if rng.Float64() < 0.5 {
@@ -169,7 +176,7 @@ func classifyIndustrialRoom(area int, _, _ int, rng *rand.Rand) RoomType {
 }
 
 // classifyMilitaryRoom classifies rooms in military buildings.
-func classifyMilitaryRoom(area int, _, _ int, rng *rand.Rand) RoomType {
+func classifyMilitaryRoom(area, _, _ int, rng *rand.Rand) RoomType {
 	// Military buildings have specialized rooms
 	if area <= 8 {
 		return RoomTypeStorage // Small storage/equipment rooms
@@ -190,7 +197,7 @@ func classifyMilitaryRoom(area int, _, _ int, rng *rand.Rand) RoomType {
 }
 
 // classifyAgriculturalRoom classifies rooms in agricultural buildings.
-func classifyAgriculturalRoom(area int, _, _ int, rng *rand.Rand) RoomType {
+func classifyAgriculturalRoom(area, _, _ int, rng *rand.Rand) RoomType {
 	// Agricultural buildings are mostly storage and work areas
 	if area <= 10 {
 		return RoomTypeStorage
@@ -241,25 +248,25 @@ func classifyGenericRoom(area, _, totalRooms int, rng *rand.Rand) RoomType {
 			return RoomTypeLiving
 		}
 		return RoomTypeWorkshop
-	} else {
-		roomTypeRoll := rng.Float64()
-		switch {
-		case roomTypeRoll < 0.25:
-			return RoomTypeLiving
-		case roomTypeRoll < 0.45:
-			return RoomTypeWorkshop
-		case roomTypeRoll < 0.6:
-			return RoomTypeOffice
-		case roomTypeRoll < 0.75:
-			return RoomTypeBreakroom
-		default:
-			return RoomTypeStorage
-		}
+	}
+
+	roomTypeRoll := rng.Float64()
+	switch {
+	case roomTypeRoll < 0.25:
+		return RoomTypeLiving
+	case roomTypeRoll < 0.45:
+		return RoomTypeWorkshop
+	case roomTypeRoll < 0.6:
+		return RoomTypeOffice
+	case roomTypeRoll < 0.75:
+		return RoomTypeBreakroom
+	default:
+		return RoomTypeStorage
 	}
 }
 
 // furnishRoom places furniture and features inside a single room.
-func furnishRoom(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
+func furnishRoom(tm *TileMap, rng *rand.Rand, rm interiorRoom) { //nolint:gocognit,gocyclo
 	rmCols := rm.rw / cellSize
 	rmRows := rm.rh / cellSize
 	if rmCols < 2 || rmRows < 2 {
@@ -287,7 +294,7 @@ func furnishRoom(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 	roomType := classifyRoomTypeForBuilding(rm, 0, 1, BuildingTypeGeneric, rng) // TODO: Pass actual building type, room index and count
 
 	// --- Pillars (only in large rooms) ---
-	// Large rooms (≥5×5 tiles) get a pillar near centre.
+	// Large rooms (≥5×5 tiles) get a pillar near center.
 	if rmCols >= 5 && rmRows >= 5 && rng.Float64() < 0.4 {
 		pc := rm.rx/cellSize + rmCols/2
 		pr := rm.ry/cellSize + rmRows/2
@@ -418,7 +425,7 @@ func placeDoorInDoorway(tm *TileMap, rng *rand.Rand, doorX, doorY, unit int, isE
 		return
 	}
 	// Place a door in the middle of the doorway gap (unit-wide).
-	// Use the centre cell of the gap.
+	// Use the center cell of the gap.
 	midX := doorX + unit/2
 	midY := doorY + unit/2
 	dc := midX / cellSize
@@ -494,7 +501,7 @@ func placeScatteredFurniture(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 }
 
 // placeWallFurniture adds furniture along room walls.
-func placeWallFurniture(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
+func placeWallFurniture(tm *TileMap, rng *rand.Rand, rm interiorRoom) { //nolint:gocognit,gocyclo
 	startCol := rm.rx / cellSize
 	startRow := rm.ry / cellSize
 	endCol := (rm.rx + rm.rw - 1) / cellSize
@@ -742,7 +749,7 @@ func placeBreakroomFurniture(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 // Helper functions for room-type-specific furniture placement
 
 // placeSofaAgainstWall places a 2×1 sofa against a room wall.
-func placeSofaAgainstWall(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
+func placeSofaAgainstWall(tm *TileMap, rng *rand.Rand, rm interiorRoom) { //nolint:gocognit,gocyclo
 	startCol := rm.rx / cellSize
 	startRow := rm.ry / cellSize
 	endCol := (rm.rx + rm.rw - 1) / cellSize
@@ -1048,7 +1055,7 @@ func placeDeskInRoom(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 }
 
 // placeIndustrialStorage places barrels and pallets in industrial rooms.
-func placeIndustrialStorage(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
+func placeIndustrialStorage(tm *TileMap, rng *rand.Rand, rm interiorRoom) { //nolint:gocognit,gocyclo
 	rmCols := rm.rw / cellSize
 	rmRows := rm.rh / cellSize
 
@@ -1076,15 +1083,15 @@ func placeIndustrialStorage(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 
 				// Check 2×2 area is clear
 				if tm.inBounds(cc+1, cr+1) {
-					clear := true
-					for dc := 0; dc < 2 && clear; dc++ {
-						for dr := 0; dr < 2 && clear; dr++ {
+					isClear := true
+					for dc := 0; dc < 2 && isClear; dc++ {
+						for dr := 0; dr < 2 && isClear; dr++ {
 							if tm.ObjectAt(cc+dc, cr+dr) != ObjectNone {
-								clear = false
+								isClear = false
 							}
 						}
 					}
-					if clear {
+					if isClear {
 						for dc := 0; dc < 2; dc++ {
 							for dr := 0; dr < 2; dr++ {
 								tm.SetObject(cc+dc, cr+dr, ObjectPallet)
@@ -1099,7 +1106,7 @@ func placeIndustrialStorage(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 }
 
 // placeWorkbench places a 3×1 workbench in the workshop.
-func placeWorkbench(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
+func placeWorkbench(tm *TileMap, rng *rand.Rand, rm interiorRoom) { //nolint:gocognit
 	startCol := rm.rx / cellSize
 	startRow := rm.ry / cellSize
 	endCol := (rm.rx + rm.rw - 1) / cellSize
@@ -1125,14 +1132,14 @@ func placeWorkbench(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 
 		// Check 3×1 area is clear
 		if tm.inBounds(cc+2, cr) {
-			clear := true
+			isClear := true
 			for dc := 0; dc < 3; dc++ {
 				if tm.ObjectAt(cc+dc, cr) != ObjectNone {
-					clear = false
+					isClear = false
 					break
 				}
 			}
-			if clear {
+			if isClear {
 				for dc := 0; dc < 3; dc++ {
 					tm.SetObject(cc+dc, cr, ObjectWorkbench)
 				}
@@ -1143,7 +1150,7 @@ func placeWorkbench(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 }
 
 // placeMachinery places 2×2 machinery in workshops.
-func placeMachinery(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
+func placeMachinery(tm *TileMap, rng *rand.Rand, rm interiorRoom) { //nolint:gocognit
 	rmCols := rm.rw / cellSize
 	rmRows := rm.rh / cellSize
 
@@ -1158,15 +1165,15 @@ func placeMachinery(tm *TileMap, rng *rand.Rand, rm interiorRoom) {
 
 		// Check 2×2 area is clear
 		if tm.inBounds(cc+1, cr+1) {
-			clear := true
-			for dc := 0; dc < 2 && clear; dc++ {
-				for dr := 0; dr < 2 && clear; dr++ {
+			isClear := true
+			for dc := 0; dc < 2 && isClear; dc++ {
+				for dr := 0; dr < 2 && isClear; dr++ {
 					if tm.ObjectAt(cc+dc, cr+dr) != ObjectNone {
-						clear = false
+						isClear = false
 					}
 				}
 			}
-			if clear {
+			if isClear {
 				for dc := 0; dc < 2; dc++ {
 					for dr := 0; dr < 2; dr++ {
 						tm.SetObject(cc+dc, cr+dr, ObjectMachinery)

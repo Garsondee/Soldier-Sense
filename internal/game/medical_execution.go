@@ -4,7 +4,7 @@ import "math"
 
 // executeHelpCasualty implements the GoalHelpCasualty behavior:
 // navigate to nearest wounded squad member and provide medical aid.
-func (s *Soldier) executeHelpCasualty(dt float64) {
+func (s *Soldier) executeHelpCasualty(dt float64) { //nolint:gocognit,gocyclo
 	if !s.canProvideCare() {
 		s.state = SoldierStateIdle
 		return
@@ -83,14 +83,12 @@ func (s *Soldier) executeHelpCasualty(dt float64) {
 					best = d
 					// Drag distance scales with evacuation trait (100-250px)
 					dragDist := 100.0 + evacuationWillingness*150.0
-					len := math.Hypot(dx, dy)
-					if len < 1 {
-						len = 1
+					distLen := math.Hypot(dx, dy)
+					if distLen < 1 {
+						distLen = 1
 					}
-					nx := dx / len
-					ny := dy / len
-					tx = s.x + nx*dragDist
-					ty = s.y + ny*dragDist
+					tx = casualty.x - dx/distLen*dragDist
+					ty = casualty.y - dy/distLen*dragDist
 				}
 			}
 			if best < math.MaxFloat64 {

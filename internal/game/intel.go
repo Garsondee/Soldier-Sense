@@ -6,16 +6,25 @@ import "math"
 type IntelMapKind int
 
 const (
-	IntelContact          IntelMapKind = iota // active enemy visual contact this tick
-	IntelRecentContact                        // enemy seen within recent window (from blackboard)
-	IntelThreatDensity                        // accumulated contact heat — persistent hot zones
-	IntelFriendlyPresence                     // where friendlies currently are
-	IntelDangerZone                           // cells where friendlies are receiving fire
-	IntelCasualtyDanger                       // where friendlies were injured/killed (persistent hazard)
-	IntelOpenGround                           // open ground with poor cover (structural hazard)
-	IntelSafeTerritory                        // explored, low-threat cells representing team "territory"
-	IntelUnexplored                           // cells no friendly has ever seen (cleared on sight)
-	intelMapCount                             // sentinel — total layer count
+	// IntelContact marks active enemy visual contact this tick.
+	IntelContact IntelMapKind = iota // active enemy visual contact this tick
+	// IntelRecentContact marks enemies seen within the recent window.
+	IntelRecentContact // enemy seen within recent window (from blackboard)
+	// IntelThreatDensity marks accumulated persistent contact heat.
+	IntelThreatDensity // accumulated contact heat — persistent hot zones
+	// IntelFriendlyPresence marks where friendlies currently are.
+	IntelFriendlyPresence // where friendlies currently are
+	// IntelDangerZone marks cells where friendlies are receiving fire.
+	IntelDangerZone // cells where friendlies are receiving fire
+	// IntelCasualtyDanger marks where friendlies were injured/killed.
+	IntelCasualtyDanger // where friendlies were injured/killed (persistent hazard)
+	// IntelOpenGround marks open ground with poor cover.
+	IntelOpenGround // open ground with poor cover (structural hazard)
+	// IntelSafeTerritory marks explored low-threat friendly territory.
+	IntelSafeTerritory // explored, low-threat cells representing team "territory"
+	// IntelUnexplored marks cells no friendly has ever seen.
+	IntelUnexplored // cells no friendly has ever seen (cleared on sight)
+	intelMapCount   // sentinel — total layer count
 )
 
 // IntelMapKindName returns a short display name for a layer.
@@ -198,7 +207,7 @@ func (l *HeatLayer) MaxInRadius(wx, wy, radius float64) float32 {
 }
 
 // Centroid returns the heat-weighted centroid in world space.
-// ok is false when the layer has no heat (all zeros).
+// OK is false when the layer has no heat (all zeros).
 func (l *HeatLayer) Centroid() (wx, wy float64, ok bool) {
 	var sumW, sumX, sumY float64
 	for row := 0; row < l.rows; row++ {
@@ -233,7 +242,7 @@ func (l *HeatLayer) Decay() {
 	}
 }
 
-// Fill sets every cell to v (used for initialising IntelUnexplored).
+// Fill sets every cell to v (used for initializing IntelUnexplored).
 func (l *HeatLayer) Fill(v float32) {
 	if v > heatMaxValue {
 		v = heatMaxValue
@@ -246,7 +255,7 @@ func (l *HeatLayer) Fill(v float32) {
 // --- IntelMap ---
 
 // IntelMap holds all heat layers for one team.
-type IntelMap struct {
+type IntelMap struct { //nolint:govet
 	Team   Team
 	layers [intelMapCount]*HeatLayer
 }
@@ -280,7 +289,7 @@ func (m *IntelMap) WriteContact(wx, wy float64) {
 }
 
 // WriteRecentContact stamps recent-contact heat weighted by confidence.
-func (m *IntelMap) WriteRecentContact(wx, wy float64, confidence float64) {
+func (m *IntelMap) WriteRecentContact(wx, wy, confidence float64) {
 	col, row := WorldToCell(wx, wy)
 	m.layers[IntelRecentContact].Add(row, col, float32(confidence*0.8))
 }
@@ -322,7 +331,7 @@ func (m *IntelMap) AccumulateThreatDensity() {
 // --- IntelStore ---
 
 // IntelStore owns all intelligence maps for all teams.
-type IntelStore struct {
+type IntelStore struct { //nolint:govet
 	maps    map[Team]*IntelMap
 	rows    int
 	cols    int
@@ -389,9 +398,9 @@ func (s *IntelStore) Decay() {
 // Update is called each tick. It drives decay, accumulates derived layers,
 // and performs all writes from the given soldier slices.
 //
-// redSoldiers  — friendly (red) agents
-// blueSoldiers — OpFor (blue) agents
-// buildings    — for computing visible cells in the unexplored layer
+// RedSoldiers are friendly (red) agents.
+// BlueSoldiers are OpFor (blue) agents.
+// Buildings are used for computing visible cells in the unexplored layer.
 func (s *IntelStore) Update(redSoldiers, blueSoldiers []*Soldier, buildings []rect) {
 	// Decay all layers first.
 	s.Decay()
@@ -431,14 +440,14 @@ func (s *IntelStore) computeSafeTerritory(m *IntelMap) {
 	}
 }
 
-// writeSoldiers writes all intel for one team's soldiers.
-// soldiers = the team being written for; enemies = the opposing side.
-func (s *IntelStore) writeSoldiers(soldiers, _ []*Soldier, _ []rect) {
-	if len(soldiers) == 0 {
+// WriteSoldiers writes all intel for one team's soldiers.
+// Friendlies are the team being written for; enemies are the opposing side.
+func (s *IntelStore) writeSoldiers(friendlies, _ []*Soldier, _ []rect) {
+	if len(friendlies) == 0 {
 		return
 	}
-	team := soldiers[0].team
-	for _, sol := range soldiers {
+	team := friendlies[0].team
+	for _, sol := range friendlies {
 		if sol != nil {
 			team = sol.team
 			break
@@ -449,7 +458,7 @@ func (s *IntelStore) writeSoldiers(soldiers, _ []*Soldier, _ []rect) {
 		return
 	}
 
-	for _, sol := range soldiers {
+	for _, sol := range friendlies {
 		if sol.state == SoldierStateDead {
 			continue
 		}

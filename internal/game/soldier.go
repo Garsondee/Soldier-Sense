@@ -405,7 +405,7 @@ func (s *Soldier) chooseRetreatTarget(retreatToOwnLines bool) { //nolint:gocogni
 	s.pathIndex = 0
 }
 
-func (s *Soldier) updatePsychCrisis(tick int) { //nolint:gocognit
+func (s *Soldier) updatePsychCrisis(tick int) { //nolint:gocognit,gocyclo
 	bb := &s.blackboard
 	pressure := s.psychPressure()
 

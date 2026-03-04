@@ -107,7 +107,7 @@ func _spreadSlots(mapSize, n int, rng *rand.Rand) []int {
 // generateSingleRoad creates a road path that traverses the map.
 // If horizontal=true, it goes left→right; otherwise top→bottom.
 // The road mostly follows basePos but can shift by ±1 row/col occasionally.
-func _generateSingleRoad(tm *TileMap, rng *rand.Rand, horizontal bool, basePos, width, minStraight int) gridRoadPath {
+func _generateSingleRoad(tm *TileMap, rng *rand.Rand, horizontal bool, basePos, width, minStraight int) gridRoadPath { //nolint:gocognit,gocyclo
 	var path gridRoadPath
 	path.width = width
 
@@ -235,7 +235,7 @@ func _generateSideStreet(tm *TileMap, rng *rand.Rand, parent gridRoadPath, width
 }
 
 // stampRoad writes road tiles into the tile map, expanding from center line by width.
-func _stampRoad(tm *TileMap, path gridRoadPath, pavementChance float64, rng *rand.Rand) {
+func _stampRoad(tm *TileMap, path gridRoadPath, pavementChance float64, rng *rand.Rand) { //nolint:gocognit
 	hw := path.width / 2
 	hasPavement := rng.Float64() < pavementChance
 

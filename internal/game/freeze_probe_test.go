@@ -144,7 +144,7 @@ func isMobilityGoal(g GoalKind) bool {
 // TestScenario_FreezeProbe_MutualAdvance runs a long headless duel and logs
 // internal soldier state when a soldier appears "frozen": not moving for a
 // prolonged window while in a movement-oriented goal during active combat context.
-func TestScenario_FreezeProbe_MutualAdvance(t *testing.T) {
+func TestScenario_FreezeProbe_MutualAdvance(t *testing.T) { //nolint:gocognit
 	ts := NewTestSim(
 		WithMapSize(1280, 720),
 		WithSeed(42),

@@ -28,7 +28,7 @@ const (
 )
 
 // RoadProperties defines the characteristics of each road type.
-type RoadProperties struct {
+type RoadProperties struct { //nolint:govet
 	Width      int        // Width in tiles
 	GroundType GroundType // Surface material
 	Speed      float64    // Movement speed multiplier
@@ -127,7 +127,7 @@ func getRoadProperties(roadType RoadType) RoadProperties {
 }
 
 // OrganicRoad represents a curved road with hierarchy and connections.
-type OrganicRoad struct {
+type OrganicRoad struct { //nolint:govet
 	Type       RoadType     // Type of road
 	Points     [][2]float64 // Control points for curved path (world coordinates)
 	Width      int          // Width in tiles
@@ -387,7 +387,7 @@ func generateCurvedRoad(start, end Point, props RoadProperties, roadType RoadTyp
 }
 
 // Intersection represents a road junction with specific geometry.
-type Intersection struct {
+type Intersection struct { //nolint:govet
 	Center         Point            // Center point of intersection
 	Type           IntersectionType // Type of intersection
 	ConnectedRoads []int            // Indices of roads that connect here
@@ -507,7 +507,7 @@ func getIntersectionRadius(intersectionType IntersectionType, road1, road2 *Orga
 }
 
 // stampIntersection renders intersection geometry into the tile map.
-func stampIntersection(tm *TileMap, intersection Intersection, rng *rand.Rand) {
+func stampIntersection(tm *TileMap, intersection Intersection, _ *rand.Rand) { //nolint:gocognit,gocyclo
 	centerCol := int(intersection.Center.X) / cellSize
 	centerRow := int(intersection.Center.Y) / cellSize
 	radius := int(intersection.Radius) / cellSize
@@ -569,7 +569,7 @@ func stampIntersection(tm *TileMap, intersection Intersection, rng *rand.Rand) {
 }
 
 // stampOrganicRoad renders a curved road into the tile map with continuous coverage.
-func stampOrganicRoad(tm *TileMap, road OrganicRoad, rng *rand.Rand) {
+func stampOrganicRoad(tm *TileMap, road OrganicRoad, _ *rand.Rand) { //nolint:gocognit,gocritic
 	hw := road.Width / 2
 
 	// Interpolate between road points to ensure continuous coverage

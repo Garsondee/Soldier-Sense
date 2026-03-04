@@ -6,7 +6,6 @@ require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/hajimehoshi/ebiten/v2 v2.9.8
 	golang.org/x/image v0.31.0
-	github.com/atotto/clipboard v0.1.4
 )
 
 require (

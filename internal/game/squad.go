@@ -6,7 +6,7 @@ import (
 )
 
 // Squad groups soldiers under a leader.
-type Squad struct {
+type Squad struct { //nolint:govet
 	ID        int
 	Team      Team
 	Leader    *Soldier
@@ -1729,7 +1729,7 @@ const buildingClaimInterval = 300 // ~5s at 60TPS
 // one if it lies roughly ahead of the squad. Prefers buildings that are:
 // (a) between the squad and its advance target, (b) close to the squad,
 // (c) not already behind the squad.
-func (sq *Squad) evaluateBuildings() {
+func (sq *Squad) evaluateBuildings() { //nolint:gocognit,gocyclo
 	if sq.Leader == nil || sq.Leader.state == SoldierStateDead {
 		return
 	}
@@ -1994,7 +1994,7 @@ func (sq *Squad) spreadPositions(cx, cy float64) [][2]float64 {
 // These are soft targets (HasMoveOrder), not hard lock positions: once soldiers
 // arrive, their own utility/cover logic can pull them into better overwatch,
 // cover, or direct engagement positions.
-func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY float64) [][2]float64 {
+func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY float64) [][2]float64 { //nolint:gocognit,gocyclo
 	alive := sq.Alive()
 	followers := make([]*Soldier, 0, len(alive))
 	for _, m := range alive {
@@ -2161,7 +2161,7 @@ func (sq *Squad) LeaderCohesionSlowdown() float64 {
 
 // UpdateFormation computes world-space slot positions and triggers repath
 // for any member whose slot has drifted beyond the threshold.
-func (sq *Squad) UpdateFormation() {
+func (sq *Squad) UpdateFormation() { //nolint:gocognit,gocyclo
 	if sq.Leader == nil {
 		return
 	}
@@ -2256,7 +2256,7 @@ func (sq *Squad) UpdateFormation() {
 	}
 }
 
-func adjustFormationTarget(ng *NavGrid, desiredX, desiredY float64, leader *Soldier, members []*Soldier, assigned map[int][2]float64) (float64, float64) {
+func adjustFormationTarget(ng *NavGrid, desiredX, desiredY float64, leader *Soldier, members []*Soldier, assigned map[int][2]float64) (float64, float64) { //nolint:gocognit
 	if ng == nil {
 		return desiredX, desiredY
 	}

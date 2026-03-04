@@ -235,7 +235,7 @@ func Phase0TestGenomes() []TestGenome {
 }
 
 // CalculateResults aggregates statistics from multiple battle outcomes.
-func CalculateResults(genomeName string, outcomes []TraitTestResult) TestGenomeResults { //nolint:gocognit
+func CalculateResults(genomeName string, outcomes []TraitTestResult) TestGenomeResults { //nolint:gocognit,gocyclo
 	if len(outcomes) == 0 {
 		return TestGenomeResults{GenomeName: genomeName, Runs: 0}
 	}

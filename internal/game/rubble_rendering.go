@@ -24,7 +24,7 @@ func toUint8(v int) uint8 {
 func (g *Game) drawRubbleLight(screen *ebiten.Image, x0, y0, cs float32, worldX, worldY int) {
 	// Use world coordinates as seed for consistent but varied appearance
 	seed := int64(worldX*31 + worldY*37 + 12345)
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) // #nosec G404 -- deterministic visual variation only
 
 	// Base dust layer
 	dustColor := color.RGBA{R: 45, G: 42, B: 35, A: 80}
@@ -61,7 +61,7 @@ func (g *Game) drawRubbleLight(screen *ebiten.Image, x0, y0, cs float32, worldX,
 // drawRubbleMedium renders moderate debris piles with mixed materials.
 func (g *Game) drawRubbleMedium(screen *ebiten.Image, x0, y0, cs float32, worldX, worldY int) {
 	seed := int64(worldX*41 + worldY*43 + 23456)
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) // #nosec G404 -- deterministic visual variation only
 
 	// Base shadow layer
 	shadowColor := color.RGBA{R: 20, G: 18, B: 15, A: 100}
@@ -125,7 +125,7 @@ func (g *Game) drawRubbleMedium(screen *ebiten.Image, x0, y0, cs float32, worldX
 // drawRubbleHeavy renders large concrete/masonry chunks in dramatic formations.
 func (g *Game) drawRubbleHeavy(screen *ebiten.Image, x0, y0, cs float32, worldX, worldY int) {
 	seed := int64(worldX*53 + worldY*59 + 34567)
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) // #nosec G404 -- deterministic visual variation only
 
 	// Heavy shadow for large debris
 	shadowColor := color.RGBA{R: 8, G: 6, B: 4, A: 140}
@@ -198,7 +198,7 @@ func (g *Game) drawRubbleHeavy(screen *ebiten.Image, x0, y0, cs float32, worldX,
 // drawRubbleMetal renders twisted steel beams and machinery debris.
 func (g *Game) drawRubbleMetal(screen *ebiten.Image, x0, y0, cs float32, worldX, worldY int) {
 	seed := int64(worldX*61 + worldY*67 + 45678)
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) // #nosec G404 -- deterministic visual variation only
 
 	// Base metallic debris bed
 	baseColor := color.RGBA{R: 35, G: 35, B: 30, A: 120}
@@ -306,7 +306,7 @@ func (g *Game) drawRubbleMetal(screen *ebiten.Image, x0, y0, cs float32, worldX,
 // drawRubbleWood renders splintered timber and organic debris.
 func (g *Game) drawRubbleWood(screen *ebiten.Image, x0, y0, cs float32, worldX, worldY int) {
 	seed := int64(worldX*71 + worldY*73 + 56789)
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) // #nosec G404 -- deterministic visual variation only
 
 	// Organic debris base - dirt and leaf litter
 	baseColor := color.RGBA{R: 55, G: 50, B: 35, A: 100}

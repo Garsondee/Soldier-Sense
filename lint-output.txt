@@ -14,14 +14,8 @@ level=warning msg="[config_reader] The configuration option `output.format` is d
 internal\game\blackboard.go:229:17: fieldalignment: struct of size 784 could be 776 (govet)
 type Blackboard struct {
                 ^
-internal\game\blackboard.go:1044:1: cognitive complexity 242 of func `SelectGoal` is high (> 20) (gocognit)
-func SelectGoal(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath bool) GoalKind {
-^
-internal\game\blackboard.go:1668:1: cognitive complexity 237 of func `goalUtilSingle` is high (> 20) (gocognit)
-func goalUtilSingle(bb *Blackboard, profile *SoldierProfile, isLeader bool, hasPath bool, goal GoalKind) float64 {
-^
-internal\game\combat.go:567:1: cognitive complexity 152 of func `(*CombatManager).ResolveCombat` is high (> 20) (gocognit)
-func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldier, buildings []rect, allSoldiers []*Soldier) {
+internal\game\combat.go:567:1: cyclomatic complexity 61 of func `(*CombatManager).ResolveCombat` is high (> 15) (gocyclo)
+func (cm *CombatManager) ResolveCombat(shooters, targets, allFriendlies []*Soldier, buildings []rect, allSoldiers []*Soldier) { //nolint:gocognit
 ^
 internal\game\exterior_features.go:477:1: cognitive complexity 76 of func `_stampExteriorFeature` is high (> 20) (gocognit)
 func _stampExteriorFeature(tm *TileMap, feature ExteriorFeature, rng *rand.Rand) {
@@ -32,66 +26,33 @@ func TestScenario_FreezeProbe_MutualAdvance(t *testing.T) {
 internal\game\game.go:237:11: fieldalignment: struct of size 888 could be 856 (govet)
 type Game struct {
           ^
-internal\game\game.go:697:1: cognitive complexity 59 of func `(*Game).generateHallwayLayout` is high (> 20) (gocognit)
-func (g *Game) generateHallwayLayout(rng *rand.Rand, fp rect, wall, unit int, leafRooms *[]interiorRoom) {
+internal\game\game.go:697:1: cyclomatic complexity 24 of func `(*Game).generateHallwayLayout` is high (> 15) (gocyclo)
+func (g *Game) generateHallwayLayout(rng *rand.Rand, fp rect, wall, unit int, leafRooms *[]interiorRoom) { //nolint:gocognit
 ^
-internal\game\game.go:905:1: cognitive complexity 28 of func `(*Game).addBuildingWallsWithType` is high (> 20) (gocognit)
-func (g *Game) addBuildingWallsWithType(rng *rand.Rand, fp rect, wall, unit int, buildingType BuildingType) {
+internal\game\game.go:905:1: cyclomatic complexity 25 of func `(*Game).addBuildingWallsWithType` is high (> 15) (gocyclo)
+func (g *Game) addBuildingWallsWithType(rng *rand.Rand, fp rect, wall, unit int, buildingType BuildingType) { //nolint:gocognit
 ^
-internal\game\game.go:1331:1: cognitive complexity 193 of func `(*Game).addBuildingWalls` is high (> 20) (gocognit)
-func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) {
+internal\game\game.go:1331:1: cyclomatic complexity 109 of func `(*Game).addBuildingWalls` is high (> 15) (gocyclo)
+func (g *Game) addBuildingWalls(rng *rand.Rand, fp rect, wall, unit int) { //nolint:gocognit
 ^
-internal\game\game.go:1877:1: cyclomatic complexity 17 of func `(*Game).simTick` is high (> 15) (gocyclo)
-func (g *Game) simTick() {
+internal\game\game.go:1994:1: cyclomatic complexity 78 of func `(*Game).handleInput` is high (> 15) (gocyclo)
+func (g *Game) handleInput() { //nolint:gocognit
 ^
-internal\game\game.go:1994:1: cognitive complexity 101 of func `(*Game).handleInput` is high (> 20) (gocognit)
-func (g *Game) handleInput() {
+internal\game\game.go:2420:1: cyclomatic complexity 64 of func `(*Game).drawWorld` is high (> 15) (gocyclo)
+func (g *Game) drawWorld(screen *ebiten.Image) { //nolint:gocognit
 ^
-internal\game\game.go:2300:1: cyclomatic complexity 20 of func `(*Game).aarQuality` is high (> 15) (gocyclo)
-func (g *Game) aarQuality() string {
+internal\game\game.go:2879:1: cyclomatic complexity 21 of func `(*Game).drawCoverObjects` is high (> 15) (gocyclo)
+func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) { //nolint:gocognit
 ^
-internal\game\game.go:2420:1: cognitive complexity 106 of func `(*Game).drawWorld` is high (> 20) (gocognit)
-func (g *Game) drawWorld(screen *ebiten.Image) {
-^
-internal\game\game.go:2727:1: cyclomatic complexity 24 of func `(*Game).drawTileMapObjects` is high (> 15) (gocyclo)
-func (g *Game) drawTileMapObjects(screen *ebiten.Image, ox, oy float32) {
-^
-internal\game\game.go:2879:1: cognitive complexity 29 of func `(*Game).drawCoverObjects` is high (> 20) (gocognit)
-func (g *Game) drawCoverObjects(screen *ebiten.Image, offX, offY int) {
-^
-internal\game\game.go:3164:1: cognitive complexity 23 of func `(*Game).drawRadioVisualEffects` is high (> 20) (gocognit)
-func (g *Game) drawRadioVisualEffects(screen *ebiten.Image) {
-^
-internal\game\game.go:3413:1: exported: exported method Game.Layout should have comment or be unexported (revive)
-func (g *Game) Layout(_, _ int) (int, int) {
-^
-internal\game\gridroads.go:11:57: `centre` is a misspelling of `center` (misspell)
-	MainRoadWidth   int     // width in tiles (odd numbers centre nicely)
-	                                                       ^
-internal\game\gridroads.go:29:31: `centres` is a misspelling of `centers` (misspell)
-	tiles [][2]int // (col, row) centres
-	                             ^
 internal\game\gridroads.go:110:1: cognitive complexity 57 of func `_generateSingleRoad` is high (> 20) (gocognit)
 func _generateSingleRoad(tm *TileMap, rng *rand.Rand, horizontal bool, basePos, width, minStraight int) gridRoadPath {
 ^
-internal\game\gridroads.go:184:83: unused-parameter: parameter '_minStraight' seems to be unused, consider removing or renaming it as _ (revive)
-func _generateSideStreet(tm *TileMap, rng *rand.Rand, parent gridRoadPath, width, _minStraight int) gridRoadPath {
-                                                                                  ^
-internal\game\gridroads.go:237:66: `centre` is a misspelling of `center` (misspell)
-// stampRoad writes road tiles into the tile map, expanding from centre line by width.
-                                                                 ^
 internal\game\gridroads.go:238:1: cognitive complexity 23 of func `_stampRoad` is high (> 20) (gocognit)
 func _stampRoad(tm *TileMap, path gridRoadPath, pavementChance float64, rng *rand.Rand) {
 ^
-internal\game\gridroads.go:242:41: `centre` is a misspelling of `center` (misspell)
-	// Build a set for fast lookup of road centre tiles.
-	                                       ^
-internal\game\headless_battlefield.go:7:6: exported: exported type HeadlessBattlefield should have comment or be unexported (revive)
+internal\game\headless_battlefield.go:8:26: fieldalignment: struct with 136 pointer bytes could be 104 (govet)
 type HeadlessBattlefield struct {
-     ^
-internal\game\headless_battlefield.go:22:1: exported: exported function NewHeadlessBattlefield should have comment or be unexported (revive)
-func NewHeadlessBattlefield(mapSeed int64, battleW, battleH int) *HeadlessBattlefield {
-^
+                         ^
 internal\game\inspector.go:69:1: cognitive complexity 22 of func `(*Game).handleInspectorClick` is high (> 20) (gocognit)
 func (g *Game) handleInspectorClick(mx, my int) bool {
 ^
@@ -213,15 +174,6 @@ internal\game\interiors.go:1161:4: redefines-builtin-id: redefinition of the bui
 internal\game\interiors.go:1165:7: redefines-builtin-id: redefinition of the built-in function clear (revive)
 						clear = false
 						^
-internal\game\interiors_test.go:55:36: unused-parameter: parameter 't' seems to be unused, consider removing or renaming it as _ (revive)
-func TestFurnishRoom_SmallRoomSafe(t *testing.T) {
-                                   ^
-internal\game\interiors_test.go:72:48: `centre` is a misspelling of `center` (misspell)
-	// Check that a door object was placed at the centre of the gap.
-	                                              ^
-internal\game\interiors_test.go:94:35: `centre` is a misspelling of `center` (misspell)
-		// Sample the floor type at the centre of the footprint.
-		                                ^
 internal\game\invariant_test.go:16:1: directive `//nolint:unused // reserved for future invariant tests` is unused for linter "unused" (nolintlint)
 //nolint:unused // reserved for future invariant tests
 ^
@@ -288,9 +240,6 @@ internal\game\laboratory_visual.go:223:4: ifElseChain: rewrite if-else to switch
 internal\game\los.go:109:1: paramTypeCombine: func(ax, ay, bx, by float64, buildings []rect, windows []rect) (bool, bool, float64) could be replaced with func(ax, ay, bx, by float64, buildings, windows []rect) (bool, bool, float64) (gocritic)
 func HasLineOfSightThroughWindow(ax, ay, bx, by float64, buildings []rect, windows []rect) (bool, bool, float64) {
 ^
-internal\game\los_test.go:51:25: unused-parameter: parameter 't' seems to be unused, consider removing or renaming it as _ (revive)
-func TestLOS_ZeroLength(t *testing.T) {
-                        ^
 internal\game\lots.go:12:2: exported: exported const LotTypeResidential should have comment (or a comment on this block) or be unexported (revive)
 	LotTypeResidential    LotType = iota // Single/multi-family housing
 	^
@@ -363,180 +312,46 @@ internal\game\medical_execution.go:86:6: redefines-builtin-id: redefinition of t
 internal\game\medical_execution.go:88:7: redefines-builtin-id: redefinition of the built-in function len (revive)
 						len = 1
 						^
-internal\game\navmesh.go:11:14: fieldalignment: struct with 24 pointer bytes could be 8 (govet)
-type NavGrid struct {
-             ^
-internal\game\navmesh.go:93:15: fieldalignment: struct with 40 pointer bytes could be 8 (govet)
-type pathNode struct {
-              ^
-internal\game\navmesh.go:105:48: Error return value is not checked (errcheck)
-func (ol *openList) Push(x interface{}) { n := x.(*pathNode); n.index = len(*ol); *ol = append(*ol, n) }
-                                               ^
-internal\game\navmesh.go:121:1: cognitive complexity 33 of func `(*NavGrid).FindPath` is high (> 20) (gocognit)
-func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 {
+internal\game\navmesh.go:102:1: File is not properly formatted (gofmt)
+func (ol openList) Len() int            { return len(ol) }
 ^
-internal\game\navmesh.go:145:10: Error return value is not checked (errcheck)
-		cur := heap.Pop(ol).(*pathNode)
-		       ^
-internal\game\navmesh_test.go:110:43: unused-parameter: parameter 't' seems to be unused, consider removing or renaming it as _ (revive)
-func TestNavGrid_FindPath_StartEqualsGoal(t *testing.T) {
-                                          ^
-internal\game\organic_roads.go:12:2: exported: exported const RoadTypeHighway should have comment (or a comment on this block) or be unexported (revive)
-	RoadTypeHighway    RoadType = iota // Major highway (6-8 lanes)
-	^
-internal\game\organic_roads.go:23:21: fieldalignment: struct of size 56 could be 48 (govet)
-type RoadProperties struct {
-                    ^
-internal\game\organic_roads.go:122:18: fieldalignment: struct of size 80 could be 72 (govet)
-type OrganicRoad struct {
-                 ^
-internal\game\organic_roads.go:265:28: unused-parameter: parameter 'existingRoads' seems to be unused, consider removing or renaming it as _ (revive)
-func generateTertiaryRoads(existingRoads []OrganicRoad, mapW, mapH float64, rng *rand.Rand) []OrganicRoad {
-                           ^
-internal\game\organic_roads.go:324:3: appendCombine: can combine chain of 2 appends into one (gocritic)
-		points = append(points, [2]float64{start.X, start.Y})
-		^
-internal\game\organic_roads.go:378:19: fieldalignment: struct with 32 pointer bytes could be 8 (govet)
-type Intersection struct {
-                  ^
-internal\game\organic_roads.go:389:2: exported: exported const IntersectionTJunction should have comment (or a comment on this block) or be unexported (revive)
-	IntersectionTJunction  IntersectionType = iota // T-shaped intersection
-	^
-internal\game\organic_roads.go:396:6: func `generateIntersections` is unused (unused)
-func generateIntersections(roads []OrganicRoad, rng *rand.Rand) []Intersection {
-     ^
-internal\game\organic_roads.go:413:6: func `findRoadIntersection` is unused (unused)
-func findRoadIntersection(road1, road2 OrganicRoad, idx1, idx2 int, rng *rand.Rand) Intersection {
-     ^
-internal\game\organic_roads.go:451:6: func `determineIntersectionType` is unused (unused)
-func determineIntersectionType(road1, road2 OrganicRoad, rng *rand.Rand) IntersectionType {
-     ^
-internal\game\organic_roads.go:455:2: ifElseChain: rewrite if-else to switch statement (gocritic)
-	if totalPriority >= 160 { // Two major roads
-	^
-internal\game\organic_roads.go:465:9: indent-error-flow: if block ends with a return statement, so drop this else and outdent its block (revive)
-	} else {
-		// Minor roads - simple intersections
-		if rng.Float64() < 0.7 {
-			return IntersectionTJunction
-		}
-		return IntersectionYJunction
-	}
-internal\game\organic_roads.go:475:6: func `getIntersectionRadius` is unused (unused)
-func getIntersectionRadius(intersectionType IntersectionType, road1, road2 OrganicRoad) float64 {
-     ^
-internal\game\organic_roads.go:493:1: cognitive complexity 35 of func `stampIntersection` is high (> 20) (gocognit)
-func stampIntersection(tm *TileMap, intersection Intersection, rng *rand.Rand) {
+internal\game\navmesh.go:128:1: cyclomatic complexity 19 of func `(*NavGrid).FindPath` is high (> 15) (gocyclo)
+func (ng *NavGrid) FindPath(sx, sy, gx, gy float64) [][2]float64 { //nolint:gocognit
 ^
-internal\game\organic_roads.go:509:6: ifElseChain: rewrite if-else to switch statement (gocritic)
-					if dist <= float64(radius)*0.4 {
-					^
-internal\game\organic_roads.go:553:1: cognitive complexity 32 of func `stampOrganicRoad` is high (> 20) (gocognit)
-func stampOrganicRoad(tm *TileMap, road OrganicRoad, rng *rand.Rand) {
+internal\game\organic_roads.go:510:1: cyclomatic complexity 16 of func `stampIntersection` is high (> 15) (gocyclo)
+func stampIntersection(tm *TileMap, intersection Intersection, rng *rand.Rand) { //nolint:gocognit
 ^
-internal\game\outcome.go:3:6: exported: exported type BattleOutcome should have comment or be unexported (revive)
-type BattleOutcome int
-     ^
-internal\game\outcome.go:6:2: exported: exported const OutcomeInconclusive should have comment (or a comment on this block) or be unexported (revive)
-	OutcomeInconclusive BattleOutcome = iota
-	^
-internal\game\outcome.go:27:6: exported: exported type BattleOutcomeReason should have comment or be unexported (revive)
-type BattleOutcomeReason struct {
-     ^
-internal\game\outcome.go:42:1: cognitive complexity 58 of func `DetermineBattleOutcome` is high (> 20) (gocognit)
-func DetermineBattleOutcome(redSoldiers, blueSoldiers []*Soldier, redSquads, blueSquads []*Squad) BattleOutcomeReason {
+internal\game\organic_roads.go:572:54: unused-parameter: parameter 'rng' seems to be unused, consider removing or renaming it as _ (revive)
+func stampOrganicRoad(tm *TileMap, road OrganicRoad, rng *rand.Rand) { //nolint:gocognit
+                                                     ^
+internal\game\outcome.go:48:1: cyclomatic complexity 45 of func `DetermineBattleOutcome` is high (> 15) (gocyclo)
+func DetermineBattleOutcome(redSoldiers, blueSoldiers []*Soldier, redSquads, blueSquads []*Squad) BattleOutcomeReason { //nolint:gocognit
 ^
-internal\game\performance.go:23:18: fieldalignment: struct of size 368 could be 360 (govet)
-type PerfTracker struct {
-                 ^
-internal\game\performance.go:87:1: Sentence should start with a capital letter (godot)
-// NewPerfTracker creates a tracker seeded from the soldier's initial state.
+internal\game\performance.go:102:1: cyclomatic complexity 57 of func `(*PerfTracker).Update` is high (> 15) (gocyclo)
+func (pt *PerfTracker) Update(s *Soldier) { //nolint:gocognit
 ^
-internal\game\performance.go:102:1: cognitive complexity 42 of func `(*PerfTracker).Update` is high (> 20) (gocognit)
-func (pt *PerfTracker) Update(s *Soldier) {
+internal\game\performance.go:316:1: cyclomatic complexity 23 of func `computeGrade` is high (> 15) (gocyclo)
+func computeGrade(pt *PerfTracker) SoldierGrade { //nolint:gocognit
 ^
-internal\game\performance.go:270:19: fieldalignment: struct with 144 pointer bytes could be 64 (govet)
-type SoldierGrade struct {
-                  ^
-internal\game\performance.go:316:1: cognitive complexity 27 of func `computeGrade` is high (> 20) (gocognit)
-func computeGrade(pt *PerfTracker) SoldierGrade {
+internal\game\performance.go:459:1: cyclomatic complexity 43 of func `perfDetectTraits` is high (> 15) (gocyclo)
+func perfDetectTraits(pt *PerfTracker) (good, bad []string) { //nolint:gocognit
 ^
-internal\game\performance.go:350:21: `behaviour` is a misspelling of `behavior` (misspell)
-	// --- Under fire: behaviour while receiving rounds ---
-	                   ^
-internal\game\performance.go:459:1: cognitive complexity 47 of func `perfDetectTraits` is high (> 20) (gocognit)
-func perfDetectTraits(pt *PerfTracker) (good, bad []string) {
-^
-internal\game\performance.go:593:1: cognitive complexity 26 of func `FormatGrades` is high (> 20) (gocognit)
-func FormatGrades(grades []SoldierGrade) string {
-^
-internal\game\performance.go:654:17: fieldalignment: struct with 40 pointer bytes could be 16 (govet)
-	type teamStats struct {
-	               ^
 internal\game\radio.go:104:19: fieldalignment: struct of size 144 could be 136 (govet)
 type RadioMessage struct {
                   ^
-internal\game\radio.go:126:15: fieldalignment: struct with 24 pointer bytes could be 8 (govet)
-type radioNet struct {
-              ^
-internal\game\radio.go:145:20: fieldalignment: struct with 64 pointer bytes could be 56 (govet)
-type radioChatLine struct {
-                   ^
-internal\game\radio.go:154:24: fieldalignment: struct with 248 pointer bytes could be 232 (govet)
-type radioTransmission struct {
-                       ^
-internal\game\reporter.go:33:20: fieldalignment: struct with 16 pointer bytes could be 8 (govet)
-type SoldierReport struct {
-                   ^
-internal\game\reporter.go:56:16: fieldalignment: struct with 264 pointer bytes could be 48 (govet)
-type SimReport struct {
-               ^
-internal\game\reporter.go:124:1: cognitive complexity 25 of func `(*SimReporter).Collect` is high (> 20) (gocognit)
-func (r *SimReporter) Collect(tick int, soldiers []*Soldier, opfor []*Soldier, squads []*Squad) {
+internal\game\reporter.go:124:1: paramTypeCombine: func(tick int, soldiers []*Soldier, opfor []*Soldier, squads []*Squad) could be replaced with func(tick int, soldiers, opfor []*Soldier, squads []*Squad) (gocritic)
+func (r *SimReporter) Collect(tick int, soldiers []*Soldier, opfor []*Soldier, squads []*Squad) { //nolint:gocognit
 ^
-internal\game\reporter.go:213:1: cognitive complexity 46 of func `(*SimReporter).tallySoldier` is high (> 20) (gocognit)
-func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) {
+internal\game\reporter.go:213:1: cyclomatic complexity 32 of func `(*SimReporter).tallySoldier` is high (> 15) (gocyclo)
+func (r *SimReporter) tallySoldier(s *Soldier, report *SimReport, team Team) { //nolint:gocognit
 ^
-internal\game\reporter.go:469:19: fieldalignment: struct with 40 pointer bytes could be 16 (govet)
-type WindowReport struct {
-                  ^
-internal\game\sim_log.go:157:1: cyclomatic complexity 18 of func `(*SimLog).Summary` is high (> 15) (gocyclo)
-func (sl *SimLog) Summary(tick int, soldiers []*Soldier, squads []*Squad) string { //nolint:gocognit
+internal\game\squad.go:1732:1: cyclomatic complexity 47 of func `(*Squad).evaluateBuildings` is high (> 15) (gocyclo)
+func (sq *Squad) evaluateBuildings() { //nolint:gocognit
 ^
-internal\game\soldier.go:408:1: cyclomatic complexity 41 of func `(*Soldier).updatePsychCrisis` is high (> 15) (gocyclo)
-func (s *Soldier) updatePsychCrisis(tick int) { //nolint:gocognit
+internal\game\squad.go:1997:1: cyclomatic complexity 19 of func `(*Squad).preferredOrderPositions` is high (> 15) (gocyclo)
+func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY float64) [][2]float64 { //nolint:gocognit
 ^
-internal\game\squad.go:9:12: fieldalignment: struct of size 792 could be 760 (govet)
-type Squad struct {
-           ^
-internal\game\squad.go:437:1: paramTypeCombine: func(tick int, hasContact bool, anyVisibleThreats int, closestDist, spread float64, contactX, contactY float64, terminalStalledCount, aliveCount int) bool could be replaced with func(tick int, hasContact bool, anyVisibleThreats int, closestDist, spread, contactX, contactY float64, terminalStalledCount, aliveCount int) bool (gocritic)
-func (sq *Squad) updatePhaseWithGuards(tick int, hasContact bool, anyVisibleThreats int, closestDist, spread float64, contactX, contactY float64, terminalStalledCount, aliveCount int) bool { //nolint:gocognit,gocyclo
-^
-internal\game\squad.go:1413:3: ifElseChain: rewrite if-else to switch statement (gocritic)
-		if m == sq.Leader {
-		^
-internal\game\squad.go:1731:1: cognitive complexity 68 of func `(*Squad).evaluateBuildings` is high (> 20) (gocognit)
-func (sq *Squad) evaluateBuildings() {
-^
-internal\game\squad.go:1768:2: ifElseChain: rewrite if-else to switch statement (gocritic)
-	if b.VisibleThreatCount() > 0 {
-	^
-internal\game\squad.go:1995:1: cognitive complexity 21 of func `(*Squad).preferredOrderPositions` is high (> 20) (gocognit)
-func (sq *Squad) preferredOrderPositions(hasContact bool, contactX, contactY float64) [][2]float64 {
-^
-internal\game\squad.go:2162:1: cognitive complexity 28 of func `(*Squad).UpdateFormation` is high (> 20) (gocognit)
-func (sq *Squad) UpdateFormation() {
-^
-internal\game\squad.go:2257:1: cognitive complexity 23 of func `adjustFormationTarget` is high (> 20) (gocognit)
-func adjustFormationTarget(ng *NavGrid, desiredX, desiredY float64, leader *Soldier, members []*Soldier, assigned map[int][2]float64) (float64, float64) {
-^
-internal\game\test_harness.go:27:14: fieldalignment: struct with 160 pointer bytes could be 144 (govet)
-type TestSim struct {
-             ^
-internal\game\test_harness.go:314:1: cyclomatic complexity 38 of func `(*TestSim).runOneTick` is high (> 15) (gocyclo)
-func (ts *TestSim) runOneTick(reds, blues []*Soldier) { //nolint:gocognit
-^
-internal\game\trait_testing.go:238:1: cyclomatic complexity 19 of func `CalculateResults` is high (> 15) (gocyclo)
-func CalculateResults(genomeName string, outcomes []TraitTestResult) TestGenomeResults { //nolint:gocognit
+internal\game\squad.go:2164:1: cyclomatic complexity 27 of func `(*Squad).UpdateFormation` is high (> 15) (gocyclo)
+func (sq *Squad) UpdateFormation() { //nolint:gocognit
 ^
 error: Recipe `lint` failed on line 25 with exit code 1
