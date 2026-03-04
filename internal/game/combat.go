@@ -17,8 +17,8 @@ const (
 	accurateFireRange   = 450.0              // px, reliable engagement envelope (first half of rifle range)
 	maxFireRange        = 900.0              // px, max rifle range (last half is pot-shot territory)
 	potShotMaxFireRange = maxFireRange * 2.0 // px, extended pot-shot engagement envelope
-	tracerLifetime      = 10                 // ticks a tracer persists
-	tracerSpeed         = 3.0                // bullet travels full distance in this many ticks (faster = more visible)
+	tracerLifetime      = 12                 // ticks a tracer persists
+	tracerSpeed         = 2.8                // bullet travels full distance in this many ticks (faster = more visible)
 	nearMissStress      = 0.08               // fear added to target on miss
 	hitStress           = 0.20               // fear added to target on hit
 	witnessStress       = 0.03               // fear added to nearby friendlies seeing a hit
@@ -155,28 +155,31 @@ type MuzzleFlash struct {
 // DrawTracer renders a bullet tracer with smooth sub-tick interpolation,
 // thin anti-aliased lines, and soft gradient halos.
 func (t *Tracer) DrawTracer(screen *ebiten.Image, offX, offY int) {
-	// Use fractional age for smooth interpolation between ticks.
-	progress := t.fractionalAge / float64(tracerLifetime)
-	if progress > 1.0 {
+	if t.fractionalAge >= float64(tracerLifetime) {
 		return
 	}
 
 	ox, oy := float32(offX), float32(offY)
 
-	// Bullet travel: moves quickly to target, then lingers briefly.
-	travelProgress := math.Min(1.0, t.fractionalAge/tracerSpeed)
+	// Bullet travel uses eased progression to avoid visible stepping between ticks.
+	travelProgress := clamp01(t.fractionalAge / tracerSpeed)
+	travelProgress = travelProgress * travelProgress * (3.0 - 2.0*travelProgress)
 	fadeProgress := math.Max(0.0, (t.fractionalAge-tracerSpeed)/(float64(tracerLifetime)-tracerSpeed))
 	globalFade := float32(1.0 - fadeProgress)
 
 	// Bullet position along flight path.
 	headT := travelProgress
-	tailLen := 0.15 // short tail for fast-moving bullet
+	tailLen := 0.22 // Slightly longer tail improves direction readability.
 	tailT := math.Max(0.0, headT-tailLen)
 
 	hx := float32(t.fromX + (t.toX-t.fromX)*headT)
 	hy := float32(t.fromY + (t.toY-t.fromY)*headT)
 	tx := float32(t.fromX + (t.toX-t.fromX)*tailT)
 	ty := float32(t.fromY + (t.toY-t.fromY)*tailT)
+	fx := float32(t.fromX)
+	fy := float32(t.fromY)
+	ex := float32(t.toX)
+	ey := float32(t.toY)
 
 	// Team colors.
 	var coreR, coreG, coreB uint8
@@ -188,6 +191,11 @@ func (t *Tracer) DrawTracer(screen *ebiten.Image, offX, offY int) {
 		coreR, coreG, coreB = 100, 220, 255
 		glowR, glowG, glowB = 80, 200, 255
 	}
+	pathAlpha := uint8(float32(34) * globalFade)
+
+	// Faint full path guide helps read origin-to-endpoint instantly.
+	vector.StrokeLine(screen, ox+fx, oy+fy, ox+ex, oy+ey, 0.7,
+		color.RGBA{R: glowR, G: glowG, B: glowB, A: pathAlpha}, false)
 
 	// Soft gradient halo - multiple layers with very low alpha for smooth falloff.
 	// Layer 1: Outermost soft glow (widest, most transparent).
@@ -211,6 +219,22 @@ func (t *Tracer) DrawTracer(screen *ebiten.Image, offX, offY int) {
 	// Bright core.
 	vector.FillCircle(screen, ox+hx, oy+hy, 1.0,
 		color.RGBA{R: 255, G: 255, B: 240, A: uint8(float32(240) * globalFade)}, false)
+
+	// Origin cue makes it easier to see where the shot came from.
+	vector.FillCircle(screen, ox+fx, oy+fy, 1.8,
+		color.RGBA{R: coreR, G: coreG, B: coreB, A: uint8(float32(130) * globalFade)}, false)
+	vector.FillCircle(screen, ox+fx, oy+fy, 0.9,
+		color.RGBA{R: 255, G: 255, B: 230, A: uint8(float32(180) * globalFade)}, false)
+
+	// Endpoint cue makes impact point easier to identify while the tracer is active.
+	endA := uint8(float32(120) * globalFade)
+	if t.hit {
+		endA = uint8(float32(180) * globalFade)
+	}
+	vector.StrokeLine(screen, ox+ex-2.4, oy+ey, ox+ex+2.4, oy+ey, 0.9,
+		color.RGBA{R: 255, G: 245, B: 210, A: endA}, false)
+	vector.StrokeLine(screen, ox+ex, oy+ey-2.4, ox+ex, oy+ey+2.4, 0.9,
+		color.RGBA{R: 255, G: 245, B: 210, A: endA}, false)
 
 	// Impact flash - simple and visible.
 	if t.hit && t.age <= 3 {
