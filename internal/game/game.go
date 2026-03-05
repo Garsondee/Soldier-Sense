@@ -98,10 +98,6 @@ func (g *Game) renderTerrainLayer(screen *ebiten.Image) { //nolint:gocognit,gocy
 			color.RGBA{R: clampToByte(20 - d/2), G: clampToByte(30 - d), B: clampToByte(22 - d/2), A: 18}, false)
 	}
 
-	// Simple global ambient light gradient keeps the scene from feeling flat.
-	vector.FillRect(screen, ox, oy, gw, gh*0.38, color.RGBA{R: 205, G: 195, B: 150, A: 8}, false)
-	vector.FillRect(screen, ox, oy+gh*0.62, gw, gh*0.38, color.RGBA{R: 10, G: 16, B: 18, A: 10}, false)
-
 	gridFine := 16
 	gridMid := gridFine * 4
 	gridCoarse := gridMid * 4
